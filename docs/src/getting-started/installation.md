@@ -71,8 +71,56 @@ docker compose up --build
 This starts:
 - **Praxis** (service + web) on port 8080
 - **RabbitMQ** on ports 5672 (AMQP) and 15672 (management UI)
+- **MCP server** on port 8585 (when enabled in Settings > MCP Server)
 
 Open **http://localhost:8080** and you're in.
+
+To run without the web UI (headless mode for CLI-only usage):
+
+```bash
+PRAXIS_HEADLESS=1 docker compose up --build
+```
+
+### Getting the CLI from Docker
+
+The CLI binary is built into the Docker image and copied to the data volume on startup. Extract it with:
+
+```bash
+docker cp praxis-praxis-1:/app/praxis_cli ./praxis_cli
+chmod +x ./praxis_cli
+./praxis_cli
+```
+
+To add a macOS node binary to Docker downloads, provide it explicitly (optional):
+
+```bash
+# Build macOS node binary on macOS
+cargo build --release -p praxis_node
+
+# Put it in a local directory
+mkdir -p ~/.praxis/bin/nodes
+cp target/release/praxis_node ~/.praxis/bin/nodes/praxis_node_macos_arm64
+```
+
+Then mount it and enable multi-directory lookup:
+
+```yaml
+# docker-compose.override.yml
+services:
+  praxis:
+    environment:
+      PRAXIS_NODES_DIRS: /app/nodes,/app/nodes-host
+    volumes:
+      - ~/.praxis/bin/nodes:/app/nodes-host:ro
+
+  praxis-postgres:
+    environment:
+      PRAXIS_NODES_DIRS: /app/nodes,/app/nodes-host
+    volumes:
+      - ~/.praxis/bin/nodes:/app/nodes-host:ro
+```
+
+This keeps Linux/Windows defaults unchanged while adding macOS as an opt-in download.
 
 The RabbitMQ management UI at **http://localhost:15672** uses credentials `praxis/praxis`.
 
@@ -156,11 +204,15 @@ Each tagged release publishes node binaries for Linux and Windows:
 - [Latest Release](https://github.com/originsec/praxis/releases/latest)
 - `praxis_node-linux-x86_64` - Linux binary
 - `praxis_node-windows-x86_64.exe` - Windows binary
+- `praxis_node-macos-arm64` - macOS (Apple Silicon) binary
 
 ### Building Yourself
 
 ```bash
 # Linux (native)
+cargo build --release -p praxis_node
+
+# macOS (Apple Silicon, native)
 cargo build --release -p praxis_node
 
 # Windows (cross-compile from Linux)

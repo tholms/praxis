@@ -9,8 +9,8 @@ use common::{
     client_queue_name, mcp::McpClient, publish_json, ChainDefinitionInfo, ChainExecutionUpdate,
     ClientBroadcastMessage, ClientDirectMessage, ClientRegistration, ClientSignalMessage,
     CommandRequest, CommandResponse, InterceptedTrafficEntry, NodeCommand, NodeCommandResult,
-    OperationDefinitionInfo, PraxisServer, SemanticOpUpdate, SystemState, TrafficSearchFilters,
-    CLIENT_BROADCAST_EXCHANGE, CLIENT_SIGNAL_QUEUE,
+    OperationDefinitionInfo, PraxisServer, ReconResult, SemanticOpUpdate, SystemState,
+    TrafficSearchFilters, CLIENT_BROADCAST_EXCHANGE, CLIENT_SIGNAL_QUEUE,
 };
 use futures_util::StreamExt;
 use lapin::{
@@ -24,7 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
 use uuid::Uuid;
 
 //
@@ -45,6 +44,7 @@ struct ClientState {
     pending_commands: HashMap<String, Option<NodeCommandResult>>,
     pending_semantic_ops: HashMap<String, Option<String>>,
     pending_traffic_search: Option<(Vec<InterceptedTrafficEntry>, usize)>,
+    pending_recon_get: Option<Option<ReconResult>>,
     operations: Vec<SemanticOpUpdate>,
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
@@ -160,7 +160,7 @@ impl ServiceMcpClient {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to create direct consumer: {}", e);
+                    common::log_error!("Failed to create direct consumer: {}", e);
                     return;
                 }
             };
@@ -177,7 +177,7 @@ impl ServiceMcpClient {
             {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to create broadcast consumer: {}", e);
+                    common::log_error!("Failed to create broadcast consumer: {}", e);
                     return;
                 }
             };
@@ -253,6 +253,9 @@ impl ServiceMcpClient {
             }
             ClientDirectMessage::ChainExecutionListResponse { executions } => {
                 state.chain_executions = executions;
+            }
+            ClientDirectMessage::ReconGetResponse { recon_result, .. } => {
+                state.pending_recon_get = Some(recon_result);
             }
             _ => {}
         }
@@ -522,6 +525,37 @@ impl McpClient for ServiceMcpClient {
     async fn get_chain_executions(&self) -> Vec<ChainExecutionUpdate> {
         self.state.lock().await.chain_executions.clone()
     }
+
+    async fn get_stored_recon(
+        &self,
+        node_id: &str,
+        agent_short_name: &str,
+    ) -> Result<Option<ReconResult>> {
+        {
+            let mut state = self.state.lock().await;
+            state.pending_recon_get = None;
+        }
+
+        let message = ClientSignalMessage::ReconGet {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+            agent_short_name: agent_short_name.to_string(),
+        };
+        self.publish_signal(message).await?;
+
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 50;
+
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(result) = state.pending_recon_get.take() {
+                return Ok(result);
+            }
+        }
+
+        Err(anyhow!("Timeout waiting for stored recon result"))
+    }
 }
 
 //
@@ -547,7 +581,7 @@ impl McpServerManager {
         self.stop().await;
 
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-        info!("Starting MCP SSE server on {}", bind_addr);
+        common::log_info!("Starting MCP SSE server on {}", bind_addr);
 
         let sse_server = rmcp::transport::sse_server::SseServer::serve(bind_addr).await?;
 
@@ -562,7 +596,7 @@ impl McpServerManager {
             match client {
                 Ok(c) => PraxisServer::with_client(c),
                 Err(e) => {
-                    error!("Failed to create MCP client: {}", e);
+                    common::log_error!("Failed to create MCP client: {}", e);
                     //
                     // Return a server that will fail - there's no good fallback.
                     //
@@ -573,14 +607,14 @@ impl McpServerManager {
 
         *self.cancellation_token.write().await = Some(ct);
 
-        info!("MCP SSE server started on port {}", port);
+        common::log_info!("MCP SSE server started on port {}", port);
         Ok(())
     }
 
     pub async fn stop(&self) {
         let mut guard = self.cancellation_token.write().await;
         if let Some(ct) = guard.take() {
-            info!("Stopping MCP SSE server");
+            common::log_info!("Stopping MCP SSE server");
             ct.cancel();
         }
     }

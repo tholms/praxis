@@ -1,7 +1,9 @@
 mod client;
 mod commands;
+mod interactive;
 mod mcp;
 mod output;
+mod spinner;
 mod state;
 
 use anyhow::Result;
@@ -9,9 +11,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use commands::{
     agent::AgentCommand,
-    chain::ChainCommand,
     node::NodeCommand,
     op::OpCommand,
+    recon::ReconCommand,
     session::SessionCommand,
     traffic::TrafficCommand,
 };
@@ -21,7 +23,6 @@ use output::OutputFormat;
 #[command(name = "praxis_cli")]
 #[command(about = "Praxis CLI - command-line interface for the Praxis C2 framework")]
 #[command(version)]
-#[command(arg_required_else_help = true)]
 struct Cli {
     /// RabbitMQ URL
     #[arg(short = 'r', long = "rabbitmq", env = "PRAXIS_RABBITMQ_URL")]
@@ -35,6 +36,10 @@ struct Cli {
     /// Command timeout in seconds
     #[arg(short = 't', long = "timeout", default_value = "300")]
     timeout: u64,
+
+    /// Run a single command and exit
+    #[arg(short = 'C', long = "command")]
+    command_str: Option<String>,
 
     /// Clear local state (client ID)
     #[arg(long = "clear")]
@@ -57,7 +62,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-enum Commands {
+pub(crate) enum Commands {
     /// Node management commands
     Node {
         #[command(subcommand)]
@@ -68,6 +73,12 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+
+    /// Reconnaissance operations
+    Recon {
+        #[command(subcommand)]
+        command: ReconCommand,
     },
 
     /// Session management commands
@@ -82,17 +93,36 @@ enum Commands {
         command: TrafficCommand,
     },
 
-    /// Semantic operation commands
+    /// Operation and chain workflow commands
     Op {
         #[command(subcommand)]
         command: OpCommand,
     },
 
-    /// Chain workflow commands
-    Chain {
-        #[command(subcommand)]
-        command: ChainCommand,
-    },
+    /// Interactive LLM orchestrator session
+    Orchestrate,
+}
+
+impl Commands {
+    pub(crate) async fn execute(
+        self,
+        client: &mut client::CliClient,
+        output: &OutputFormat,
+    ) -> Result<()> {
+        match self {
+            Commands::Node { command } => commands::node::execute(client, command, output).await,
+            Commands::Agent { command } => commands::agent::execute(client, command, output).await,
+            Commands::Recon { command } => commands::recon::execute(client, command, output).await,
+            Commands::Session { command } => {
+                commands::session::execute(client, command, output).await
+            }
+            Commands::Traffic { command } => {
+                commands::traffic::execute(client, command, output).await
+            }
+            Commands::Op { command } => commands::op::execute(client, command, output).await,
+            Commands::Orchestrate => commands::orchestrate::execute(client).await,
+        }
+    }
 }
 
 fn print_fullhelp() {
@@ -103,19 +133,13 @@ fn print_fullhelp() {
     println!("================================================================================");
     println!();
 
-    //
-    // Print main help.
-    //
     println!("MAIN COMMAND");
     println!("------------");
     cmd.print_help().ok();
     println!();
     println!();
 
-    //
-    // Print help for each subcommand.
-    //
-    let subcommands = ["node", "agent", "session", "traffic", "op", "chain"];
+    let subcommands = ["node", "agent", "recon", "session", "traffic", "op", "orchestrate"];
 
     for sub_name in subcommands {
         println!("================================================================================");
@@ -128,9 +152,6 @@ fn print_fullhelp() {
             println!();
             println!();
 
-            //
-            // Print help for nested subcommands.
-            //
             let nested: Vec<String> = sub
                 .get_subcommands()
                 .map(|s| s.get_name().to_string())
@@ -194,26 +215,17 @@ fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    //
-    // Handle --fullhelp early.
-    //
     if cli.fullhelp {
         print_fullhelp();
         return Ok(());
     }
 
-    //
-    // Handle --clear early.
-    //
     if cli.clear {
         state::CliState::clear()?;
         output::print_success("Local state cleared");
         return Ok(());
     }
 
-    //
-    // Handle --status early.
-    //
     if cli.status {
         let mut cli_state = state::CliState::load()?;
         let client_id = cli_state.get_or_create_client_id()?;
@@ -243,41 +255,46 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
-    //
-    // Handle --mcp early.
-    //
     if cli.mcp {
         return mcp::run_server(&cli.rabbitmq_url, cli.timeout).await;
     }
 
     //
-    // Require a command if not --fullhelp, --clear, --status, or --mcp.
+    // -C "command string": parse, execute, exit.
     //
-    let command = match cli.command {
-        Some(cmd) => cmd,
-        None => {
-            Cli::command().print_help().ok();
-            return Ok(());
-        }
-    };
+    if let Some(cmd_str) = cli.command_str {
+        let tokens = interactive::shell_split(&cmd_str);
+        let repl_cli = interactive::ReplCli::try_parse_from(&tokens)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let mut cli_state = state::CliState::load()?;
+        let client_id = cli_state.get_or_create_client_id()?;
+        let mut client =
+            client::CliClient::connect(&cli.rabbitmq_url, cli.timeout, client_id).await?;
+
+        let result = repl_cli.command.execute(&mut client, &cli.output).await;
+
+        client.disconnect().await;
+        return result;
+    }
 
     //
-    // Load or create persistent client ID.
+    // Explicit subcommand (backwards compatibility).
     //
-    let mut cli_state = state::CliState::load()?;
-    let client_id = cli_state.get_or_create_client_id()?;
+    if let Some(command) = cli.command {
+        let mut cli_state = state::CliState::load()?;
+        let client_id = cli_state.get_or_create_client_id()?;
+        let mut client =
+            client::CliClient::connect(&cli.rabbitmq_url, cli.timeout, client_id).await?;
 
-    let mut client = client::CliClient::connect(&cli.rabbitmq_url, cli.timeout, client_id).await?;
+        let result = command.execute(&mut client, &cli.output).await;
 
-    let result = match command {
-        Commands::Node { command } => commands::node::execute(&mut client, command, &cli.output).await,
-        Commands::Agent { command } => commands::agent::execute(&mut client, command, &cli.output).await,
-        Commands::Session { command } => commands::session::execute(&mut client, command, &cli.output).await,
-        Commands::Traffic { command } => commands::traffic::execute(&mut client, command, &cli.output).await,
-        Commands::Op { command } => commands::op::execute(&mut client, command, &cli.output).await,
-        Commands::Chain { command } => commands::chain::execute(&mut client, command, &cli.output).await,
-    };
+        client.disconnect().await;
+        return result;
+    }
 
-    client.disconnect().await;
-    result
+    //
+    // No command, no flags: enter interactive REPL.
+    //
+    interactive::run_repl(&cli.rabbitmq_url, cli.timeout, cli.output).await
 }

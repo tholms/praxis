@@ -33,8 +33,8 @@ fn setup_shutdown_signal() -> CancellationToken {
             let mut sigint =
                 signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
             tokio::select! {
-                _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
-                _ = sigint.recv() => tracing::info!("Received SIGINT"),
+                _ = sigterm.recv() => common::log_info!("Received SIGTERM"),
+                _ = sigint.recv() => common::log_info!("Received SIGINT"),
             }
         }
         #[cfg(windows)]
@@ -42,7 +42,7 @@ fn setup_shutdown_signal() -> CancellationToken {
             tokio::signal::ctrl_c()
                 .await
                 .expect("Failed to register Ctrl+C handler");
-            tracing::info!("Received Ctrl+C");
+            common::log_info!("Received Ctrl+C");
         }
         agent_connectors::lua::cdp::request_shutdown();
         token_clone.cancel();
@@ -69,9 +69,6 @@ async fn main() {
         .with_env_filter(filter)
         .init();
 
-    //
-    // Install the ring crypto provider for rustls.
-    //
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
@@ -122,15 +119,19 @@ async fn main() {
 
         let selected_agent: Arc<Mutex<Option<Arc<dyn Agent>>>> = Arc::new(Mutex::new(None));
 
-        //
-        // Register with the service via RabbitMQ.
-        //
         let result = match register_with_service(node_id.clone(), shutdown_token.clone()).await {
             Ok(Some(result)) => {
                 common::log_info!(
                     "Successfully registered with service. Node ID: {}",
                     result.node_id
                 );
+
+                common::logging::set_event_log_enabled(result.event_logging_enabled);
+                common::log_info!(
+                    "Event logging {} from registration ack",
+                    if result.event_logging_enabled { "enabled" } else { "disabled" }
+                );
+
                 result
             }
             Ok(None) => {
@@ -155,9 +156,6 @@ async fn main() {
             }
         };
 
-        //
-        // Run the main event loop - listen to queues.
-        //
         match runtime::run(
             Arc::new(result.channel),
             result.node_id,
@@ -171,9 +169,6 @@ async fn main() {
         .await
         {
             Ok(()) => {
-                //
-                // Clean shutdown (e.g., SIGTERM).
-                //
                 common::log_info!("Runtime exited cleanly");
                 break;
             }
@@ -187,9 +182,6 @@ async fn main() {
             break;
         }
 
-        //
-        // Connection lost - reconnect.
-        //
         common::log_warn!(
             "Connection lost. Reconnecting in {} seconds...",
             RECONNECT_DELAY_SECS

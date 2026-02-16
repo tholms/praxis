@@ -126,9 +126,11 @@ export type AgentCommand =
   | 'Recon'
   | 'ReconSemantic'
   | { Select: { short_name: string } }
-  | { UpdateConfigFile: { path: string; contents: string } }
-  | { GetSessionContent: { session_file: string } }
-  | { GetConfigContent: { config_path: string } };
+  | { ReadFile: { file_type: AgentFileType; path: string; line_start?: number; line_end?: number } }
+  | { WriteFile: { file_type: AgentFileType; path: string; contents: string } }
+  | { GrepFile: { file_type: AgentFileType; path: string; pattern: string } };
+
+export type AgentFileType = 'Config' | 'Session';
 
 export type SessionCommand =
   | { Create: { context: SessionContext } }
@@ -201,9 +203,14 @@ export type AgentCommandResult =
   | { ReconComplete: { result: ReconResult } }
   | { Selected: { short_name: string } }
   | { YoloSet: { enabled: boolean } }
-  | { ConfigFileUpdated: { success: boolean; error?: string } }
-  | { SessionContent: { session_file: string; content?: string; error?: string } }
-  | { ConfigContent: { config_path: string; content?: string; error?: string } };
+  | { WriteFileResult: { file_type: AgentFileType; path: string; success: boolean; error?: string } }
+  | { ReadFileResult: { file_type: AgentFileType; path: string; content?: string; line_start?: number; line_end?: number; error?: string } }
+  | { GrepFileResult: { file_type: AgentFileType; path: string; pattern: string; matches: GrepMatch[]; error?: string } };
+
+export interface GrepMatch {
+  line_number: number;
+  line_content: string;
+}
 
 export type SessionCommandResult =
   | { Created: { session_id: string } }
@@ -548,15 +555,6 @@ export interface InterceptStatus {
 //
 // Agent Discovery Types.
 //
-// Node Event Log entry.
-//
-export interface ApplicationLogEntry {
-  source: string;
-  level: string;
-  message: string;
-  target: string | null;
-  timestamp: string;
-}
 
 export interface DiscoveredLlmEndpoint {
   id: string;
@@ -625,6 +623,7 @@ export type BrowserMessage =
   | { type: 'semantic_op_cancel'; operation_id: string }
   | { type: 'semantic_op_remove'; operation_id: string }
   | { type: 'semantic_op_clear' }
+  | { type: 'application_log_clear'; node_id: string | null }
   | { type: 'semantic_op_list_request' }
   | { type: 'remove_node'; node_id: string }
   | { type: 'config_get'; keys: string[] }
@@ -669,11 +668,6 @@ export type BrowserMessage =
   | { type: 'agent_discovery_disable'; node_id: string }
   | { type: 'discovered_endpoints_request'; node_id: string | null }
   //
-  // Node event log messages.
-  //
-  | { type: 'application_log_request'; node_id: string; level_filter: string[] | null; regex_filter: string | null; limit: number; offset: number }
-  | { type: 'application_log_clear'; node_id: string | null }
-  //
   // Recon messages.
   //
   | { type: 'recon_get'; node_id: string; agent_short_name: string }
@@ -686,6 +680,10 @@ export type BrowserMessage =
   | { type: 'lua_agent_script_reset_defaults' }
   | { type: 'lua_agent_script_list' }
   | { type: 'lua_agent_script_toggle_disabled'; script_id: string; disabled: boolean }
+  //
+  // Hunting messages.
+  //
+  | { type: 'hunting_query'; query: string }
   //
   // Agent Chat messages.
   //
@@ -719,7 +717,7 @@ export type ServerMessage =
   | { type: 'op_def_added'; full_name: string }
   | { type: 'op_def_deleted'; full_name: string; success: boolean }
   | { type: 'op_def_error'; message: string }
-  | { type: 'orchestrator_started' }
+  | { type: 'orchestrator_started'; provider: string; model: string }
   | { type: 'orchestrator_content'; content: string }
   | { type: 'orchestrator_tool_executing'; name: string; input?: string }
   | { type: 'orchestrator_tool_executed'; name: string; display: string; success: boolean; result: string }
@@ -758,11 +756,6 @@ export type ServerMessage =
   | { type: 'discovered_endpoints_list'; endpoints: DiscoveredLlmEndpoint[] }
   | { type: 'agent_discovery_error'; message: string }
   //
-  // Node event log messages.
-  //
-  | { type: 'application_log_response'; node_id: string; entries: ApplicationLogEntry[]; total_count: number }
-  | { type: 'application_log_cleared'; deleted_count: number }
-  //
   // Recon messages.
   //
   | { type: 'recon_get_response'; node_id: string; agent_short_name: string; recon_result: ReconResult | null; performed_at: string | null; is_semantic: boolean | null }
@@ -775,6 +768,11 @@ export type ServerMessage =
   | { type: 'lua_agent_script_defaults_reset'; count: number }
   | { type: 'lua_agent_script_list'; scripts: LuaAgentScriptInfo[] }
   | { type: 'lua_agent_script_disabled_toggled'; script_id: string; disabled: boolean }
+  //
+  // Hunting messages.
+  //
+  | { type: 'hunting_query_response'; columns: string[]; rows: unknown[][]; total_count: number }
+  | { type: 'hunting_query_error'; message: string }
   //
   // Agent Chat messages.
   //

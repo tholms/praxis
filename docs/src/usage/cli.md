@@ -7,38 +7,140 @@ The Praxis CLI (`praxis_cli`) provides a command-line interface for interacting 
 The CLI is designed for **external agent orchestration** and **programmatic exploration** of the Praxis network. It is not intended to replace the web interface at this stage - not all features are available in the CLI.
 
 Primary use cases:
+- Interactive REPL for hands-on exploration and control
 - Scripting and automation
 - Integration with external AI agents (via MCP server mode)
 - Headless environments without GUI access
-- Quick operations from the command line
 
 ## Installation
 
-The CLI is installed automatically with the standard Praxis installation scripts:
+The CLI is installed automatically with the native installation scripts:
 
 ```bash
 # Linux/macOS
 curl -fsSL https://praxis.originhq.com/install.sh | bash
-
-# Windows (PowerShell)
-irm https://praxis.originhq.com/install.ps1 | iex
 ```
 
 The binary is installed to `~/.praxis/bin/praxis_cli`.
 
-## Getting Help
+When using Docker, the CLI binary is built into the container image and copied to the data volume on startup. You can extract it with:
 
-View basic help:
 ```bash
-praxis_cli --help
+docker cp praxis-praxis-1:/app/praxis_cli ./praxis_cli
 ```
 
-View comprehensive help for all commands:
-```bash
-praxis_cli --fullhelp
+## Interactive REPL (Default Mode)
+
+Running `praxis_cli` with no arguments launches an interactive REPL:
+
+```
+$ praxis_cli
+
+    ____                  _
+   / __ \_________ __  __(_)____
+  / /_/ / ___/ __ `/ |/_/ / ___/
+ / ____/ /  / /_/ />  </ (__  )
+/_/   /_/   \__,_/_/|_/_/____/
+
+  praxis 0.9.4 | client 953da792 | 1 node(s)
+  amqp://praxis:praxis@localhost:5672
+  Type help for commands, exit (or ctrl+d) to quit
+
+praxis [b3bf7460:claudecode *] ❯
 ```
 
-The `--fullhelp` option outputs documentation for every command and subcommand, including all available options and arguments.
+### Selection State
+
+The REPL tracks your selected node, agent, and active session. The prompt updates to reflect the current state:
+
+```
+praxis ❯                                 # nothing selected
+praxis [myhost] ❯                        # node selected (shows machine name)
+praxis [myhost:claudecode] ❯             # node + agent
+praxis [myhost:claudecode *] ❯           # node + agent + active session
+```
+
+Select a node and agent:
+
+```
+praxis ❯ node select b3bf7460
+✓ Selected node: b3bf7460 (kaplan-ws-linux)
+
+praxis [b3bf7460] ❯ agent select claudecode
+✓ Selected agent: claudecode
+
+praxis [myhost:claudecode] ❯
+```
+
+On startup, if there is exactly one active node, it is auto-selected along with any existing agent selection and session state.
+
+### Implicit Flag Injection
+
+Once a node and agent are selected, the `-n` and `-a` flags are injected automatically. You don't need to pass them for every command:
+
+```
+praxis [myhost:claudecode] ❯ session create
+✓ Session created: a1b2c3d4
+
+praxis [myhost:claudecode *] ❯ session prompt "list files"
+```
+
+This is equivalent to typing `session create -n b3bf7460` and `session prompt -n b3bf7460 "list files"`. You can always override by passing the flag explicitly.
+
+### Tab Completion
+
+The REPL provides context-aware tab completion:
+
+- **Command names**: `op<TAB>` → `op`, `node<TAB>` → `node`
+- **Node IDs**: `node select <TAB>` shows connected node IDs
+- **Agent names**: `agent select <TAB>` shows discovered agent names
+- **Operation names**: `op run <TAB>` shows available operations and chains
+- **Short IDs**: `op status <TAB>` shows tracked operation/chain IDs
+- **Project paths**: `session create <TAB>` or `-p <TAB>` shows project paths from recon
+- **Flag values**: `-n <TAB>` shows node IDs, `-a <TAB>` shows agent names
+
+The completion cache refreshes after every command.
+
+### Usage Help
+
+All commands show usage instructions when invoked with missing or incorrect arguments. Typing a command group without a subcommand shows available subcommands:
+
+```
+praxis [myhost:claudecode] ❯ session
+error: 'praxis session' requires a subcommand but one was not provided
+  [subcommands: create, prompt, close]
+
+Usage: session <COMMAND>
+
+For more information, try '--help'
+```
+
+The same usage help is available both in the REPL and in non-interactive mode (`-C` or direct subcommand).
+
+### Error Messages
+
+The REPL provides contextual error messages for runtime errors:
+
+```
+praxis ❯ session prompt "hi"
+✗ No node selected. Use 'node select <id>' first, or pass -n <id>.
+```
+
+## One-Shot Mode
+
+Use `-C` to run a single command and exit:
+
+```bash
+praxis_cli -C "node list"
+praxis_cli -C "op run recon::system_info -n abc123 -a claudecode"
+```
+
+For backwards compatibility, subcommands can also be passed directly:
+
+```bash
+praxis_cli node list
+praxis_cli op run recon::system_info --node abc123 --agent claudecode
+```
 
 ## Global Options
 
@@ -47,6 +149,7 @@ The `--fullhelp` option outputs documentation for every command and subcommand, 
 | `-r, --rabbitmq` | RabbitMQ URL | `amqp://praxis:praxis@localhost:5672` |
 | `-o, --output` | Output format (`text` or `json`) | `text` |
 | `-t, --timeout` | Command timeout in seconds | `300` |
+| `-C, --command` | Run a single command and exit | - |
 | `--fullhelp` | Show comprehensive help | - |
 | `--clear` | Clear local state and exit | - |
 | `--status` | Check service connection status | - |
@@ -54,129 +157,144 @@ The `--fullhelp` option outputs documentation for every command and subcommand, 
 
 The RabbitMQ URL can also be set via the `PRAXIS_RABBITMQ_URL` environment variable.
 
-## Local State
-
-The CLI stores persistent state in `~/.praxis/cli.json`. This file contains:
-
-- **client_id**: A unique identifier for this CLI instance, used for RabbitMQ queue routing
-
-The client ID is generated on first run and reused for subsequent executions. This allows the Praxis service to maintain consistent communication with the CLI across sessions.
-
-To reset local state:
-```bash
-praxis_cli --clear
-```
-
-This removes `~/.praxis/cli.json`, causing a new client ID to be generated on the next run.
-
-## Checking Connection Status
-
-Verify the CLI can connect to the Praxis service:
-
-```bash
-praxis_cli --status
-```
-
-This connects to RabbitMQ, registers with the service, and displays connection information including the number of connected nodes.
-
 ## Commands
 
 ### Node Management
 
 ```bash
 # List all connected nodes
-praxis_cli node list
+node list
 
 # Select a node by ID prefix
-praxis_cli node select abc123
+node select abc123
 ```
 
 ### Agent Management
 
 ```bash
 # List agents on a node
-praxis_cli agent list --node abc123
+agent list
 
 # Select an agent
-praxis_cli agent select --node abc123 claudecode
+agent select claudecode
 
 # Request agent info update
-praxis_cli agent update --node abc123
+agent update
 
-# Perform reconnaissance
-praxis_cli agent recon --node abc123
-praxis_cli agent recon-semantic --node abc123
+# Request agent info update
+agent update
+```
+
+### Reconnaissance
+
+```bash
+# Run reconnaissance
+recon run                           # static recon (shows summary)
+recon run-semantic                  # semantic recon (shows summary)
+
+# List stored recon data (without re-running)
+recon list                          # all details
+recon list sessions                 # just sessions
+recon list tools                    # MCP servers, skills, internal tools
+recon list projects                 # project paths
+recon list configs                  # config items
+
+# Read config/session content discovered by recon
+recon config-read /home/user/.codex/config.toml
+recon config-read /home/user/.codex/config.toml --line-start 1 --line-end 50
+recon session-read /home/user/.codex/sessions/2026-02-13.jsonl
+recon config-read                               # omit path to read all (interactive picker)
+recon session-read                              # omit path to read all
+
+# Grep config/session content with regex (pattern first, then optional path)
+recon config-grep "model|profile" /home/user/.codex/config.toml
+recon session-grep "error|warning" /home/user/.codex/sessions/2026-02-13.jsonl
+recon config-grep "model|profile"               # omit path to grep all (interactive picker)
+recon session-grep "error|warning"              # omit path to grep all
 ```
 
 ### Sessions
 
 ```bash
 # Create a session with YOLO mode and working directory
-praxis_cli session create --node abc123 --yolo --project /path/to/project
+session create --yolo --project /path/to/project
 
 # Send a prompt
-praxis_cli session prompt --node abc123 "list files in current directory"
+session prompt "list files in current directory"
+
+# Interactive prompt mode (prompt→response loop, ctrl+c to exit)
+session prompt
 
 # Close session
-praxis_cli session close --node abc123
+session close
 ```
 
 Session options:
 - `--yolo`: Enable YOLO mode (auto-approve actions)
 - `--project <PATH>`: Set the working directory for the session
 
-### Semantic Operations
+In the REPL, running `session create` without `--project` will show an interactive project picker if recon has been run and project paths were discovered. You can also pass a project path as a positional argument: `session create /path/to/project`.
+
+### Operations and Chains
+
+Operations and chains are managed under the `op` command. When running or checking status, the CLI searches both operations and chains automatically.
 
 ```bash
-# List available operations
-praxis_cli op list
+# List available operations and chains
+op available
 
 # Run an operation
-praxis_cli op run recon::system_info --node abc123 --agent claudecode
+op run recon::system_info
+
+# Run a chain (same command — chains are matched by name or ID)
+op run full_recon_chain
 
 # Run with working directory
-praxis_cli op run recon::system_info --node abc123 --agent claudecode --working-dir /path/to/project
+op run recon::system_info --working-dir /path/to/project
 
-# Check status
-praxis_cli op status abc123
+# List tracked (running/completed) operations and chains
+op list
 
-# List running operations
-praxis_cli op running
+# Check status of an operation or chain execution
+op status abc123
 
-# Cancel an operation
-praxis_cli op cancel abc123
+# Cancel a running operation or chain
+op cancel abc123
 ```
 
-### Chains
+### Orchestrator
+
+The `orchestrate` command starts an interactive LLM orchestrator session. The orchestrator is an AI tool-calling loop that coordinates operations across your nodes using the service's MCP tools.
 
 ```bash
-# List available chains
-praxis_cli chain list
-
-# Run a chain
-praxis_cli chain run mychain --node abc123 --agent claudecode
-
-# Run with working directory
-praxis_cli chain run mychain --node abc123 --agent claudecode --working-dir /path/to/project
-
-# Check status
-praxis_cli chain status abc123
-
-# List running executions
-praxis_cli chain running
-
-# Cancel an execution
-praxis_cli chain cancel abc123
+# Start interactive orchestrator session
+orchestrate
 ```
+
+Once started, you enter a prompt loop:
+- Type a prompt and press Enter to send it to the orchestrator
+- The orchestrator will execute tools, show plans, and stream responses
+- **Ctrl+C** during inference cancels the current request (session stays active)
+- **Ctrl+C** or **Ctrl+D** at the prompt exits the session
+
+The orchestrator displays:
+- Tool executions with success/failure indicators
+- Execution plans with step progress (not started / in progress / done)
+- Token usage statistics
+- Final responses rendered as markdown
+
+Prerequisites:
+- MCP server must be enabled in Settings
+- An LLM model must be configured for the Orchestrator feature in Settings > LLM Providers > Feature Selection
 
 ### Traffic Search
 
 ```bash
 # Search intercepted traffic
-praxis_cli traffic search "api\.openai\.com" --limit 20
+traffic search "api\.openai\.com" --limit 20
 
 # Filter by node and agent
-praxis_cli traffic search "Bearer" --node abc123 --agent claudecode
+traffic search "Bearer" --node abc123 --agent claudecode
 ```
 
 ## JSON Output
@@ -184,7 +302,20 @@ praxis_cli traffic search "Bearer" --node abc123 --agent claudecode
 Use `--output json` for machine-readable output:
 
 ```bash
-praxis_cli --output json node list | jq '.nodes[].node_id'
+praxis_cli -o json -C "node list" | jq '.nodes[].node_id'
+```
+
+## Local State
+
+The CLI stores persistent state in `~/.praxis/cli.json`. This file contains:
+
+- **client_id**: A unique identifier for this CLI instance, used for RabbitMQ queue routing
+
+The client ID is generated on first run and reused for subsequent executions.
+
+To reset local state:
+```bash
+praxis_cli --clear
 ```
 
 ## MCP Server Mode
@@ -245,29 +376,30 @@ The MCP server exposes the following tools:
 
 **Agent Management:**
 - `agent_list` - List agents on a node
-- `agent_select` - Get details for a specific agent
+- `agent_select` - Select an agent on a node
 - `agent_update` - Request agent info refresh
-- `agent_recon` - Run agent reconnaissance
-- `agent_recon_semantic` - Run semantic reconnaissance
+
+**Reconnaissance:**
+- `recon_run` - Run static reconnaissance
+- `recon_run_semantic` - Run semantic reconnaissance (includes internal tools)
+- `recon_list` - List stored recon data (section: all/sessions/tools/projects/configs)
+- `recon_config_read` - Read config file content (omit path to read all)
+- `recon_session_read` - Read session file content (omit path to read all)
+- `recon_config_grep` - Grep config files with regex (omit path to grep all)
+- `recon_session_grep` - Grep session files with regex (omit path to grep all)
+- `write_file` - Write file content
 
 **Sessions:**
 - `session_create` - Create a new session
 - `session_prompt` - Send a prompt to the active session
 - `session_close` - Close the active session
 
-**Operations:**
-- `op_list` - List available semantic operations
-- `op_run` - Run a semantic operation
-- `op_status` - Check operation status
-- `op_cancel` - Cancel a running operation
-- `op_running` - List all running operations
-
-**Chains:**
-- `chain_list` - List available chains
-- `chain_run` - Run a chain workflow
-- `chain_status` - Check chain execution status
-- `chain_cancel` - Cancel a running chain
-- `chain_running` - List all running chain executions
+**Operations & Chains:**
+- `op_available` - List available operations and chains
+- `op_run` - Run an operation or chain
+- `op_info` - Show full info for an operation or chain execution (includes result/output)
+- `op_cancel` - Cancel a running operation or chain execution
+- `op_list` - List tracked operations and chain executions
 
 **Traffic:**
 - `traffic_search` - Search intercepted traffic
@@ -317,6 +449,7 @@ The CLI currently supports a subset of Praxis features focused on orchestration:
 - Node and agent management
 - Sessions and prompts
 - Semantic operations and chains
+- Interactive LLM orchestrator
 - Traffic search
 - MCP server mode for AI assistant integration
 

@@ -13,14 +13,14 @@ pub enum NodeCommand {
     /// Select a node by ID prefix
     Select {
         /// Node ID prefix
-        prefix: String,
+        node: String,
     },
 }
 
 pub async fn execute(client: &mut CliClient, command: NodeCommand, output: &OutputFormat) -> Result<()> {
     match command {
         NodeCommand::List => list_nodes(client, output).await,
-        NodeCommand::Select { prefix } => select_node(client, &prefix, output).await,
+        NodeCommand::Select { node } => select_node(client, &node, output).await,
     }
 }
 
@@ -112,15 +112,10 @@ async fn select_node(client: &CliClient, prefix: &str, output: &OutputFormat) ->
             Ok(())
         }
         None => {
-            match output {
-                OutputFormat::Json => {
-                    print_json(&json!({"status": "error", "message": format!("No node found matching '{}'", prefix)}));
-                }
-                OutputFormat::Text => {
-                    print_error(&format!("No node found matching '{}'", prefix));
-                }
+            if matches!(output, OutputFormat::Json) {
+                print_json(&json!({"status": "error", "message": format!("No node found matching '{}'", prefix)}));
             }
-            Err(anyhow!("Node not found"))
+            Err(anyhow!("No node found matching '{}'", prefix))
         }
     }
 }

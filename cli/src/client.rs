@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use common::{
-    client_queue_name, publish_json, CLIENT_BROADCAST_EXCHANGE, CLIENT_SIGNAL_QUEUE,
-    ClientBroadcastMessage, ClientDirectMessage, ClientRegistration, ClientSignalMessage,
-    CommandRequest, CommandResponse, NodeCommand, NodeCommandResult, SemanticOpUpdate,
-    SystemState, InterceptedTrafficEntry, TrafficSearchFilters, ChainExecutionUpdate, ChainDefinitionInfo,
-    OperationDefinitionInfo,
+    client_queue_name, mcp::McpClient, publish_json, CLIENT_BROADCAST_EXCHANGE,
+    CLIENT_SIGNAL_QUEUE, ClientBroadcastMessage, ClientDirectMessage, ClientRegistration,
+    ClientSignalMessage, CommandRequest, CommandResponse, NodeCommand, NodeCommandResult,
+    ReconResult, SemanticOpUpdate, SystemState, InterceptedTrafficEntry, TrafficSearchFilters,
+    ChainExecutionUpdate, ChainDefinitionInfo, OperationDefinitionInfo,
 };
 use futures_util::StreamExt;
 use lapin::{
@@ -33,10 +34,23 @@ struct ClientState {
     pending_commands: std::collections::HashMap<String, Option<NodeCommandResult>>,
     pending_semantic_ops: std::collections::HashMap<String, Option<String>>,
     pending_traffic_search: Option<(Vec<InterceptedTrafficEntry>, usize)>,
+    pending_recon_get: Option<ReconGetResult>,
+    cached_project_paths: Vec<String>,
+    cached_config_paths: Vec<String>,
+    cached_session_paths: Vec<String>,
     operations: Vec<SemanticOpUpdate>,
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
     chain_executions: Vec<ChainExecutionUpdate>,
+    orchestrator_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientDirectMessage>>,
+}
+
+struct ReconGetResult {
+    recon_result: Option<ReconResult>,
+    #[allow(dead_code)]
+    performed_at: Option<String>,
+    #[allow(dead_code)]
+    is_semantic: Option<bool>,
 }
 
 impl CliClient {
@@ -245,6 +259,36 @@ impl CliClient {
             ClientDirectMessage::ChainExecutionListResponse { executions } => {
                 state.chain_executions = executions;
             }
+            ClientDirectMessage::ReconGetResponse { recon_result, performed_at, is_semantic, .. } => {
+                if let Some(ref recon) = recon_result {
+                    state.cached_project_paths = recon.project_paths.clone();
+                    state.cached_config_paths = recon.config.iter().map(|c| c.path.clone()).collect();
+                    state.cached_session_paths = recon.sessions.iter().map(|s| s.session_file.clone()).collect();
+                }
+                state.pending_recon_get = Some(ReconGetResult {
+                    recon_result,
+                    performed_at,
+                    is_semantic,
+                });
+            }
+
+            //
+            // Forward orchestrator events to subscriber if present.
+            //
+            msg @ (ClientDirectMessage::OrchestratorStarted { .. }
+                | ClientDirectMessage::OrchestratorContent { .. }
+                | ClientDirectMessage::OrchestratorToolExecuting { .. }
+                | ClientDirectMessage::OrchestratorToolExecuted { .. }
+                | ClientDirectMessage::OrchestratorPlanUpdated { .. }
+                | ClientDirectMessage::OrchestratorDone
+                | ClientDirectMessage::OrchestratorStopped
+                | ClientDirectMessage::OrchestratorError { .. }
+                | ClientDirectMessage::OrchestratorTokenUsage { .. }) => {
+                if let Some(ref tx) = state.orchestrator_event_tx {
+                    let _ = tx.send(msg);
+                }
+            }
+
             _ => {}
         }
     }
@@ -512,5 +556,216 @@ impl CliClient {
 
     pub async fn get_chain_executions(&self) -> Vec<ChainExecutionUpdate> {
         self.state.lock().await.chain_executions.clone()
+    }
+
+    //
+    // Blocking fetch of recon result — used by the interactive project picker
+    // where the user is explicitly waiting.
+    //
+
+    pub async fn get_recon_result(
+        &self,
+        node_id: &str,
+        agent_short_name: &str,
+    ) -> Result<Option<ReconResult>> {
+        {
+            let mut state = self.state.lock().await;
+            state.pending_recon_get = None;
+        }
+
+        let message = ClientSignalMessage::ReconGet {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+            agent_short_name: agent_short_name.to_string(),
+        };
+        self.publish_signal(message).await?;
+
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 50;
+
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(result) = state.pending_recon_get.take() {
+                return Ok(result.recon_result);
+            }
+        }
+
+        Err(anyhow!("Timeout waiting for recon result"))
+    }
+
+    //
+    // Fire-and-forget recon request — the response will be picked up by the
+    // background consumer and cached in `cached_project_paths`. Use
+    // `get_cached_project_paths()` to read the result.
+    //
+
+    pub async fn request_recon_result(&self, node_id: &str, agent_short_name: &str) {
+        let message = ClientSignalMessage::ReconGet {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+            agent_short_name: agent_short_name.to_string(),
+        };
+        let _ = self.publish_signal(message).await;
+    }
+
+    pub async fn get_cached_project_paths(&self) -> Vec<String> {
+        self.state.lock().await.cached_project_paths.clone()
+    }
+
+    pub async fn get_cached_config_paths(&self) -> Vec<String> {
+        self.state.lock().await.cached_config_paths.clone()
+    }
+
+    pub async fn get_cached_session_paths(&self) -> Vec<String> {
+        self.state.lock().await.cached_session_paths.clone()
+    }
+
+    //
+    // Orchestrator methods.
+    //
+
+    pub fn subscribe_orchestrator_events(&self) -> tokio::sync::mpsc::UnboundedReceiver<ClientDirectMessage> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        //
+        // Store the sender synchronously via a blocking lock. The consumer
+        // task holds the async lock only briefly, so this won't deadlock.
+        //
+        let state = self.state.clone();
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut state = state.lock().await;
+                state.orchestrator_event_tx = Some(tx);
+            });
+        });
+        rx
+    }
+
+    pub async fn unsubscribe_orchestrator_events(&self) {
+        let mut state = self.state.lock().await;
+        state.orchestrator_event_tx = None;
+    }
+
+    pub async fn start_orchestrator(&self) -> Result<()> {
+        let message = ClientSignalMessage::OrchestratorStart {
+            client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn send_orchestrator_prompt(&self, prompt: String) -> Result<()> {
+        let message = ClientSignalMessage::OrchestratorPrompt {
+            client_id: self.client_id.clone(),
+            message: prompt,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn stop_orchestrator(&self) -> Result<()> {
+        let message = ClientSignalMessage::OrchestratorStop {
+            client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn cancel_orchestrator(&self) -> Result<()> {
+        let message = ClientSignalMessage::OrchestratorCancel {
+            client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+}
+
+//
+// McpClient implementation for CliClient. Delegates to the inherent methods
+// above, enabling the shared ops layer in common::mcp::ops to work directly
+// with CliClient.
+//
+
+#[async_trait]
+impl McpClient for CliClient {
+    async fn get_state(&self) -> Option<SystemState> {
+        CliClient::get_state(self).await
+    }
+
+    async fn send_command(&self, node_id: &str, command: NodeCommand) -> Result<CommandResponse> {
+        CliClient::send_command(self, node_id, command).await
+    }
+
+    async fn search_traffic(
+        &self,
+        filters: TrafficSearchFilters,
+    ) -> Result<(Vec<InterceptedTrafficEntry>, usize)> {
+        CliClient::search_traffic(self, filters).await
+    }
+
+    async fn run_semantic_op(
+        &self,
+        node_id: String,
+        agent_short_name: String,
+        operation_name: String,
+        working_dir: Option<String>,
+    ) -> Result<String> {
+        CliClient::run_semantic_op(self, node_id, agent_short_name, operation_name, working_dir)
+            .await
+    }
+
+    async fn cancel_semantic_op(&self, operation_id: String) -> Result<()> {
+        CliClient::cancel_semantic_op(self, operation_id).await
+    }
+
+    async fn request_semantic_op_list(&self) -> Result<()> {
+        CliClient::request_semantic_op_list(self).await
+    }
+
+    async fn get_operations(&self) -> Vec<SemanticOpUpdate> {
+        CliClient::get_operations(self).await
+    }
+
+    async fn request_op_def_list(&self) -> Result<()> {
+        CliClient::request_op_def_list(self).await
+    }
+
+    async fn get_operation_definitions(&self) -> Vec<OperationDefinitionInfo> {
+        CliClient::get_operation_definitions(self).await
+    }
+
+    async fn request_chain_list(&self) -> Result<()> {
+        CliClient::request_chain_list(self).await
+    }
+
+    async fn get_chain_definitions(&self) -> Vec<ChainDefinitionInfo> {
+        CliClient::get_chain_definitions(self).await
+    }
+
+    async fn run_chain(
+        &self,
+        chain_id: String,
+        node_id: String,
+        agent_short_name: String,
+        working_dir: Option<String>,
+    ) -> Result<()> {
+        CliClient::run_chain(self, chain_id, node_id, agent_short_name, working_dir).await
+    }
+
+    async fn cancel_chain(&self, execution_id: String) -> Result<()> {
+        CliClient::cancel_chain(self, execution_id).await
+    }
+
+    async fn request_chain_execution_list(&self) -> Result<()> {
+        CliClient::request_chain_execution_list(self).await
+    }
+
+    async fn get_chain_executions(&self) -> Vec<ChainExecutionUpdate> {
+        CliClient::get_chain_executions(self).await
+    }
+
+    async fn get_stored_recon(
+        &self,
+        node_id: &str,
+        agent_short_name: &str,
+    ) -> Result<Option<ReconResult>> {
+        CliClient::get_recon_result(self, node_id, agent_short_name).await
     }
 }

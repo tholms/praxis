@@ -1,30 +1,24 @@
 use super::AppState;
 
 impl AppState {
-    //
-    // --- Command tracking for Orchestrator ---.
-    //
-
-    /// Add a pending command ID
+    #[allow(dead_code)]
     pub async fn add_pending_command(&self, command_id: String) {
         let mut pending = self.pending_commands.write().await;
         pending.insert(command_id);
     }
 
-    /// Remove a pending command ID
+    #[allow(dead_code)]
     pub async fn remove_pending_command(&self, command_id: &str) {
         let mut pending = self.pending_commands.write().await;
         pending.remove(command_id);
     }
 
-    /// Check if a command is pending
     #[allow(dead_code)]
     pub async fn is_command_pending(&self, command_id: &str) -> bool {
         let pending = self.pending_commands.read().await;
         pending.contains(command_id)
     }
 
-    /// Store a command response
     pub async fn store_command_response(&self, command_id: String, result: common::NodeCommandResult) {
         //
         // Only store if it's a pending command.
@@ -40,6 +34,7 @@ impl AppState {
     }
 
     /// Take a command response (removes from storage only if response exists)
+    #[allow(dead_code)]
     pub async fn take_command_response(&self, command_id: &str) -> Option<common::NodeCommandResult> {
         let mut responses = self.command_responses.write().await;
         if let Some(result) = responses.remove(command_id) {
@@ -54,11 +49,7 @@ impl AppState {
         }
     }
 
-    //
-    // --- Semantic operation request tracking ---.
-    //
-
-    /// Add a pending semantic op request ID
+    #[allow(dead_code)]
     pub async fn add_pending_semantic_op(&self, request_id: String) {
         let mut pending = self.pending_semantic_ops.write().await;
         pending.insert(request_id);
@@ -80,6 +71,7 @@ impl AppState {
     }
 
     /// Take a semantic op response (returns operation_id and removes from storage)
+    #[allow(dead_code)]
     pub async fn take_semantic_op_response(&self, request_id: &str) -> Option<String> {
         let mut responses = self.semantic_op_responses.write().await;
         if let Some(operation_id) = responses.remove(request_id) {

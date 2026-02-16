@@ -7,52 +7,94 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NodePrefixParams {
-    /// Node ID prefix to match
     pub prefix: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NodeParams {
-    /// Node ID prefix
     pub node: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AgentSelectParams {
-    /// Node ID prefix
     pub node: String,
-    /// Agent short name
     pub agent: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SessionCreateParams {
-    /// Node ID prefix
+    #[schemars(description = "Node ID prefix")]
     pub node: String,
-    /// Enable YOLO mode (auto-approve)
+
+    #[schemars(description = "Enable YOLO mode (agent auto-approves actions)")]
     #[serde(default)]
     pub yolo: bool,
-    /// Project directory path
+
+    #[schemars(description = "Working directory / project path for the session")]
     pub project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SessionPromptParams {
-    /// Node ID prefix
     pub node: String,
-    /// The prompt text to send
     pub prompt: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct TrafficSearchParams {
-    /// Regex pattern to search for
+pub enum McpFileType {
+    Config,
+    Session,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WriteFileParams {
+    pub node: String,
+    pub file_type: McpFileType,
+    pub path: String,
+    pub contents: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReconListParams {
+    #[schemars(description = "Node ID prefix")]
+    pub node: String,
+
+    #[schemars(description = "Agent short name")]
+    pub agent: String,
+
+    #[schemars(description = "Section to list: all, sessions, tools, projects, configs (default: all)")]
+    pub section: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReconReadParams {
+    #[schemars(description = "Node ID prefix")]
+    pub node: String,
+
+    #[schemars(description = "Path to the file (omit to read all from recon)")]
+    pub path: Option<String>,
+
+    pub line_start: Option<usize>,
+    pub line_end: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReconGrepParams {
+    #[schemars(description = "Node ID prefix")]
+    pub node: String,
+
+    #[schemars(description = "Regex pattern to search for")]
     pub pattern: String,
-    /// Filter by node ID prefix
+
+    #[schemars(description = "Path to the file (omit to grep all from recon)")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrafficSearchParams {
+    pub pattern: String,
     pub node: Option<String>,
-    /// Filter by agent short name
     pub agent: Option<String>,
-    /// Maximum number of results
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -63,30 +105,21 @@ fn default_limit() -> usize {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpRunParams {
-    /// Operation name (e.g., recon::system_info)
-    pub operation: String,
-    /// Node ID prefix
+    #[schemars(description = "Operation name (e.g. recon::system_info) or chain name/ID")]
+    pub name: String,
+
+    #[schemars(description = "Node ID prefix")]
     pub node: String,
-    /// Agent short name
+
+    #[schemars(description = "Agent short name")]
     pub agent: String,
-    /// Working directory for the operation
+
+    #[schemars(description = "Working directory for the operation")]
     pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ShortIdParams {
-    /// Short ID to look up
+    #[schemars(description = "Short ID to look up")]
     pub short_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ChainRunParams {
-    /// Chain ID or name
-    pub chain_id: String,
-    /// Node ID prefix
-    pub node: String,
-    /// Agent short name
-    pub agent: String,
-    /// Working directory for the chain
-    pub working_dir: Option<String>,
 }

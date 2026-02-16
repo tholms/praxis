@@ -4,43 +4,10 @@ use common::{
     ChainDefinitionFull, ChainDefinitionInfo, ChainExecutionUpdate,
     CommandRequest, CommandResponse, DiscoveredLlmEndpoint,
     InterceptMethod, InterceptRule, InterceptStatus, InterceptedTrafficEntry,
-    ApplicationLogEntry, OperationDefinitionInfo, SemanticOpUpdate, SystemState,
-    TerminalOutput, TrafficLogFilters, TrafficMatchWithDetails, RuleScope,
+    ApplicationLogEntry, OrchestratorPlan, OperationDefinitionInfo, SemanticOpUpdate,
+    SystemState, TerminalOutput, TrafficLogFilters, TrafficMatchWithDetails, RuleScope,
     TargetDirection, TrafficSearchFilters,
 };
-
-/// Status of an Orchestrator plan step
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanStepStatus {
-    NotStarted,
-    InProgress,
-    Done,
-}
-
-/// A step in the Orchestrator execution plan
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStep {
-    pub description: String,
-    pub status: PlanStepStatus,
-}
-
-/// The current plan being executed by Orchestrator
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct OrchestratorPlan {
-    pub steps: Vec<PlanStep>,
-    pub summary: Option<String>,
-    pub current_step_description: Option<String>,
-}
-
-/// A tool execution record
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct ToolExecution {
-    pub name: String,
-    pub display: String,
-    pub success: bool,
-}
 
 /// Messages sent from browser to web server
 #[derive(Debug, Deserialize)]
@@ -282,6 +249,13 @@ pub enum BrowserMessage {
     },
 
     //
+    // Hunting messages.
+    //
+    HuntingQuery {
+        query: String,
+    },
+
+    //
     // AgentChat messages.
     //
     /// Start a new AgentChat session
@@ -401,7 +375,10 @@ pub enum ServerMessage {
         message: String,
     },
     /// Orchestrator session started
-    OrchestratorStarted,
+    OrchestratorStarted {
+        provider: String,
+        model: String,
+    },
     /// Orchestrator streaming text content
     OrchestratorContent {
         content: String,
@@ -595,6 +572,18 @@ pub enum ServerMessage {
     LuaAgentScriptDisabledToggled {
         script_id: String,
         disabled: bool,
+    },
+
+    //
+    // Hunting messages.
+    //
+    HuntingQueryResponse {
+        columns: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
+        total_count: usize,
+    },
+    HuntingQueryError {
+        message: String,
     },
 
     //

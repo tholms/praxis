@@ -53,6 +53,8 @@ export interface AgentSessionMessage {
 const initialOrchestratorState: OrchestratorState = {
   sessionActive: false,
   isStarting: false,
+  provider: null,
+  model: null,
   messages: [],
   currentPlan: null,
   isLoading: false,
@@ -135,25 +137,33 @@ interface AgentChatState {
   error: string | null;
 }
 
+//
+// Hunting state.
+//
+interface HuntingState {
+  query: string;
+  isRunning: boolean;
+  columns: string[];
+  rows: unknown[][];
+  totalCount: number;
+  error: string | null;
+}
+
+const initialHuntingState: HuntingState = {
+  query: '',
+  isRunning: false,
+  columns: [],
+  rows: [],
+  totalCount: 0,
+  error: null,
+};
+
 const initialAgentChatState: AgentChatState = {
   session: null,
   currentChannelId: null,
   messages: [],
   isLoading: false,
   error: null,
-};
-
-//
-// Event log panel UI state.
-//
-interface EventLogPanelState {
-  isOpen: boolean;
-  height: number;
-}
-
-const initialEventLogPanelState: EventLogPanelState = {
-  isOpen: false,
-  height: 300,
 };
 
 //
@@ -172,10 +182,10 @@ interface AppState {
   opDefSuccess: string | null;
   orchestrator: OrchestratorState;
   intercept: InterceptState;
+  hunting: HuntingState;
   chains: ChainState;
   discovery: DiscoveryState;
   agentChat: AgentChatState;
-  eventLogPanel: EventLogPanelState;
   luaAgentScripts: LuaAgentScriptInfo[];
   //
   // Agent session messages keyed by session_id.
@@ -205,10 +215,10 @@ function createInitialState(): AppState {
     opDefSuccess: null,
     orchestrator: loadPersistedOrchestratorState(initialOrchestratorState),
     intercept: initialInterceptState,
+    hunting: initialHuntingState,
     chains: initialChainState,
     discovery: initialDiscoveryState,
     agentChat: initialAgentChatState,
-    eventLogPanel: initialEventLogPanelState,
     luaAgentScripts: [],
     agentSessionMessages: {},
     recentlyAccessedNodeIds: loadRecentNodes(MAX_RECENT_NODES),
@@ -225,11 +235,12 @@ type Action =
   | { type: 'UPDATE_OPERATION'; update: SemanticOpUpdate }
   | { type: 'SET_OPERATION_DEFS'; definitions: OperationDefinitionInfo[] }
   | { type: 'ADD_EVENT'; entry: EventLogEntry }
+  | { type: 'CLEAR_EVENTS' }
   | { type: 'SET_CONFIG'; values: Record<string, string> }
   | { type: 'SET_OP_DEF_ERROR'; error: string | null }
   | { type: 'SET_OP_DEF_SUCCESS'; fullName: string | null }
   | { type: 'ORCHESTRATOR_STARTING' }
-  | { type: 'ORCHESTRATOR_STARTED' }
+  | { type: 'ORCHESTRATOR_STARTED'; provider: string; model: string }
   | { type: 'ORCHESTRATOR_STOPPED' }
   | { type: 'ORCHESTRATOR_ADD_USER_MESSAGE'; message: string }
   | { type: 'ORCHESTRATOR_ADD_CONTENT'; content: string }
@@ -241,6 +252,13 @@ type Action =
   | { type: 'ORCHESTRATOR_CLEAR_MESSAGES' }
   | { type: 'ORCHESTRATOR_SET_LOADING'; loading: boolean }
   | { type: 'ORCHESTRATOR_TOKEN_USAGE'; promptTokens: number; completionTokens: number; totalTokens: number }
+  //
+  // Hunting actions.
+  //
+  | { type: 'HUNTING_SET_QUERY'; query: string }
+  | { type: 'HUNTING_QUERY_START' }
+  | { type: 'HUNTING_QUERY_RESPONSE'; columns: string[]; rows: unknown[][]; totalCount: number }
+  | { type: 'HUNTING_QUERY_ERROR'; message: string }
   //
   // Intercept actions.
   //
@@ -282,10 +300,6 @@ type Action =
   | { type: 'SET_DISCOVERY_LOADING'; loading: boolean }
   | { type: 'SET_DISCOVERY_ERROR'; error: string | null }
   //
-  // Event log panel actions.
-  //
-  | { type: 'TOGGLE_EVENT_LOG_PANEL' }
-  | { type: 'SET_EVENT_LOG_PANEL_HEIGHT'; height: number }
   //
   // Agent Chat actions.
   //
@@ -334,6 +348,8 @@ function reduceCore(state: AppState, action: Action): AppState | null {
       // Keep last 1000 events to avoid memory issues.
       //
       return { ...state, events: [...state.events.slice(-999), action.entry] };
+    case 'CLEAR_EVENTS':
+      return { ...state, events: [] };
     case 'SET_CONFIG':
       return { ...state, config: { ...state.config, ...action.values } };
     case 'SET_OP_DEF_ERROR':
@@ -364,10 +380,12 @@ function reduceOrchestrator(state: AppState, action: Action): AppState | null {
           ...initialOrchestratorState,
           sessionActive: true,
           isStarting: false,
+          provider: action.provider,
+          model: action.model,
           messages: [{
             id: generateUUID(),
             role: 'system',
-            content: 'Orchestrator session started.',
+            content: `Orchestrator session started (${action.provider}::${action.model}).`,
             timestamp: new Date(),
           }],
         },
@@ -625,6 +643,40 @@ function reduceIntercept(state: AppState, action: Action): AppState | null {
   }
 }
 
+function reduceHunting(state: AppState, action: Action): AppState | null {
+  switch (action.type) {
+    case 'HUNTING_SET_QUERY':
+      return {
+        ...state,
+        hunting: { ...state.hunting, query: action.query },
+      };
+    case 'HUNTING_QUERY_START':
+      return {
+        ...state,
+        hunting: { ...state.hunting, isRunning: true, error: null },
+      };
+    case 'HUNTING_QUERY_RESPONSE':
+      return {
+        ...state,
+        hunting: {
+          ...state.hunting,
+          isRunning: false,
+          columns: action.columns,
+          rows: action.rows,
+          totalCount: action.totalCount,
+          error: null,
+        },
+      };
+    case 'HUNTING_QUERY_ERROR':
+      return {
+        ...state,
+        hunting: { ...state.hunting, isRunning: false, error: action.message },
+      };
+    default:
+      return null;
+  }
+}
+
 function reduceAgentSessions(state: AppState, action: Action): AppState | null {
   switch (action.type) {
     case 'AGENT_SESSION_ADD_MESSAGE': {
@@ -746,29 +798,6 @@ function reduceDiscovery(state: AppState, action: Action): AppState | null {
           ...state.discovery,
           error: action.error,
           isLoading: false,
-        },
-      };
-    default:
-      return null;
-  }
-}
-
-function reduceEventLogPanel(state: AppState, action: Action): AppState | null {
-  switch (action.type) {
-    case 'TOGGLE_EVENT_LOG_PANEL':
-      return {
-        ...state,
-        eventLogPanel: {
-          ...state.eventLogPanel,
-          isOpen: !state.eventLogPanel.isOpen,
-        },
-      };
-    case 'SET_EVENT_LOG_PANEL_HEIGHT':
-      return {
-        ...state,
-        eventLogPanel: {
-          ...state.eventLogPanel,
-          height: action.height,
         },
       };
     default:
@@ -971,11 +1000,11 @@ function reducer(state: AppState, action: Action): AppState {
     reduceCore(state, action)
     ?? reduceOrchestrator(state, action)
     ?? reduceIntercept(state, action)
+    ?? reduceHunting(state, action)
     ?? reduceAgentSessions(state, action)
     ?? reduceChains(state, action)
     ?? reduceRecentNodes(state, action)
     ?? reduceDiscovery(state, action)
-    ?? reduceEventLogPanel(state, action)
     ?? reduceAgentChat(state, action)
     ?? state
   );
@@ -1007,6 +1036,7 @@ interface AppContextValue {
   cancelOperation: (operationId: string) => void;
   removeOperation: (operationId: string) => void;
   clearOperations: () => void;
+  clearEventLog: () => void;
   //
   // Node Management.
   //
@@ -1076,11 +1106,6 @@ interface AppContextValue {
   requestDiscoveredEndpoints: (nodeId?: string) => void;
   clearDiscoveryError: () => void;
   //
-  // Event log panel.
-  //
-  toggleEventLogPanel: () => void;
-  setEventLogPanelHeight: (height: number) => void;
-  //
   // Agent Chat.
   //
   agentChatStart: (goal: string | null, yoloMode: boolean) => void;
@@ -1094,6 +1119,11 @@ interface AppContextValue {
   agentChatGetState: () => void;
   agentChatSetCurrentChannel: (channelId: string | null) => void;
   agentChatClearError: () => void;
+  //
+  // Hunting.
+  //
+  huntingSetQuery: (query: string) => void;
+  huntingQuery: (query: string) => void;
   //
   // Lua agent scripts.
   //
@@ -1196,7 +1226,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // Orchestrator messages.
         //
         case 'orchestrator_started':
-          dispatch({ type: 'ORCHESTRATOR_STARTED' });
+          dispatch({ type: 'ORCHESTRATOR_STARTED', provider: message.provider, model: message.model });
           break;
         case 'orchestrator_stopped':
           dispatch({ type: 'ORCHESTRATOR_STOPPED' });
@@ -1205,10 +1235,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'ORCHESTRATOR_ADD_CONTENT', content: message.content });
           break;
         case 'orchestrator_tool_executing':
-          dispatch({ type: 'ORCHESTRATOR_TOOL_EXECUTING', name: message.name, input: message.input });
+          if (message.name !== 'report_plan') {
+            dispatch({ type: 'ORCHESTRATOR_TOOL_EXECUTING', name: message.name, input: message.input });
+          }
           break;
         case 'orchestrator_tool_executed':
-          dispatch({ type: 'ORCHESTRATOR_TOOL_EXECUTED', name: message.name, display: message.display, success: message.success, result: message.result });
+          if (message.name !== 'report_plan') {
+            dispatch({ type: 'ORCHESTRATOR_TOOL_EXECUTED', name: message.name, display: message.display, success: message.success, result: message.result });
+          }
           break;
         case 'orchestrator_plan_updated':
           dispatch({ type: 'ORCHESTRATOR_PLAN_UPDATED', plan: message.plan });
@@ -1306,19 +1340,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           break;
 
         //
-        // Application log messages.
+        // Hunting messages.
         //
-        case 'application_log_response':
-          //
-          // Dispatch as custom event for ApplicationLogTab to catch.
-          //
-          window.dispatchEvent(new CustomEvent('ws-message', { detail: message }));
+        case 'hunting_query_response':
+          dispatch({ type: 'HUNTING_QUERY_RESPONSE', columns: message.columns, rows: message.rows, totalCount: message.total_count });
           break;
-        case 'application_log_cleared':
-          //
-          // Dispatch as custom event for ApplicationLogTab to catch.
-          //
-          window.dispatchEvent(new CustomEvent('ws-message', { detail: message }));
+        case 'hunting_query_error':
+          dispatch({ type: 'HUNTING_QUERY_ERROR', message: message.message });
           break;
 
         //
@@ -1485,6 +1513,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const clearOperations = useCallback(() => {
     wsClient.send({ type: 'semantic_op_clear' });
+  }, []);
+
+  const clearEventLog = useCallback(() => {
+    wsClient.send({ type: 'application_log_clear', node_id: null });
+    dispatch({ type: 'CLEAR_EVENTS' });
   }, []);
 
   //
@@ -1727,17 +1760,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   //
-  // Event log panel functions.
-  //
-  const toggleEventLogPanel = useCallback(() => {
-    dispatch({ type: 'TOGGLE_EVENT_LOG_PANEL' });
-  }, []);
-
-  const setEventLogPanelHeight = useCallback((height: number) => {
-    dispatch({ type: 'SET_EVENT_LOG_PANEL_HEIGHT', height });
-  }, []);
-
-  //
   // Agent Chat functions.
   //
   const agentChatStart = useCallback((goal: string | null, yoloMode: boolean) => {
@@ -1831,6 +1853,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   //
+  // Hunting functions.
+  //
+  const huntingSetQuery = useCallback((query: string) => {
+    dispatch({ type: 'HUNTING_SET_QUERY', query });
+  }, []);
+
+  const huntingQuery = useCallback((query: string) => {
+    dispatch({ type: 'HUNTING_QUERY_START' });
+    wsClient.send({ type: 'hunting_query', query });
+  }, []);
+
+  //
   // Lua agent script functions.
   //
   const listLuaAgentScripts = useCallback(() => {
@@ -1868,6 +1902,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     cancelOperation,
     removeOperation,
     clearOperations,
+    clearEventLog,
     removeNode,
     getConfig,
     setConfig,
@@ -1913,11 +1948,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     requestDiscoveredEndpoints,
     clearDiscoveryError,
     //
-    // Event log panel.
-    //
-    toggleEventLogPanel,
-    setEventLogPanelHeight,
-    //
     // Agent Chat.
     //
     agentChatStart,
@@ -1931,6 +1961,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     agentChatGetState,
     agentChatSetCurrentChannel,
     agentChatClearError,
+    //
+    // Hunting.
+    //
+    huntingSetQuery,
+    huntingQuery,
     //
     // Lua agent scripts.
     //

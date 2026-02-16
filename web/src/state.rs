@@ -51,6 +51,8 @@ pub struct AppState {
     pub chain_executions: RwLock<HashMap<String, ChainExecutionUpdate>>,
     /// Notify for signaling shutdown/restart (RabbitMQ connection lost)
     pub shutdown_notify: Arc<Notify>,
+    /// Notify for signaling config response arrival
+    pub config_notify: Notify,
 }
 
 /// Information about a WebSocket connection
@@ -80,6 +82,7 @@ impl AppState {
             chain_definitions: RwLock::new(Vec::new()),
             chain_executions: RwLock::new(HashMap::new()),
             shutdown_notify: Arc::new(Notify::new()),
+            config_notify: Notify::new(),
         })
     }
 
@@ -102,17 +105,9 @@ impl AppState {
 
     /// Broadcast a message to all connected WebSocket clients
     pub fn broadcast(&self, message: ServerMessage) {
-        //
-        // Log receiver count for debugging.
-        //
-        let receiver_count = self.broadcast_tx.receiver_count();
-        match self.broadcast_tx.send(message) {
-            Ok(_) => {
-                common::log_debug!("[WEB] Broadcast sent to {} receivers", receiver_count);
-            }
-            Err(_) => {
-                common::log_warn!("[WEB] Broadcast failed - no receivers (count: {})", receiver_count);
-            }
+        if let Err(_) = self.broadcast_tx.send(message) {
+            let receiver_count = self.broadcast_tx.receiver_count();
+            common::log_warn!("[WEB] Broadcast failed - no receivers (count: {})", receiver_count);
         }
     }
 

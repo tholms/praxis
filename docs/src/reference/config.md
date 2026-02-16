@@ -78,6 +78,25 @@ Access via **Settings** > **LLM Providers** in the web UI.
 | `llm.orchestrator.model` | `claude-sonnet-4-20250514` | Model for Orchestrator |
 | `llm.orchestrator.api_key` | (encrypted) | API key for provider |
 
+### MCP Server Settings
+
+Access via **Settings** > **MCP Server** in the web UI.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `mcp_server_enabled` | `false` | Enable the built-in MCP SSE server |
+| `mcp_server_port` | `8585` | Port for the MCP SSE server |
+
+The MCP server exposes all Praxis tools via the Model Context Protocol over SSE transport. It must be enabled for the Orchestrator to function — the Orchestrator connects to this server as an MCP client to access node, agent, session, operation, and chain tools.
+
+When running with Docker, port 8585 is exposed by default. To use a different port, set `PRAXIS_MCP_PORT` before starting:
+
+```bash
+PRAXIS_MCP_PORT=9090 docker compose up --build
+```
+
+Then update the port in **Settings** > **MCP Server** to match. The SSE endpoint is `http://localhost:{port}/sse`.
+
 ### Supported Providers
 
 | Provider ID | Name | API Key Variable |
@@ -278,6 +297,7 @@ For production and multi-instance deployments, use PostgreSQL. See [Database Con
 |---------|------|----------|
 | Web UI | 8080 | HTTP |
 | WebSocket | 8080 | WS |
+| MCP SSE Server | 8585 | HTTP |
 | RabbitMQ | 5672 | AMQP |
 | RabbitMQ Management | 15672 | HTTP |
 | PostgreSQL | 5432 | TCP |
