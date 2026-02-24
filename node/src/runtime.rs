@@ -399,6 +399,7 @@ async fn listen_to_queues(
         interval_arc.load(std::sync::atomic::Ordering::Relaxed),
     ));
     update_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    update_interval.tick().await; // consume the immediate first tick
     let mut last_interval_secs = interval_arc.load(std::sync::atomic::Ordering::Relaxed);
 
     //
@@ -422,8 +423,6 @@ async fn listen_to_queues(
 
     let fingerprint_cache: Arc<tokio::sync::RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-    let fingerprint_notify = Arc::new(tokio::sync::Notify::new());
-
     //
     // Run initial fingerprint before entering the main loop.
     //
@@ -438,6 +437,16 @@ async fn listen_to_queues(
     }
 
     //
+    // Send first update with complete fingerprint data.
+    //
+
+    if let Err(e) = send_node_information_update(
+        &channel, &node_id, &registry, &selected_agent, &node_state, &transaction_manager, &fingerprint_cache,
+    ).await {
+        common::log_error!("Failed to send initial information update: {}", e);
+    }
+
+    //
     // Background fingerprint task: re-fingerprints all agents every 30
     // seconds or immediately when notified (e.g., service update request).
     //
@@ -445,16 +454,15 @@ async fn listen_to_queues(
     {
         let registry = registry.clone();
         let cache = fingerprint_cache.clone();
-        let notify = fingerprint_notify.clone();
         let shutdown = shutdown_token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // consume immediate first tick
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
                     _ = interval.tick() => {}
-                    _ = notify.notified() => {}
                 }
                 let agents = registry.read().await.get_all();
                 let mut new_cache = std::collections::HashMap::new();
@@ -571,7 +579,6 @@ async fn listen_to_queues(
                                 &factory,
                                 &mut pending_registry_update,
                                 &fingerprint_cache,
-                                &fingerprint_notify,
                             )
                             .await;
                         }
@@ -678,15 +685,19 @@ async fn handle_broadcast_message(
     factory: &AgentFactory,
     pending_registry_update: &mut Option<Vec<String>>,
     fingerprint_cache: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, bool>>>,
-    fingerprint_notify: &Arc<tokio::sync::Notify>,
 ) {
     match message {
         NodeBroadcastMessage::NodeInformationUpdateRequest => {
             //
-            // Service requested an update — trigger immediate re-fingerprint.
+            // Service requested an update — fingerprint inline and update cache.
             //
-            fingerprint_notify.notify_one();
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            {
+                let agents = registry.read().await.get_all();
+                let mut cache = fingerprint_cache.write().await;
+                for agent in &agents {
+                    cache.insert(agent.short_name().to_string(), agent.do_fingerprint().await);
+                }
+            }
 
             if let Err(e) =
                 send_node_information_update(channel, node_id, registry, selected_agent, node_state, transaction_manager, fingerprint_cache)
@@ -729,8 +740,13 @@ async fn handle_broadcast_message(
                 //
                 // Re-fingerprint after registry rebuild since agents are new instances.
                 //
-                fingerprint_notify.notify_one();
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                {
+                    let agents = registry.read().await.get_all();
+                    let mut cache = fingerprint_cache.write().await;
+                    for agent in &agents {
+                        cache.insert(agent.short_name().to_string(), agent.do_fingerprint().await);
+                    }
+                }
 
                 if let Err(e) = send_node_information_update(
                     channel, node_id, registry, selected_agent, node_state, transaction_manager, fingerprint_cache,
