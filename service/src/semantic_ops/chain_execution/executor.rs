@@ -351,8 +351,8 @@ impl ChainExecutor {
                     let exec_id = self_clone
                         .execute(
                             chain.clone(),
-                            target.node_id,
-                            target.agent_short_name,
+                            target.node_id.clone(),
+                            target.agent_short_name.clone(),
                             working_dir.clone(),
                             initial_input.clone(),
                             config.clone(),
@@ -364,27 +364,6 @@ impl ChainExecutor {
                         )
                         .await;
 
-                    //
-                    // Wait for this execution to finish before starting the
-                    // next one on the same node.
-                    //
-                    if let Ok(ref id) = exec_id {
-                        let poll_interval = std::time::Duration::from_secs(2);
-                        let max_polls = 1800; // 1 hour max wait
-                        for _ in 0..max_polls {
-                            tokio::time::sleep(poll_interval).await;
-                            let executions = self_clone.registry.list();
-                            let still_running = executions.iter().any(|e| {
-                                &e.execution_id == id
-                                    && (e.status == common::ChainExecutionStatus::Running
-                                        || e.status == common::ChainExecutionStatus::Queued)
-                            });
-                            if !still_running {
-                                break;
-                            }
-                        }
-                    }
-
                     node_results.push(exec_id);
                 }
                 node_results
@@ -393,7 +372,9 @@ impl ChainExecutor {
         }
 
         //
-        // Collect results from all node spawns.
+        // Collect results from all node spawns. Each execute() returns
+        // immediately after spawning — the actual chain runs in the
+        // background. No need to wait for completion here.
         //
         let mut all_results = Vec::new();
         for handle in handles {
