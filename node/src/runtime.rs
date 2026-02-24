@@ -424,7 +424,25 @@ async fn listen_to_queues(
     let fingerprint_cache: Arc<tokio::sync::RwLock<std::collections::HashMap<String, bool>>> =
         Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     //
-    // Run initial fingerprint before entering the main loop.
+    // Rebuild agent registry with Lua scripts received in the RegistrationAck.
+    //
+
+    if !lua_scripts.is_empty() {
+        common::log_info!(
+            "Rebuilding agent registry with {} scripts from service",
+            lua_scripts.len()
+        );
+        handle_agent_registry_update(
+            lua_scripts,
+            &registry,
+            &selected_agent,
+            &factory,
+        )
+        .await;
+    }
+
+    //
+    // Run initial fingerprint after registry rebuild, then send first update.
     //
 
     {
@@ -436,10 +454,6 @@ async fn listen_to_queues(
         }
     }
 
-    //
-    // Send first update with complete fingerprint data.
-    //
-
     if let Err(e) = send_node_information_update(
         &channel, &node_id, &registry, &selected_agent, &node_state, &transaction_manager, &fingerprint_cache,
     ).await {
@@ -448,7 +462,7 @@ async fn listen_to_queues(
 
     //
     // Background fingerprint task: re-fingerprints all agents every 30
-    // seconds or immediately when notified (e.g., service update request).
+    // seconds to keep the cache fresh.
     //
 
     {
@@ -473,24 +487,6 @@ async fn listen_to_queues(
                 *cache.write().await = new_cache;
             }
         });
-    }
-
-    //
-    // Rebuild agent registry with Lua scripts received in the RegistrationAck.
-    //
-
-    if !lua_scripts.is_empty() {
-        common::log_info!(
-            "Rebuilding agent registry with {} scripts from service",
-            lua_scripts.len()
-        );
-        handle_agent_registry_update(
-            lua_scripts,
-            &registry,
-            &selected_agent,
-            &factory,
-        )
-        .await;
     }
 
     common::log_info!(
@@ -608,6 +604,13 @@ async fn listen_to_queues(
                                             &factory,
                                         )
                                         .await;
+                                        {
+                                            let agents = registry.read().await.get_all();
+                                            let mut cache = fingerprint_cache.write().await;
+                                            for agent in &agents {
+                                                cache.insert(agent.short_name().to_string(), agent.do_fingerprint().await);
+                                            }
+                                        }
                                         if let Err(e) = send_node_information_update(
                                             &channel, &node_id, &registry, &selected_agent, &node_state, &transaction_manager, &fingerprint_cache,
                                         ).await {
@@ -1009,6 +1012,13 @@ async fn handle_command(
         if let Some(scripts) = pending_registry_update.take() {
             common::log_info!("Executing queued registry update after session close");
             handle_agent_registry_update(scripts, registry, selected_agent, factory).await;
+            {
+                let agents = registry.read().await.get_all();
+                let mut cache = fingerprint_cache.write().await;
+                for agent in &agents {
+                    cache.insert(agent.short_name().to_string(), agent.do_fingerprint().await);
+                }
+            }
             if let Err(e) = send_node_information_update(
                 channel, node_id, registry, selected_agent, node_state, transaction_manager, &fingerprint_cache,
             )
