@@ -662,8 +662,16 @@ export function NodeCard({ node }: NodeCardProps) {
         items={opItems}
         variant="operation"
         nodes={singleNodeList}
-        onRun={(itemId, nodeId, agentName) => {
-          runOperation(nodeId, agentName, itemId);
+        initialTargetSpec={{ node_ids: [node.node_id], os_filter: null, agent_short_names: [], include_triggering_node: false }}
+        onRun={(itemId, spec) => {
+          const targetAgents = spec.agent_short_names.length > 0
+            ? node.discovered_agents.filter(a => spec.agent_short_names.includes(a.short_name))
+            : node.selected_agent
+              ? [{ short_name: node.selected_agent.short_name }]
+              : node.discovered_agents.slice(0, 1);
+          for (const agent of targetAgents) {
+            runOperation(node.node_id, agent.short_name, itemId);
+          }
         }}
       />
 
@@ -674,8 +682,12 @@ export function NodeCard({ node }: NodeCardProps) {
         items={chainItems}
         variant="chain"
         nodes={singleNodeList}
-        onRun={(itemId, nodeId, agentName) => {
-          runChain(itemId, nodeId, agentName);
+        initialTargetSpec={{ node_ids: [node.node_id], os_filter: null, agent_short_names: [], include_triggering_node: false }}
+        onRun={(itemId, spec) => {
+          const agentName = spec.agent_short_names.length > 0
+            ? spec.agent_short_names[0]
+            : node.selected_agent?.short_name || node.discovered_agents[0]?.short_name || '';
+          runChain(itemId, node.node_id, agentName, undefined, spec);
         }}
       />
 

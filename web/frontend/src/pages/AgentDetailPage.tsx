@@ -658,17 +658,17 @@ export function AgentDetailPage() {
     );
   }
 
-  const handleRunOpFromModal = (opFullName: string, _nodeId: string, _agentName: string) => {
+  const handleRunOpFromModal = (opFullName: string, _targetSpec: import('../api/types').TargetSpec) => {
     if (!nodeId || !agentShortName) return;
     const workingDir = selectedAgent?.working_dir ?? selectedProjectPath ?? undefined;
     runOperation(nodeId, agentShortName, opFullName, workingDir);
     setActiveTab('ops');
   };
 
-  const handleRunChainFromModal = (chainId: string, _nodeId: string, _agentName: string) => {
+  const handleRunChainFromModal = (chainId: string, targetSpec: import('../api/types').TargetSpec) => {
     if (!nodeId || !agentShortName) return;
     const workingDir = selectedAgent?.working_dir ?? selectedProjectPath ?? undefined;
-    runChain(chainId, nodeId, agentShortName, workingDir);
+    runChain(chainId, nodeId, agentShortName, workingDir, targetSpec);
     setActiveTab('ops');
   };
 
@@ -2381,8 +2381,7 @@ export function AgentDetailPage() {
           badge: def.category,
         }))}
         variant="operation"
-        fixedNodeId={nodeId || undefined}
-        fixedAgentName={agentShortName || undefined}
+        initialTargetSpec={nodeId && agentShortName ? { node_ids: [nodeId], agent_short_names: [agentShortName], os_filter: null, include_triggering_node: false } : undefined}
         warningMessage={hasSession ? 'Running an operation will close the current session.' : undefined}
       />
 
@@ -2403,8 +2402,7 @@ export function AgentDetailPage() {
           badge: `${chain.element_count} elements`,
         }))}
         variant="chain"
-        fixedNodeId={nodeId || undefined}
-        fixedAgentName={agentShortName || undefined}
+        initialTargetSpec={nodeId && agentShortName ? { node_ids: [nodeId], agent_short_names: [agentShortName], os_filter: null, include_triggering_node: false } : undefined}
         warningMessage={hasSession ? 'Running a chain will close the current session.' : undefined}
       />
 

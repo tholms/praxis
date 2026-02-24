@@ -47,10 +47,10 @@ interface TableSchema {
 
 const TABLE_SCHEMAS: TableSchema[] = [
   { name: 'AgentLogs', columns: ['timestamp', 'node_id', 'agent_short_name', 'agent_name', 'version'] },
-  { name: 'ChainExecutionLogs', columns: ['timestamp', 'execution_id', 'chain_id', 'chain_name', 'node_id', 'agent_short_name', 'status', 'elements', 'outputs', 'started_at', 'ended_at'] },
+  { name: 'SemanticOperationChainLogs', columns: ['timestamp', 'execution_id', 'chain_id', 'chain_name', 'node_id', 'agent_short_name', 'status', 'elements', 'outputs', 'started_at', 'ended_at'] },
   { name: 'EventLogs', columns: ['timestamp', 'source', 'source_id', 'level', 'target', 'message'] },
   { name: 'NodeLogs', columns: ['timestamp', 'node_id', 'machine_name', 'os_details', 'intercept_active'] },
-  { name: 'OperationLogs', columns: ['timestamp', 'operation_id', 'node_id', 'agent_short_name', 'status', 'operation_spec', 'start_time', 'end_time', 'summary', 'result', 'chain_execution_id'] },
+  { name: 'SemanticOperationLogs', columns: ['timestamp', 'operation_id', 'node_id', 'agent_short_name', 'status', 'operation_spec', 'start_time', 'end_time', 'summary', 'result', 'chain_execution_id'] },
   { name: 'ReconLogs', columns: ['timestamp', 'node_id', 'agent_short_name', 'is_semantic', 'mcp_server_count', 'skill_count', 'internal_tool_count', 'config_count', 'session_count', 'project_path_count'] },
   { name: 'ReconMetadataLogs', columns: ['timestamp', 'node_id', 'agent_short_name', 'entry_type', 'value'] },
   { name: 'ReconSessionLogs', columns: ['timestamp', 'node_id', 'agent_short_name', 'session_id', 'context_path', 'last_modified', 'message_count'] },

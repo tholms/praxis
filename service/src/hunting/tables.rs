@@ -16,8 +16,8 @@ pub enum VirtualTable {
     ReconMetadataLogs,
     EventLogs,
     ToolkitActionsLog,
-    OperationLogs,
-    ChainExecutionLogs,
+    SemanticOperationLogs,
+    SemanticOperationChainLogs,
 }
 
 impl VirtualTable {
@@ -33,8 +33,8 @@ impl VirtualTable {
                 | VirtualTable::ReconMetadataLogs
                 | VirtualTable::EventLogs
                 | VirtualTable::ToolkitActionsLog
-                | VirtualTable::OperationLogs
-                | VirtualTable::ChainExecutionLogs
+                | VirtualTable::SemanticOperationLogs
+                | VirtualTable::SemanticOperationChainLogs
         )
     }
 }
@@ -51,8 +51,8 @@ pub fn resolve_table(name: &str) -> Option<VirtualTable> {
         "reconmetadatalogs" => Some(VirtualTable::ReconMetadataLogs),
         "eventlogs" => Some(VirtualTable::EventLogs),
         "toolkitactionslog" => Some(VirtualTable::ToolkitActionsLog),
-        "operationlogs" => Some(VirtualTable::OperationLogs),
-        "chainexecutionlogs" => Some(VirtualTable::ChainExecutionLogs),
+        "semanticoperationlogs" => Some(VirtualTable::SemanticOperationLogs),
+        "semanticoperationchainlogs" => Some(VirtualTable::SemanticOperationChainLogs),
         _ => None,
     }
 }
@@ -106,12 +106,12 @@ pub fn table_columns(table: VirtualTable) -> Vec<&'static str> {
             "session_id",
             "details_json",
         ],
-        VirtualTable::OperationLogs => vec![
+        VirtualTable::SemanticOperationLogs => vec![
             "timestamp", "operation_id", "node_id", "agent_short_name",
             "status", "operation_spec", "start_time", "end_time",
             "summary", "result", "chain_execution_id",
         ],
-        VirtualTable::ChainExecutionLogs => vec![
+        VirtualTable::SemanticOperationChainLogs => vec![
             "timestamp", "execution_id", "chain_id", "chain_name",
             "node_id", "agent_short_name", "status", "elements",
             "outputs", "started_at", "ended_at",

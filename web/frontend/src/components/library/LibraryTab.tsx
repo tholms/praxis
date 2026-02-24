@@ -6,7 +6,7 @@ import { Modal } from '../common/Modal';
 import { RunModal } from '../common/RunModal';
 import { DataTable, type ColumnDef, type RowAction } from '../common/DataTable';
 import { ImportModal } from './ImportModal';
-import type { LibraryItem, LibraryItemType, OperationDefinitionInfo, ChainDefinitionInput, NodeState } from '../../api/types';
+import type { LibraryItem, LibraryItemType, OperationDefinitionInfo, ChainDefinitionInput, NodeState, TargetSpec } from '../../api/types';
 
 //
 // Model definition type for dropdown.
@@ -34,6 +34,7 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
     updateChain,
     deleteChain,
     runChain,
+    runOperation,
     clearChainStatus,
     clearOpDefStatus,
     getConfig,
@@ -423,17 +424,32 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
     }
   };
 
-  const handleRunFromModal = (itemId: string, nodeId: string, agentName: string) => {
+  const handleRunFromModal = (itemId: string, targetSpec: TargetSpec) => {
+    const allNodes = nodes;
+    const filteredNodes = targetSpec.node_ids.length > 0
+      ? allNodes.filter(n => targetSpec.node_ids.includes(n.node_id))
+      : targetSpec.os_filter
+        ? allNodes.filter(n => n.os_details.toLowerCase().includes(targetSpec.os_filter!.toLowerCase()))
+        : allNodes;
+
     if (runModalVariant === 'operation') {
-      send({
-        type: 'semantic_op_run',
-        node_id: nodeId,
-        agent_short_name: agentName,
-        operation_name: itemId,
-        working_dir: null,
-      });
+      for (const node of filteredNodes) {
+        const agents = targetSpec.agent_short_names.length > 0
+          ? node.discovered_agents.filter(a => targetSpec.agent_short_names.includes(a.short_name))
+          : node.selected_agent
+            ? [{ short_name: node.selected_agent.short_name }]
+            : node.discovered_agents.slice(0, 1);
+        for (const agent of agents) {
+          runOperation(node.node_id, agent.short_name, itemId);
+        }
+      }
     } else {
-      runChain(itemId, nodeId, agentName);
+      const primaryNode = filteredNodes[0];
+      if (!primaryNode) return;
+      const agentName = targetSpec.agent_short_names.length > 0
+        ? targetSpec.agent_short_names[0]
+        : primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
+      runChain(itemId, primaryNode.node_id, agentName, undefined, targetSpec);
     }
     setShowRunModal(false);
     setPreSelectedItem(null);

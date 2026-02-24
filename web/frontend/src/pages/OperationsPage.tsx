@@ -278,28 +278,8 @@ export function OperationsPage() {
     }
   }, [mainTab, isConnected, requestChainTriggers]);
 
-  const handleRunOperation = (opFullName: string, nodeId: string, agentName: string) => {
-    send({
-      type: 'semantic_op_run',
-      node_id: nodeId,
-      agent_short_name: agentName,
-      operation_name: opFullName,
-      working_dir: null,
-    });
-    setMainTab('runs');
-  };
-
-  const handleRunChainFromModal = (chainId: string, nodeId: string, agentName: string) => {
-    runChain(chainId, nodeId, agentName);
-    setMainTab('runs');
-  };
-
-  const handleRunOperationAdvanced = (opFullName: string, targetSpec: import('../api/types').TargetSpec) => {
+  const handleRunOperation = (opFullName: string, targetSpec: import('../api/types').TargetSpec) => {
     const allNodes = state.systemState?.nodes || [];
-
-    //
-    // Resolve targets from spec: filter nodes, then agents per node.
-    //
     const filteredNodes = targetSpec.node_ids.length > 0
       ? allNodes.filter(n => targetSpec.node_ids.includes(n.node_id))
       : targetSpec.os_filter
@@ -326,11 +306,18 @@ export function OperationsPage() {
     setMainTab('runs');
   };
 
-  const handleRunChainAdvanced = (chainId: string, targetSpec: import('../api/types').TargetSpec) => {
+  const handleRunChainFromModal = (chainId: string, targetSpec: import('../api/types').TargetSpec) => {
     const allNodes = state.systemState?.nodes || [];
-    const primaryNode = allNodes[0];
+    const filteredNodes = targetSpec.node_ids.length > 0
+      ? allNodes.filter(n => targetSpec.node_ids.includes(n.node_id))
+      : targetSpec.os_filter
+        ? allNodes.filter(n => n.os_details.toLowerCase().includes(targetSpec.os_filter!.toLowerCase()))
+        : allNodes;
+    const primaryNode = filteredNodes[0];
     if (!primaryNode) return;
-    const agentName = primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
+    const agentName = targetSpec.agent_short_names.length > 0
+      ? targetSpec.agent_short_names[0]
+      : primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
     runChain(chainId, primaryNode.node_id, agentName, undefined, targetSpec);
     setMainTab('runs');
   };
@@ -803,7 +790,6 @@ export function OperationsPage() {
           setPreSelectedOpDef(null);
         }}
         onRun={handleRunOperation}
-        onRunAdvanced={handleRunOperationAdvanced}
         title="Run Operation"
         items={definitions.filter(d => !d.disabled).sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name)).map(def => ({
           id: def.full_name,
@@ -830,7 +816,6 @@ export function OperationsPage() {
         isOpen={showRunChainModal}
         onClose={() => setShowRunChainModal(false)}
         onRun={handleRunChainFromModal}
-        onRunAdvanced={handleRunChainAdvanced}
         title="Run Chain"
         items={chains.filter(c => !c.disabled).sort((a, b) => a.name.localeCompare(b.name)).map(chain => ({
           id: chain.id,

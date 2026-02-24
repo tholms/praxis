@@ -42,6 +42,31 @@ const TABLES: TableInfo[] = [
     ],
   },
   {
+    name: 'SemanticOperationChainLogs',
+    description: 'Chain execution history',
+    source: 'Database',
+    columns: [
+      { name: 'timestamp', description: 'Creation time' },
+      { name: 'execution_id', description: 'Chain execution ID' },
+      { name: 'chain_name', description: 'Chain name' },
+      { name: 'status', description: 'Execution status' },
+      { name: 'outputs', description: 'Terminal outputs (JSON)' },
+    ],
+  },
+  {
+    name: 'SemanticOperationLogs',
+    description: 'Semantic operation history',
+    source: 'Database',
+    columns: [
+      { name: 'timestamp', description: 'Creation time' },
+      { name: 'operation_id', description: 'Operation ID' },
+      { name: 'agent_short_name', description: 'Executing agent' },
+      { name: 'status', description: 'Operation status' },
+      { name: 'summary', description: 'Summary of actions' },
+      { name: 'result', description: 'Output/findings' },
+    ],
+  },
+  {
     name: 'NodeLogs',
     description: 'Connected nodes',
     source: 'In-memory',

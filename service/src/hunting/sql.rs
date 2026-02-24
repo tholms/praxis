@@ -106,7 +106,7 @@ impl VirtualTable {
                 order_by: "tm.matched_at DESC",
             }),
 
-            VirtualTable::OperationLogs => Some(SqlTableConfig {
+            VirtualTable::SemanticOperationLogs => Some(SqlTableConfig {
                 from_clause: "operations",
                 columns: vec![
                     SqlColumn { kql_name: "timestamp", sql_expr: "created_at", col_type: SqlColumnType::Text, nullable: false },
@@ -124,7 +124,7 @@ impl VirtualTable {
                 order_by: "created_at DESC",
             }),
 
-            VirtualTable::ChainExecutionLogs => Some(SqlTableConfig {
+            VirtualTable::SemanticOperationChainLogs => Some(SqlTableConfig {
                 from_clause: "chain_executions",
                 columns: vec![
                     SqlColumn { kql_name: "timestamp", sql_expr: "created_at", col_type: SqlColumnType::Text, nullable: false },

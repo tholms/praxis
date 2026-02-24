@@ -248,9 +248,22 @@ export function LibraryModal({ onClose }: LibraryModalProps) {
         }
       }
     } else {
-      const primaryNode = allNodes[0];
+      const filteredNodes = targetSpec.node_ids.length > 0
+        ? allNodes.filter(n => targetSpec.node_ids.includes(n.node_id))
+        : targetSpec.os_filter
+          ? allNodes.filter(n => n.os_details.toLowerCase().includes(targetSpec.os_filter!.toLowerCase()))
+          : allNodes;
+
+      const primaryNode = filteredNodes[0];
       if (!primaryNode) return;
-      const agentName = primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
+
+      const agents = targetSpec.agent_short_names.length > 0
+        ? primaryNode.discovered_agents.filter(a => targetSpec.agent_short_names.includes(a.short_name))
+        : primaryNode.selected_agent
+          ? [{ short_name: primaryNode.selected_agent.short_name }]
+          : primaryNode.discovered_agents.slice(0, 1);
+
+      const agentName = agents[0]?.short_name || '';
       runChain(itemId, primaryNode.node_id, agentName, undefined, targetSpec);
     }
 
@@ -521,15 +534,9 @@ export function LibraryModal({ onClose }: LibraryModalProps) {
           preSelectedItem={runModalItem.item}
           variant={runModalItem.variant}
           nodes={nodes}
-          onRun={(itemId, nodeId, agentName) => {
-            if (runModalItem.variant === 'operation') {
-              runOperation(nodeId, agentName, itemId);
-            } else {
-              runChain(itemId, nodeId, agentName);
-            }
-            setRunModalItem(null);
+          onRun={(itemId, targetSpec) => {
+            handleRunAdvanced(itemId, targetSpec);
           }}
-          onRunAdvanced={handleRunAdvanced}
         />
       )}
 

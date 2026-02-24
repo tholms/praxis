@@ -29,7 +29,7 @@ Centralized application log entries from service, web, and nodes. Requires `appl
 | target | Log target/module (may be null) |
 | message | Log message text |
 
-### ChainExecutionLogs
+### SemanticOperationChainLogs
 
 Chain execution history, including per-element state and final outputs. The `elements` and `outputs` columns contain JSON — use `contains()` to search within them.
 
@@ -59,7 +59,7 @@ Currently connected nodes (in-memory).
 | os_details | Operating system details |
 | intercept_active | Whether interception is active |
 
-### OperationLogs
+### SemanticOperationLogs
 
 Semantic operation execution history, including results and summaries. The `operation_spec` column contains the full operation definition as JSON — use `contains()` to search within it.
 
@@ -245,29 +245,29 @@ EventLogs | where level == "error" | take 50
 EventLogs | summarize count() by source
 
 // List completed operations with results
-OperationLogs | where status == "Completed" | project timestamp, agent_short_name, summary, result | take 50
+SemanticOperationLogs | where status == "Completed" | project timestamp, agent_short_name, summary, result | take 50
 
 // Find failed operations
-OperationLogs | where status == "Failed" | project timestamp, operation_id, agent_short_name, result
+SemanticOperationLogs | where status == "Failed" | project timestamp, operation_id, agent_short_name, result
 
 // Count operations by status
-OperationLogs | summarize count() by status
+SemanticOperationLogs | summarize count() by status
 
 // Find operations that are part of a chain
-OperationLogs | where isnotempty(chain_execution_id) | project timestamp, operation_id, chain_execution_id, summary
+SemanticOperationLogs | where isnotempty(chain_execution_id) | project timestamp, operation_id, chain_execution_id, summary
 
 // List chain executions
-ChainExecutionLogs | project timestamp, chain_name, status, outputs | take 20
+SemanticOperationChainLogs | project timestamp, chain_name, status, outputs | take 20
 
 // Find completed chains with their outputs
-ChainExecutionLogs | where status == "Completed" | project timestamp, chain_name, outputs
+SemanticOperationChainLogs | where status == "Completed" | project timestamp, chain_name, outputs
 ```
 
 ## Query Execution
 
 ### SQL Pushdown
 
-Tables backed by the database (EventLogs, TrafficLogs, TrafficMatchLogs, OperationLogs, ChainExecutionLogs) benefit from automatic SQL pushdown. When the executor encounters leading `where` and `take`/`limit` operators in a query pipeline, it translates KQL expressions directly into SQL WHERE clauses with parameterized queries. This means the database handles filtering before rows are loaded into memory, enabling efficient queries over large datasets.
+Tables backed by the database (EventLogs, TrafficLogs, TrafficMatchLogs, SemanticOperationLogs, SemanticOperationChainLogs) benefit from automatic SQL pushdown. When the executor encounters leading `where` and `take`/`limit` operators in a query pipeline, it translates KQL expressions directly into SQL WHERE clauses with parameterized queries. This means the database handles filtering before rows are loaded into memory, enabling efficient queries over large datasets.
 
 The following KQL constructs are translated to SQL:
 

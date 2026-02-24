@@ -178,18 +178,18 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
     setShowRunModal(true);
   };
 
-  const handleRunFromModal = (chainId: string, nodeId: string, agentName: string) => {
-    runChain(chainId, nodeId, agentName);
-  };
-
-  const handleRunAdvanced = (chainId: string, targetSpec: import('../../api/types').TargetSpec) => {
-    //
-    // Use the first available node/agent as the primary executor, but pass
-    // the target spec for multi-node targeting.
-    //
-    const primaryNode = nodes[0];
+  const handleRunFromModal = (chainId: string, targetSpec: import('../../api/types').TargetSpec) => {
+    const allNodes = nodes;
+    const filteredNodes = targetSpec.node_ids.length > 0
+      ? allNodes.filter(n => targetSpec.node_ids.includes(n.node_id))
+      : targetSpec.os_filter
+        ? allNodes.filter(n => n.os_details.toLowerCase().includes(targetSpec.os_filter!.toLowerCase()))
+        : allNodes;
+    const primaryNode = filteredNodes[0];
     if (!primaryNode) return;
-    const agentName = primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
+    const agentName = targetSpec.agent_short_names.length > 0
+      ? targetSpec.agent_short_names[0]
+      : primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
     runChain(chainId, primaryNode.node_id, agentName, undefined, targetSpec);
   };
 
@@ -377,7 +377,6 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
           setPreSelectedChain(null);
         }}
         onRun={handleRunFromModal}
-        onRunAdvanced={handleRunAdvanced}
         title="Run Chain"
         items={chains.filter(c => !c.disabled).sort((a, b) => a.name.localeCompare(b.name)).map(chain => ({
           id: chain.id,
