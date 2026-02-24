@@ -2117,43 +2117,59 @@ async fn handle_chain_run(
             .await;
             return;
         }
-        let results = ctx.chain_executor.execute_fan_out(
-            chain,
-            targets,
-            None,
-            working_dir,
-            ctx.service_config.clone(),
-            ctx.semantic_ops_channel.clone(),
-            ctx.broadcast_channel.clone(),
-            ctx.response_tracker.clone(),
-            ctx.database.clone(),
-            Some(ctx.toolkit_manager.clone()),
-        ).await;
-        for result in results {
-            match result {
-                Ok(execution_id) => {
-                    let _ = send_to_client(
-                        &ctx.client_publish_channel,
-                        &client_id,
-                        ClientDirectMessage::ChainExecutionStarted {
-                            execution_id,
-                            chain_id: chain_id.clone(),
-                        },
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    let _ = send_to_client(
-                        &ctx.client_publish_channel,
-                        &client_id,
-                        ClientDirectMessage::ChainError {
-                            message: e.to_string(),
-                        },
-                    )
-                    .await;
+        //
+        // Spawn fan-out in background so we don't block the dispatch loop.
+        // execute_fan_out waits for sequential-per-node completion which
+        // requires the node consumer to process responses.
+        //
+        let chain_executor = ctx.chain_executor.clone();
+        let client_publish_channel = ctx.client_publish_channel.clone();
+        let service_config = ctx.service_config.clone();
+        let semantic_ops_channel = ctx.semantic_ops_channel.clone();
+        let broadcast_channel_clone = ctx.broadcast_channel.clone();
+        let response_tracker = ctx.response_tracker.clone();
+        let database = ctx.database.clone();
+        let toolkit_manager = ctx.toolkit_manager.clone();
+
+        tokio::spawn(async move {
+            let results = chain_executor.execute_fan_out(
+                chain,
+                targets,
+                None,
+                working_dir,
+                service_config,
+                semantic_ops_channel,
+                broadcast_channel_clone,
+                response_tracker,
+                database,
+                Some(toolkit_manager),
+            ).await;
+            for result in results {
+                match result {
+                    Ok(execution_id) => {
+                        let _ = send_to_client(
+                            &client_publish_channel,
+                            &client_id,
+                            ClientDirectMessage::ChainExecutionStarted {
+                                execution_id,
+                                chain_id: chain_id.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = send_to_client(
+                            &client_publish_channel,
+                            &client_id,
+                            ClientDirectMessage::ChainError {
+                                message: e.to_string(),
+                            },
+                        )
+                        .await;
+                    }
                 }
             }
-        }
+        });
         return;
     }
 

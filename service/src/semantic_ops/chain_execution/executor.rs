@@ -364,6 +364,26 @@ impl ChainExecutor {
                         )
                         .await;
 
+                    //
+                    // Wait for this execution to finish before starting the
+                    // next one on the same node, so sessions don't collide.
+                    //
+                    if let Ok(ref id) = exec_id {
+                        let poll_interval = std::time::Duration::from_secs(2);
+                        let max_polls = 1800;
+                        for _ in 0..max_polls {
+                            tokio::time::sleep(poll_interval).await;
+                            let still_running = self_clone.registry.list().iter().any(|e| {
+                                &e.execution_id == id
+                                    && (e.status == common::ChainExecutionStatus::Running
+                                        || e.status == common::ChainExecutionStatus::Queued)
+                            });
+                            if !still_running {
+                                break;
+                            }
+                        }
+                    }
+
                     node_results.push(exec_id);
                 }
                 node_results
