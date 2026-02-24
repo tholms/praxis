@@ -104,18 +104,19 @@ impl Agent for LuaAgent {
 
     async fn do_fingerprint(&self) -> bool {
         let lua = self.vm.lock().unwrap();
-        match runtime::vm_fingerprint_details(&lua) {
+        let available = match runtime::vm_fingerprint_details(&lua) {
             Ok(details) => {
                 *self.fingerprint_process_path.write().unwrap() = details.process_path;
                 *self.fingerprint_version.write().unwrap() = details.version;
-                *self.fingerprint_at.write().unwrap() = Some(std::time::Instant::now());
                 details.available
             }
             Err(e) => {
                 common::log_error!("Lua fingerprint failed for '{}': {}", self.short_name, e);
                 false
             }
-        }
+        };
+        *self.fingerprint_at.write().unwrap() = Some(std::time::Instant::now());
+        available
     }
 
     fn version(&self) -> Option<String> {
