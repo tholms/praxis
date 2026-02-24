@@ -16,6 +16,7 @@ export interface NodeState {
   // Active terminal session ID (if any).
   //
   active_terminal_id?: string | null;
+  privileged: boolean;
 }
 
 export interface DiscoveredAgent {
@@ -31,6 +32,8 @@ export interface SelectedAgent {
   process_name: string | null;
   yolo_mode: boolean;
   working_dir: string | null;
+  active_transaction_id?: string | null;
+  active_prompt_text?: string | null;
 }
 
 //
@@ -128,7 +131,7 @@ export type AgentCommand =
   | { Select: { short_name: string } }
   | { ReadFile: { file_type: AgentFileType; path: string; line_start?: number; line_end?: number } }
   | { WriteFile: { file_type: AgentFileType; path: string; contents: string } }
-  | { GrepFile: { file_type: AgentFileType; path: string; pattern: string } };
+  | { GrepFiles: { file_type: AgentFileType; paths: string[]; pattern: string } };
 
 export type AgentFileType = 'Config' | 'Session';
 
@@ -152,7 +155,8 @@ export type TerminalCommand =
   | 'Create'
   | { Write: { data: number[] } }
   | { Resize: { rows: number; cols: number } }
-  | 'Close';
+  | 'Close'
+  | 'Replay';
 
 export type ConfigCommand = { SetReportInterval: { interval_secs: number } };
 
@@ -205,11 +209,17 @@ export type AgentCommandResult =
   | { YoloSet: { enabled: boolean } }
   | { WriteFileResult: { file_type: AgentFileType; path: string; success: boolean; error?: string } }
   | { ReadFileResult: { file_type: AgentFileType; path: string; content?: string; line_start?: number; line_end?: number; error?: string } }
-  | { GrepFileResult: { file_type: AgentFileType; path: string; pattern: string; matches: GrepMatch[]; error?: string } };
+  | { GrepFilesResult: { file_type: AgentFileType; pattern: string; results: GrepFileEntry[]; errors: string[] } };
 
 export interface GrepMatch {
   line_number: number;
   line_content: string;
+}
+
+export interface GrepFileEntry {
+  path: string;
+  matches: GrepMatch[];
+  error?: string;
 }
 
 export type SessionCommandResult =
@@ -226,7 +236,8 @@ export type TerminalCommandResult =
   | { Created: { terminal_id: string } }
   | 'Written'
   | 'Resized'
-  | 'Closed';
+  | 'Closed'
+  | { Replay: { data: number[] } };
 
 export type ConfigCommandResult = { ReportIntervalSet: { interval_secs: number } };
 
@@ -343,10 +354,6 @@ export interface OperationDefinitionInfo {
 
 export type ChainTriggerType = { type: 'Manual' };
 
-export type ChainTerminationType =
-  | { type: 'Raw' }
-  | { type: 'Semantic'; prompt: string; model_ref?: string | null };
-
 //
 // Session group for elements that share a session.
 //
@@ -354,18 +361,29 @@ export interface SessionGroup {
   id: string;
   color: string;
   yolo_mode: boolean;
+  working_dir?: string | null;
+}
+
+export interface BlockConfig {
+  max_runtime?: number | null;
+  yolo_mode?: boolean | null;
+  working_dir?: string | null;
+  require_all_inputs?: boolean | null;
 }
 
 //
-// Note: Positions are not stored - they are computed dynamically using Dagre
-// layout.
-//
 export type ChainElement =
   | { element_type: 'Trigger'; id: string; trigger_type: ChainTriggerType }
-  | { element_type: 'Operation'; id: string; operation_name: string; model_ref?: string | null; session_group?: SessionGroup | null }
-  | { element_type: 'Transform'; id: string; prompt: string; model_ref?: string | null; session_group?: SessionGroup | null }
-  | { element_type: 'GenericPrompt'; id: string; prompt: string; session_group?: SessionGroup | null }
-  | { element_type: 'Termination'; id: string; termination_type: ChainTerminationType; label: string };
+  | { element_type: 'Operation'; id: string; operation_name: string; model_ref?: string | null; session_group?: SessionGroup | null; block_config?: BlockConfig | null }
+  | { element_type: 'Transform'; id: string; prompt: string; model_ref?: string | null; session_group?: SessionGroup | null; block_config?: BlockConfig | null }
+  | { element_type: 'GenericPrompt'; id: string; prompt: string; session_group?: SessionGroup | null; block_config?: BlockConfig | null }
+  | { element_type: 'Memory'; id: string; key: string; mode: 'Store' | 'Retrieve' }
+  | { element_type: 'Loop'; id: string; max_iterations: number }
+  | { element_type: 'Tool'; id: string; tool_name: string; tool_params: Record<string, unknown>; block_config?: BlockConfig | null }
+  | { element_type: 'Payload'; id: string; payload_id: string; block_config?: BlockConfig | null }
+  | { element_type: 'Termination'; id: string; block_config?: BlockConfig | null };
+
+export type ConnectionCondition = 'OnSuccess' | 'OnFailure';
 
 export interface ChainConnection {
   id: string;
@@ -373,6 +391,7 @@ export interface ChainConnection {
   to_element: string;
   from_port: number;
   to_port: number;
+  condition?: ConnectionCondition | null;
 }
 
 export interface ChainDefinitionInput {
@@ -383,6 +402,7 @@ export interface ChainDefinitionInput {
   connections: ChainConnection[];
   disabled?: boolean;
   timeout?: number;
+  positions?: Record<string, { x: number; y: number }>;
 }
 
 export interface ChainDefinitionFull {
@@ -394,6 +414,7 @@ export interface ChainDefinitionFull {
   connections: ChainConnection[];
   disabled: boolean;
   timeout?: number;
+  positions?: Record<string, { x: number; y: number }>;
   created_at: string;
   updated_at: string;
 }
@@ -407,8 +428,129 @@ export interface ChainDefinitionInfo {
   timeout?: number;
   element_count: number;
   operation_count: number;
+  trigger_count?: number;
   created_at: string;
   updated_at: string;
+}
+
+//
+// Chain triggers and targeting.
+//
+
+export type ScheduleSpec =
+  | { type: 'DailyAt'; hour: number; minute: number }
+  | { type: 'Interval'; minutes: number };
+
+export type TriggerConfig =
+  | { type: 'Scheduled'; schedule: ScheduleSpec; recurring: boolean }
+  | { type: 'InterceptMatch'; rule_id: number }
+  | { type: 'NewNode' };
+
+export interface TargetSpec {
+  node_ids: string[];
+  os_filter?: string | null;
+  agent_short_names: string[];
+  include_triggering_node: boolean;
+}
+
+export interface ChainTriggerInfo {
+  id: string;
+  chain_id: string;
+  trigger_config: TriggerConfig;
+  target_spec: TargetSpec;
+  enabled: boolean;
+  last_fired_at?: string | null;
+  next_fire_at?: string | null;
+}
+
+export interface PayloadInfo {
+  id: string;
+  shortname: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ToolkitModelOption {
+  name: string;
+  provider: string;
+  model: string;
+}
+
+export interface ToolConfigOption {
+  value: string;
+  label: string;
+}
+
+export interface ToolConfigField {
+  name: string;
+  label: string;
+  field_type: string;
+  required: boolean;
+  default_value?: string | null;
+  options?: ToolConfigOption[] | null;
+}
+
+export interface ToolkitToolInfo {
+  tool_name: string;
+  display_name: string;
+  description: string;
+  config_schema: ToolConfigField[];
+}
+
+export interface ToolkitTargetRef {
+  node_id: string;
+  agent_short_name: string;
+  session_id: string;
+  session_file: string;
+}
+
+export interface ToolkitReconTarget {
+  node_id: string;
+  agent_short_name: string;
+  sessions: SessionItem[];
+}
+
+export interface ToolkitTargetPreview {
+  target: ToolkitTargetRef;
+  success: boolean;
+  preview_content?: string | null;
+  original_content?: string | null;
+  diff_hunks?: ToolkitDiffHunk[] | null;
+  error?: string | null;
+}
+
+export interface ToolkitDiffHunk {
+  old_start: number;
+  old_len: number;
+  new_start: number;
+  new_len: number;
+  lines: ToolkitDiffLine[];
+}
+
+export interface ToolkitDiffLine {
+  kind: 'Context' | 'Added' | 'Removed';
+  old_line_no?: number | null;
+  new_line_no?: number | null;
+  content: string;
+}
+
+export interface ToolkitExecuteResult {
+  execution_id: string;
+  tool_name: string;
+  previews: ToolkitTargetPreview[];
+  error?: string | null;
+}
+
+export interface ToolkitApplyItem {
+  target: ToolkitTargetRef;
+  content: string;
+}
+
+export interface ToolkitApplyOutcome {
+  target: ToolkitTargetRef;
+  success: boolean;
+  error?: string | null;
 }
 
 export type ChainExecutionStatus = 'Queued' | 'Running' | 'Completed' | 'Failed' | 'Cancelled';
@@ -417,7 +559,7 @@ export type ElementExecutionStatus =
   | 'Pending'
   | 'WaitingForInputs'
   | 'Running'
-  | { Completed: { output: string } }
+  | { Completed: { output: string; success?: boolean | null } }
   | { Failed: { error: string } }
   | 'Skipped';
 
@@ -429,8 +571,11 @@ export type ElementConfig =
   | { type: 'Operation'; operation_name: string; model_ref?: string | null }
   | { type: 'Transform'; prompt: string; model_ref?: string | null }
   | { type: 'GenericPrompt'; prompt: string }
-  | { type: 'RawOutput' }
-  | { type: 'SemanticOutput'; prompt: string; model_ref?: string | null };
+  | { type: 'Memory'; key: string; mode: 'Store' | 'Retrieve' }
+  | { type: 'Loop'; max_iterations: number }
+  | { type: 'Tool'; tool_name: string; tool_params: Record<string, unknown> }
+  | { type: 'Payload'; payload_id: string }
+  | { type: 'Termination' };
 
 //
 // Element runtime context (dynamic, during execution).
@@ -632,8 +777,9 @@ export type BrowserMessage =
   | { type: 'op_def_list' }
   | { type: 'op_def_delete'; full_name: string }
   | { type: 'op_def_get'; full_name: string }
+  | { type: 'op_def_set_disabled'; full_name: string; disabled: boolean }
   | { type: 'orchestrator_start' }
-  | { type: 'orchestrator_prompt'; message: string }
+  | { type: 'orchestrator_prompt'; prompt_id: string; message: string }
   | { type: 'orchestrator_stop' }
   | { type: 'orchestrator_cancel' }
   //
@@ -656,11 +802,19 @@ export type BrowserMessage =
   | { type: 'chain_create'; definition: ChainDefinitionInput }
   | { type: 'chain_update'; chain_id: string; definition: ChainDefinitionInput }
   | { type: 'chain_delete'; chain_id: string }
-  | { type: 'chain_run'; chain_id: string; node_id: string; agent_short_name: string; working_dir: string | null }
+  | { type: 'chain_set_disabled'; chain_id: string; disabled: boolean }
+  | { type: 'chain_run'; chain_id: string; node_id: string; agent_short_name: string; working_dir: string | null; target_spec?: TargetSpec | null }
   | { type: 'chain_cancel'; execution_id: string }
   | { type: 'chain_execution_list' }
   | { type: 'chain_execution_remove'; execution_id: string }
   | { type: 'chain_execution_clear' }
+  //
+  // Chain trigger messages.
+  //
+  | { type: 'chain_trigger_create'; chain_id: string; trigger_config: TriggerConfig; target_spec: TargetSpec }
+  | { type: 'chain_trigger_update'; trigger_id: string; enabled?: boolean | null; trigger_config?: TriggerConfig | null; target_spec?: TargetSpec | null }
+  | { type: 'chain_trigger_delete'; trigger_id: string }
+  | { type: 'chain_trigger_list'; chain_id?: string | null }
   //
   // Agent discovery messages.
   //
@@ -671,6 +825,19 @@ export type BrowserMessage =
   // Recon messages.
   //
   | { type: 'recon_get'; node_id: string; agent_short_name: string }
+  //
+  // Toolkit messages.
+  //
+  | { type: 'toolkit_list' }
+  | { type: 'toolkit_recon'; tool_name: string; target_spec: TargetSpec }
+  | { type: 'toolkit_execute'; tool_name: string; target_spec: TargetSpec; params: unknown }
+  | { type: 'toolkit_apply'; tool_name: string; execution_id: string; targets: ToolkitApplyItem[] }
+  //
+  // Payload messages.
+  //
+  | { type: 'payload_list' }
+  | { type: 'payload_upsert'; id?: string; shortname: string; content: string }
+  | { type: 'payload_delete'; id: string }
   //
   // Lua agent script messages.
   //
@@ -718,14 +885,14 @@ export type ServerMessage =
   | { type: 'op_def_deleted'; full_name: string; success: boolean }
   | { type: 'op_def_error'; message: string }
   | { type: 'orchestrator_started'; provider: string; model: string }
-  | { type: 'orchestrator_content'; content: string }
-  | { type: 'orchestrator_tool_executing'; name: string; input?: string }
-  | { type: 'orchestrator_tool_executed'; name: string; display: string; success: boolean; result: string }
-  | { type: 'orchestrator_plan_updated'; plan: OrchestratorPlan }
-  | { type: 'orchestrator_done' }
+  | { type: 'orchestrator_content'; prompt_id: string; content: string }
+  | { type: 'orchestrator_tool_executing'; prompt_id: string; name: string; input?: string }
+  | { type: 'orchestrator_tool_executed'; prompt_id: string; name: string; display: string; success: boolean; result: string }
+  | { type: 'orchestrator_plan_updated'; prompt_id: string; plan: OrchestratorPlan }
+  | { type: 'orchestrator_done'; prompt_id: string }
   | { type: 'orchestrator_stopped' }
-  | { type: 'orchestrator_error'; message: string }
-  | { type: 'orchestrator_token_usage'; prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  | { type: 'orchestrator_error'; prompt_id: string; message: string }
+  | { type: 'orchestrator_token_usage'; prompt_id: string; prompt_tokens: number; completion_tokens: number; total_tokens: number }
   //
   // Traffic interception messages.
   //
@@ -751,6 +918,13 @@ export type ServerMessage =
   | { type: 'chain_execution_update'; execution: ChainExecutionUpdate }
   | { type: 'chain_execution_list'; executions: ChainExecutionUpdate[] }
   //
+  // Chain trigger messages.
+  //
+  | { type: 'chain_trigger_created'; trigger: ChainTriggerInfo }
+  | { type: 'chain_trigger_updated'; trigger: ChainTriggerInfo }
+  | { type: 'chain_trigger_deleted'; trigger_id: string }
+  | { type: 'chain_trigger_list_response'; triggers: ChainTriggerInfo[] }
+  //
   // Agent discovery messages.
   //
   | { type: 'discovered_endpoints_list'; endpoints: DiscoveredLlmEndpoint[] }
@@ -759,6 +933,22 @@ export type ServerMessage =
   // Recon messages.
   //
   | { type: 'recon_get_response'; node_id: string; agent_short_name: string; recon_result: ReconResult | null; performed_at: string | null; is_semantic: boolean | null }
+  //
+  // Toolkit messages.
+  //
+  | { type: 'toolkit_list_response'; tools: ToolkitToolInfo[]; models: ToolkitModelOption[] }
+  | { type: 'toolkit_recon_response'; tool_name: string; targets: ToolkitReconTarget[] }
+  | { type: 'toolkit_execution_result'; result: ToolkitExecuteResult }
+  | { type: 'toolkit_apply_result'; execution_id: string; results: ToolkitApplyOutcome[] }
+  | { type: 'toolkit_execution_progress'; execution_id: string; current: number; total: number }
+  | { type: 'toolkit_error'; message: string }
+  //
+  // Payload messages.
+  //
+  | { type: 'payload_list_response'; payloads: PayloadInfo[] }
+  | { type: 'payload_upserted'; payload: PayloadInfo }
+  | { type: 'payload_deleted'; id: string; success: boolean }
+  | { type: 'payload_error'; message: string }
   //
   // Lua agent script messages.
   //

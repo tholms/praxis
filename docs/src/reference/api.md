@@ -149,11 +149,17 @@ pub enum ClientSignalMessage {
     ChainCreate { client_id, definition: ChainDefinitionInput },
     ChainUpdate { client_id, chain_id, definition: ChainDefinitionInput },
     ChainDelete { client_id, chain_id },
-    ChainRun { client_id, chain_id, node_id, agent_short_name },
+    ChainRun { client_id, chain_id, node_id, agent_short_name, working_dir, target_spec },
     ChainCancel { client_id, execution_id },
     ChainExecutionList { client_id },
     ChainExecutionRemove { execution_id },
     ChainExecutionClear,
+
+    // Chain Triggers
+    ChainTriggerCreate { client_id, chain_id, trigger_config: TriggerConfig, target_spec: TargetSpec },
+    ChainTriggerUpdate { client_id, trigger_id, enabled, trigger_config, target_spec },
+    ChainTriggerDelete { client_id, trigger_id },
+    ChainTriggerList { client_id, chain_id: Option<String> },
 
     // Traffic Interception
     TrafficLogRequest { client_id, filters: TrafficLogFilters },
@@ -179,16 +185,6 @@ pub enum ClientSignalMessage {
     // Recon
     ReconGet { client_id, node_id, agent_short_name },
 
-    // Agent Chat (Multi-Agent Chat)
-    AgentChatStart { client_id, goal, yolo_mode },
-    AgentChatStop { client_id, session_id },
-    AgentChatAddAgent { client_id, session_id, node_id, agent_short_name },
-    AgentChatRemoveAgent { client_id, session_id, agent_id },
-    AgentChatReorderAgents { client_id, session_id, agent_ids },
-    AgentChatSendMessage { client_id, session_id, content, channel_id, recipient_nickname },
-    AgentChatJoinChannel { client_id, session_id, channel_name },
-    AgentChatGetHistory { client_id, session_id, channel_id, limit },
-    AgentChatGetState { client_id, session_id },
 }
 ```
 
@@ -231,6 +227,12 @@ pub enum ClientDirectMessage {
     ChainExecutionUpdate(ChainExecutionUpdate),
     ChainExecutionListResponse { executions: Vec<ChainExecutionUpdate> },
 
+    // Chain Triggers
+    ChainTriggerCreated { trigger: ChainTriggerInfo },
+    ChainTriggerUpdated { trigger: ChainTriggerInfo },
+    ChainTriggerDeleted { trigger_id: String },
+    ChainTriggerListResponse { triggers: Vec<ChainTriggerInfo> },
+
     // Traffic Interception
     TrafficLogResponse { entries: Vec<InterceptedTrafficEntry>, total_count },
     TrafficSearchResponse { entries, total_count },
@@ -254,20 +256,6 @@ pub enum ClientDirectMessage {
     // Recon
     ReconGetResponse { node_id, agent_short_name, recon_result, performed_at, is_semantic },
 
-    // Agent Chat
-    AgentChatSessionStarted { session_id, goal },
-    AgentChatSessionStopped { session_id },
-    AgentChatAgentAdded { session_id, agent },
-    AgentChatAgentRemoved { session_id, agent_id },
-    AgentChatAgentStatusChanged { session_id, agent_id, status },
-    AgentChatChannelCreated { session_id, channel },
-    AgentChatChannelUpdated { session_id, channel },
-    AgentChatAgentJoinedChannel { session_id, agent_id, channel_id },
-    AgentChatAgentLeftChannel { session_id, agent_id, channel_id },
-    AgentChatMessage { session_id, message },
-    AgentChatStateUpdate { session },
-    AgentChatHistoryResponse { session_id, channel_id, messages },
-    AgentChatError { message },
 }
 ```
 
@@ -319,7 +307,7 @@ pub enum AgentCommand {
     ReconSemantic,                             // Semantic reconnaissance
     ReadFile { file_type, path, line_start, line_end }, // Read file content
     WriteFile { file_type, path, contents },            // Write file content
-    GrepFile { file_type, path, pattern },              // Search file with regex
+    GrepFiles { file_type, paths, pattern },             // Search files with regex (batch, glob support)
 }
 ```
 
@@ -328,8 +316,9 @@ pub enum AgentCommand {
 `ReadFile` uses 1-based inclusive line bounds (`line_start` and `line_end`).
 If no bounds are provided, the entire file is returned.
 
-`GrepFile` returns matching lines with 1-based line numbers.
-If no lines match, it returns success with an empty `matches` list.
+`GrepFiles` accepts multiple paths (including glob patterns like `/etc/*.conf`)
+and returns per-file results with 1-based line numbers in a single round-trip.
+If no lines match for a file, it returns an entry with an empty `matches` list.
 
 `WriteFile` is only allowed for `file_type=Config`. Session writes are rejected.
 
@@ -452,6 +441,55 @@ pub struct ChainDefinitionInput {
 }
 ```
 
+### TriggerConfig
+
+```rust
+pub enum TriggerConfig {
+    // Time-based trigger
+    Scheduled { schedule: ScheduleSpec, recurring: bool },
+    // Fires when intercepted traffic matches a rule
+    InterceptMatch { rule_id: i64 },
+    // Fires when a new node registers
+    NewNode,
+}
+
+pub enum ScheduleSpec {
+    // Fire once per day at hour:minute (UTC)
+    DailyAt { hour: u8, minute: u8 },
+    // Fire every N minutes
+    Interval { minutes: u32 },
+}
+```
+
+### TargetSpec
+
+```rust
+pub struct TargetSpec {
+    // Specific node IDs (empty = all registered nodes)
+    pub node_ids: Vec<String>,
+    // Case-insensitive substring filter on node os_details
+    pub os_filter: Option<String>,
+    // Specific agent short names (empty = all available agents)
+    pub agent_short_names: Vec<String>,
+    // For event triggers: include the node that triggered the event
+    pub include_triggering_node: bool,
+}
+```
+
+### ChainTriggerInfo
+
+```rust
+pub struct ChainTriggerInfo {
+    pub id: String,
+    pub chain_id: String,
+    pub trigger_config: TriggerConfig,
+    pub target_spec: TargetSpec,
+    pub enabled: bool,
+    pub last_fired_at: Option<DateTime<Utc>>,
+    pub next_fire_at: Option<DateTime<Utc>>,
+}
+```
+
 ### InterceptMethod
 
 ```rust
@@ -495,6 +533,10 @@ All messages are JSON-encoded `ClientDirectMessage` or `ClientBroadcastMessage` 
 | `TerminalOutput` | Direct | PTY output data |
 | `SemanticOpUpdate` | Direct | Operation progress |
 | `ChainExecutionUpdate` | Both | Chain progress |
+| `ChainTriggerCreated` | Direct | Trigger created |
+| `ChainTriggerUpdated` | Direct | Trigger updated |
+| `ChainTriggerDeleted` | Direct | Trigger deleted |
+| `ChainTriggerListResponse` | Direct | Trigger list response |
 
 ## HTTP API
 

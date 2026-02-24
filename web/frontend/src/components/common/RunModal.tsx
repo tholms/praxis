@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Zap, GitBranch } from 'lucide-react';
 import { Modal } from './Modal';
-import type { NodeState } from '../../api/types';
+import { TargetSpecEditor } from './TargetSpecEditor';
+import type { NodeState, TargetSpec } from '../../api/types';
 
 export interface RunItem {
   id: string;
@@ -37,6 +38,11 @@ interface RunModalProps {
   // Optional warning message (e.g., "Running will close current session").
   //
   warningMessage?: string;
+  //
+  // When provided, shows TargetSpec editor instead of simple node/agent
+  // dropdowns and calls this instead of onRun.
+  //
+  onRunAdvanced?: (itemId: string, targetSpec: TargetSpec) => void;
 }
 
 export function RunModal({
@@ -51,10 +57,17 @@ export function RunModal({
   fixedNodeId,
   fixedAgentName,
   warningMessage,
+  onRunAdvanced,
 }: RunModalProps) {
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [nodeId, setNodeId] = useState<string>('');
   const [agentName, setAgentName] = useState<string>('');
+  const [targetSpec, setTargetSpec] = useState<TargetSpec>({
+    node_ids: [],
+    os_filter: null,
+    agent_short_names: [],
+    include_triggering_node: false,
+  });
 
   const Icon = variant === 'operation' ? Zap : GitBranch;
   const isOperation = variant === 'operation';
@@ -76,6 +89,12 @@ export function RunModal({
 
     if (justOpened) {
       setSelectedItemId(preSelectedItem?.id ?? null);
+      setTargetSpec({
+        node_ids: [],
+        os_filter: null,
+        agent_short_names: [],
+        include_triggering_node: false,
+      });
       //
       // Only set node/agent if not using fixed values.
       //
@@ -106,8 +125,18 @@ export function RunModal({
     }
   };
 
+  const useTargetSpec = !!onRunAdvanced && !hasFixedTarget;
+
   const handleRun = () => {
-    if (selectedItemId && effectiveNodeId && effectiveAgentName) {
+    if (!selectedItemId) return;
+
+    if (useTargetSpec) {
+      onRunAdvanced!(selectedItemId, targetSpec);
+      onClose();
+      return;
+    }
+
+    if (effectiveNodeId && effectiveAgentName) {
       onRun(selectedItemId, effectiveNodeId, effectiveAgentName);
       onClose();
     }
@@ -116,7 +145,7 @@ export function RunModal({
   const isSingleSelect = !!preSelectedItem;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={title} size="md">
+    <Modal isOpen={isOpen} onClose={onClose} title={title} size="sm">
       <div className="space-y-0">
         {/*
         //
@@ -124,10 +153,10 @@ export function RunModal({
         //
         */}
         {warningMessage && (
-          <div className="p-2.5 bg-[var(--bg-secondary)]">
-            <div className="flex items-start gap-2 p-3 bg-[var(--accent-warning)]/10 border border-[var(--accent-warning)]/30">
-              <span className="text-[var(--accent-warning)] mt-0.5">⚠</span>
-              <p className="text-sm text-[var(--accent-warning)]">{warningMessage}</p>
+          <div className="p-2 bg-[var(--bg-secondary)]">
+            <div className="flex items-start gap-1.5 p-2 bg-[var(--accent-warning)]/10 border border-[var(--accent-warning)]/30">
+              <span className="text-[var(--accent-warning)] text-xs mt-px">⚠</span>
+              <p className="text-[10px] text-[var(--accent-warning)]">{warningMessage}</p>
             </div>
           </div>
         )}
@@ -137,17 +166,17 @@ export function RunModal({
         // Item selection section.
         //
         */}
-        <div className="p-2.5 bg-[var(--bg-secondary)]">
+        <div className="p-2 bg-[var(--bg-secondary)]">
           {isSingleSelect && preSelectedItem ? (
-            <div className={`p-3 border ${isOperation ? 'bg-[var(--accent-purple)]/10 border-[var(--accent-purple)]/30' : 'bg-[var(--accent-info)]/10 border-[var(--accent-info)]/30'}`}>
+            <div className={`px-2.5 py-2 border ${isOperation ? 'bg-[var(--accent-purple)]/10 border-[var(--accent-purple)]/30' : 'bg-[var(--accent-info)]/10 border-[var(--accent-info)]/30'}`}>
               <div className="flex items-center justify-between">
-                <span className="font-medium text-sm text-highlight">{preSelectedItem.name}</span>
+                <span className="font-medium text-xs text-highlight">{preSelectedItem.name}</span>
                 {preSelectedItem.badge && (
-                  <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{preSelectedItem.badge}</span>
+                  <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{preSelectedItem.badge}</span>
                 )}
               </div>
               {preSelectedItem.description && (
-                <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>{preSelectedItem.description}</p>
+                <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{preSelectedItem.description}</p>
               )}
             </div>
           ) : (
@@ -158,18 +187,18 @@ export function RunModal({
               //
               */}
               {items.length === 0 ? (
-                <div className="p-6 text-center">
-                  <Icon size={32} className="mx-auto mb-3 text-muted opacity-50" />
-                  <p className="text-muted text-sm">No {variant} definitions available</p>
-                  <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Add {variant === 'operation' ? 'operations' : 'chains'} in the Operations page</p>
+                <div className="p-4 text-center">
+                  <Icon size={20} className="mx-auto mb-2 text-muted opacity-50" />
+                  <p className="text-muted text-[10px]">No {variant} definitions available</p>
+                  <p className="text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>Add {variant === 'operation' ? 'operations' : 'chains'} in the Operations page</p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-48 overflow-y-auto scrollbar-on-hover">
+                <div className="space-y-1 max-h-40 overflow-y-auto scrollbar-on-hover">
                   {items.map((item) => (
                     <div
                       key={item.id}
                       onClick={() => setSelectedItemId(item.id)}
-                      className={`p-3 cursor-pointer transition-colors border ${
+                      className={`px-2.5 py-1.5 cursor-pointer transition-colors border ${
                         selectedItemId === item.id
                           ? isOperation
                             ? 'bg-[var(--accent-purple)]/20 border-[var(--accent-purple)]'
@@ -178,13 +207,13 @@ export function RunModal({
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="font-medium text-sm text-highlight">{item.name}</span>
+                        <span className="font-medium text-xs text-highlight">{item.name}</span>
                         {item.badge && (
-                          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{item.badge}</span>
+                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{item.badge}</span>
                         )}
                       </div>
                       {item.description && (
-                        <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--text-muted)' }}>{item.description}</p>
+                        <p className="text-[10px] mt-0.5 line-clamp-2" style={{ color: 'var(--text-muted)' }}>{item.description}</p>
                       )}
                     </div>
                   ))}
@@ -196,44 +225,57 @@ export function RunModal({
 
         {/*
         //
-        // Node/Agent selectors - only show if not using fixed target.
+        // Targeting section.
         //
         */}
         {!hasFixedTarget && (
-          <div className="p-2.5 bg-[var(--bg-secondary)]">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs tracking-wider text-[var(--text-secondary)] mb-1.5">Node</label>
-                <select
-                  value={nodeId}
-                  onChange={(e) => handleNodeChange(e.target.value)}
-                  className="w-full bg-[var(--bg-primary)] border border-dim px-3 py-2 text-sm text-highlight focus:outline-none focus:border-subtle transition-colors"
-                >
-                  <option value="">Select node</option>
-                  {nodes.map((node) => (
-                    <option key={node.node_id} value={node.node_id}>
-                      {node.machine_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          <div className="p-2 bg-[var(--bg-secondary)]">
+            {useTargetSpec ? (
+              <>
+                <div className="text-[9px] tracking-widest text-[var(--text-secondary)] mb-1.5" style={{ letterSpacing: '0.08em' }}>
+                  TARGET SPEC
+                </div>
+                <TargetSpecEditor
+                  value={targetSpec}
+                  onChange={setTargetSpec}
+                  nodes={nodes}
+                />
+              </>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] tracking-wider text-[var(--text-secondary)] mb-1">Node</label>
+                  <select
+                    value={nodeId}
+                    onChange={(e) => handleNodeChange(e.target.value)}
+                    className="w-full bg-[var(--bg-primary)] border border-dim px-2 py-1 text-[10px] text-highlight focus:outline-none focus:border-subtle transition-colors"
+                  >
+                    <option value="">Select node</option>
+                    {nodes.map((node) => (
+                      <option key={node.node_id} value={node.node_id}>
+                        {node.machine_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
-              <div>
-                <label className="block text-xs tracking-wider text-[var(--text-secondary)] mb-1.5">Agent</label>
-                <select
-                  value={agentName}
-                  onChange={(e) => setAgentName(e.target.value)}
-                  className="w-full bg-[var(--bg-primary)] border border-dim px-3 py-2 text-sm text-highlight focus:outline-none focus:border-subtle transition-colors"
-                >
-                  <option value="">Select agent</option>
-                  {nodeId && nodes.find(n => n.node_id === nodeId)?.discovered_agents?.map(agent => (
-                    <option key={agent.short_name} value={agent.short_name}>
-                      {agent.short_name}
-                    </option>
-                  ))}
-                </select>
+                <div>
+                  <label className="block text-[10px] tracking-wider text-[var(--text-secondary)] mb-1">Agent</label>
+                  <select
+                    value={agentName}
+                    onChange={(e) => setAgentName(e.target.value)}
+                    className="w-full bg-[var(--bg-primary)] border border-dim px-2 py-1 text-[10px] text-highlight focus:outline-none focus:border-subtle transition-colors"
+                  >
+                    <option value="">Select agent</option>
+                    {nodeId && nodes.find(n => n.node_id === nodeId)?.discovered_agents?.map(agent => (
+                      <option key={agent.short_name} value={agent.short_name}>
+                        {agent.short_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -242,24 +284,24 @@ export function RunModal({
         // Actions.
         //
         */}
-        <div className="p-2.5 bg-[var(--bg-secondary)]">
-          <div className="flex justify-end gap-2">
+        <div className="p-2 bg-[var(--bg-secondary)]">
+          <div className="flex justify-end gap-1.5">
             <button
               onClick={onClose}
-              className="px-4 py-2 text-xs tracking-wider text-muted border border-dim hover:border-subtle hover:bg-[var(--highlight)] transition-colors"
+              className="px-3 py-1.5 text-[10px] tracking-wider text-muted border border-dim hover:border-subtle hover:bg-[var(--highlight)] transition-colors"
             >
               Cancel
             </button>
             <button
               onClick={handleRun}
-              disabled={!selectedItemId || !effectiveNodeId || !effectiveAgentName}
-              className={`inline-flex items-center gap-2 px-4 py-2 text-xs tracking-wider border border-dim transition-colors disabled:opacity-50 ${
+              disabled={!selectedItemId || (useTargetSpec ? false : (!effectiveNodeId || !effectiveAgentName))}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-[10px] tracking-wider border border-dim transition-colors disabled:opacity-50 ${
                 isOperation
                   ? 'bg-[var(--accent-purple)]/20 text-[var(--accent-purple)] hover:border-[var(--accent-purple)] hover:bg-[var(--accent-purple)]/30'
                   : 'bg-[var(--accent-info)]/20 text-[var(--accent-info)] hover:border-[var(--accent-info)] hover:bg-[var(--accent-info)]/30'
               }`}
             >
-              <Icon size={14} />
+              <Icon size={11} />
               Run
             </button>
           </div>

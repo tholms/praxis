@@ -4,9 +4,11 @@ use common::{
     ChainDefinitionFull, ChainDefinitionInfo, ChainExecutionUpdate,
     CommandRequest, CommandResponse, DiscoveredLlmEndpoint,
     InterceptMethod, InterceptRule, InterceptStatus, InterceptedTrafficEntry,
-    ApplicationLogEntry, OrchestratorPlan, OperationDefinitionInfo, SemanticOpUpdate,
-    SystemState, TerminalOutput, TrafficLogFilters, TrafficMatchWithDetails, RuleScope,
-    TargetDirection, TrafficSearchFilters,
+    ApplicationLogEntry, OrchestratorPlan, OperationDefinitionInfo, PayloadInfo,
+    SemanticOpUpdate, SystemState, TerminalOutput, TrafficLogFilters,
+    TrafficMatchWithDetails, RuleScope, TargetDirection, TrafficSearchFilters,
+    TargetSpec, ToolkitApplyItem, ToolkitApplyOutcome, ToolkitExecuteResult,
+    ToolkitModelOption, ToolkitReconTarget, ToolkitToolInfo,
 };
 
 /// Messages sent from browser to web server
@@ -57,7 +59,7 @@ pub enum BrowserMessage {
     ConfigSet {
         values: HashMap<String, String>,
     },
-    /// Add/update an operation definition from YAML or JSON
+    /// Add/update an operation definition from JSON
     OpDefAdd {
         content: String,
     },
@@ -67,6 +69,11 @@ pub enum BrowserMessage {
     OpDefDelete {
         full_name: String,
     },
+    /// Set the disabled flag on an operation definition
+    OpDefSetDisabled {
+        full_name: String,
+        disabled: bool,
+    },
     /// Get a specific operation definition
     OpDefGet {
         full_name: String,
@@ -75,6 +82,7 @@ pub enum BrowserMessage {
     OrchestratorStart,
     /// Send a prompt to Orchestrator
     OrchestratorPrompt {
+        prompt_id: String,
         message: String,
     },
     /// Stop/interrupt Orchestrator session
@@ -158,6 +166,11 @@ pub enum BrowserMessage {
     ChainDelete {
         chain_id: String,
     },
+    /// Set the disabled flag on a chain
+    ChainSetDisabled {
+        chain_id: String,
+        disabled: bool,
+    },
     /// Run a chain
     ChainRun {
         chain_id: String,
@@ -165,6 +178,9 @@ pub enum BrowserMessage {
         agent_short_name: String,
         /// Working directory for the chain session
         working_dir: Option<String>,
+        /// Optional target spec for multi-target fan-out
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_spec: Option<common::TargetSpec>,
     },
     /// Cancel a chain execution
     ChainCancel {
@@ -178,6 +194,35 @@ pub enum BrowserMessage {
     },
     /// Clear all finished chain executions
     ChainExecutionClear,
+
+    //
+    // Chain trigger messages.
+    //
+    /// Create a chain trigger
+    ChainTriggerCreate {
+        chain_id: String,
+        trigger_config: common::TriggerConfig,
+        target_spec: common::TargetSpec,
+    },
+    /// Update a chain trigger
+    ChainTriggerUpdate {
+        trigger_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_config: Option<common::TriggerConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_spec: Option<common::TargetSpec>,
+    },
+    /// Delete a chain trigger
+    ChainTriggerDelete {
+        trigger_id: String,
+    },
+    /// List chain triggers
+    ChainTriggerList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_id: Option<String>,
+    },
 
     //
     // Agent discovery messages.
@@ -218,6 +263,38 @@ pub enum BrowserMessage {
     ReconGet {
         node_id: String,
         agent_short_name: String,
+    },
+
+    //
+    // Toolkit messages.
+    //
+    ToolkitList,
+    ToolkitRecon {
+        tool_name: String,
+        target_spec: TargetSpec,
+    },
+    ToolkitExecute {
+        tool_name: String,
+        target_spec: TargetSpec,
+        params: serde_json::Value,
+    },
+    ToolkitApply {
+        tool_name: String,
+        execution_id: String,
+        targets: Vec<ToolkitApplyItem>,
+    },
+
+    //
+    // Payload messages.
+    //
+    PayloadList,
+    PayloadUpsert {
+        id: Option<String>,
+        shortname: String,
+        content: String,
+    },
+    PayloadDelete {
+        id: String,
     },
 
     //
@@ -381,15 +458,18 @@ pub enum ServerMessage {
     },
     /// Orchestrator streaming text content
     OrchestratorContent {
+        prompt_id: String,
         content: String,
     },
     /// Orchestrator started executing a tool
     OrchestratorToolExecuting {
+        prompt_id: String,
         name: String,
         input: Option<String>,
     },
     /// Orchestrator finished executing a tool
     OrchestratorToolExecuted {
+        prompt_id: String,
         name: String,
         display: String,
         success: bool,
@@ -397,18 +477,23 @@ pub enum ServerMessage {
     },
     /// Orchestrator plan updated
     OrchestratorPlanUpdated {
+        prompt_id: String,
         plan: OrchestratorPlan,
     },
     /// Orchestrator response complete
-    OrchestratorDone,
+    OrchestratorDone {
+        prompt_id: String,
+    },
     /// Orchestrator session stopped
     OrchestratorStopped,
     /// Orchestrator error
     OrchestratorError {
+        prompt_id: String,
         message: String,
     },
     /// Orchestrator token usage update
     OrchestratorTokenUsage {
+        prompt_id: String,
         prompt_tokens: u32,
         completion_tokens: u32,
         total_tokens: u32,
@@ -505,6 +590,26 @@ pub enum ServerMessage {
     },
 
     //
+    // Chain trigger messages.
+    //
+    /// Chain trigger created
+    ChainTriggerCreated {
+        trigger: common::ChainTriggerInfo,
+    },
+    /// Chain trigger updated
+    ChainTriggerUpdated {
+        trigger: common::ChainTriggerInfo,
+    },
+    /// Chain trigger deleted
+    ChainTriggerDeleted {
+        trigger_id: String,
+    },
+    /// Chain trigger list response
+    ChainTriggerListResponse {
+        triggers: Vec<common::ChainTriggerInfo>,
+    },
+
+    //
     // Agent discovery messages.
     //
     /// Discovered endpoints list
@@ -540,6 +645,50 @@ pub enum ServerMessage {
         recon_result: Option<common::ReconResult>,
         performed_at: Option<String>,
         is_semantic: Option<bool>,
+    },
+
+    //
+    // Toolkit messages.
+    //
+    ToolkitListResponse {
+        tools: Vec<ToolkitToolInfo>,
+        models: Vec<ToolkitModelOption>,
+    },
+    ToolkitReconResponse {
+        tool_name: String,
+        targets: Vec<ToolkitReconTarget>,
+    },
+    ToolkitExecutionResult {
+        result: ToolkitExecuteResult,
+    },
+    ToolkitApplyResult {
+        execution_id: String,
+        results: Vec<ToolkitApplyOutcome>,
+    },
+    ToolkitExecutionProgress {
+        execution_id: String,
+        current: usize,
+        total: usize,
+    },
+    ToolkitError {
+        message: String,
+    },
+
+    //
+    // Payload messages.
+    //
+    PayloadListResponse {
+        payloads: Vec<PayloadInfo>,
+    },
+    PayloadUpserted {
+        payload: PayloadInfo,
+    },
+    PayloadDeleted {
+        id: String,
+        success: bool,
+    },
+    PayloadError {
+        message: String,
     },
 
     //

@@ -13,7 +13,7 @@ pub fn to_common(e: database::ChainElement) -> common::ChainElement {
                 },
             }
         }
-        database::ChainElement::Operation { id, operation_name, model_ref, session_group } => {
+        database::ChainElement::Operation { id, operation_name, model_ref, session_group, block_config } => {
             common::ChainElement::Operation {
                 id,
                 operation_name,
@@ -22,10 +22,17 @@ pub fn to_common(e: database::ChainElement) -> common::ChainElement {
                     id: sg.id,
                     color: sg.color,
                     yolo_mode: sg.yolo_mode,
+                    working_dir: sg.working_dir,
+                }),
+                block_config: block_config.map(|bc| common::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
                 }),
             }
         }
-        database::ChainElement::Transform { id, prompt, model_ref, session_group } => {
+        database::ChainElement::Transform { id, prompt, model_ref, session_group, block_config } => {
             common::ChainElement::Transform {
                 id,
                 prompt,
@@ -34,10 +41,17 @@ pub fn to_common(e: database::ChainElement) -> common::ChainElement {
                     id: sg.id,
                     color: sg.color,
                     yolo_mode: sg.yolo_mode,
+                    working_dir: sg.working_dir,
+                }),
+                block_config: block_config.map(|bc| common::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
                 }),
             }
         }
-        database::ChainElement::GenericPrompt { id, prompt, session_group } => {
+        database::ChainElement::GenericPrompt { id, prompt, session_group, block_config } => {
             common::ChainElement::GenericPrompt {
                 id,
                 prompt,
@@ -45,19 +59,63 @@ pub fn to_common(e: database::ChainElement) -> common::ChainElement {
                     id: sg.id,
                     color: sg.color,
                     yolo_mode: sg.yolo_mode,
+                    working_dir: sg.working_dir,
+                }),
+                block_config: block_config.map(|bc| common::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
                 }),
             }
         }
-        database::ChainElement::Termination { id, termination_type, label } => {
+        database::ChainElement::Memory { id, key, mode } => {
+            common::ChainElement::Memory {
+                id,
+                key,
+                mode: match mode {
+                    database::MemoryMode::Store => common::MemoryMode::Store,
+                    database::MemoryMode::Retrieve => common::MemoryMode::Retrieve,
+                },
+            }
+        }
+        database::ChainElement::Loop { id, max_iterations } => {
+            common::ChainElement::Loop { id, max_iterations }
+        }
+        database::ChainElement::Tool { id, tool_name, tool_params, block_config } => {
+            common::ChainElement::Tool {
+                id,
+                tool_name,
+                tool_params,
+                block_config: block_config.map(|bc| common::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
+                }),
+            }
+        }
+        database::ChainElement::Payload { id, payload_id, block_config } => {
+            common::ChainElement::Payload {
+                id,
+                payload_id,
+                block_config: block_config.map(|bc| common::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
+                }),
+            }
+        }
+        database::ChainElement::Termination { id, block_config } => {
             common::ChainElement::Termination {
                 id,
-                termination_type: match termination_type {
-                    database::TerminationType::Raw => common::ChainTerminationType::Raw,
-                    database::TerminationType::Semantic { prompt, model_ref } => {
-                        common::ChainTerminationType::Semantic { prompt, model_ref }
-                    }
-                },
-                label,
+                block_config: block_config.map(|bc| common::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
+                }),
             }
         }
     }
@@ -74,7 +132,7 @@ pub fn to_database(e: common::ChainElement) -> database::ChainElement {
                 },
             }
         }
-        common::ChainElement::Operation { id, operation_name, model_ref, session_group } => {
+        common::ChainElement::Operation { id, operation_name, model_ref, session_group, block_config } => {
             database::ChainElement::Operation {
                 id,
                 operation_name,
@@ -83,10 +141,17 @@ pub fn to_database(e: common::ChainElement) -> database::ChainElement {
                     id: sg.id,
                     color: sg.color,
                     yolo_mode: sg.yolo_mode,
+                    working_dir: sg.working_dir,
+                }),
+                block_config: block_config.map(|bc| database::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
                 }),
             }
         }
-        common::ChainElement::Transform { id, prompt, model_ref, session_group } => {
+        common::ChainElement::Transform { id, prompt, model_ref, session_group, block_config } => {
             database::ChainElement::Transform {
                 id,
                 prompt,
@@ -95,10 +160,17 @@ pub fn to_database(e: common::ChainElement) -> database::ChainElement {
                     id: sg.id,
                     color: sg.color,
                     yolo_mode: sg.yolo_mode,
+                    working_dir: sg.working_dir,
+                }),
+                block_config: block_config.map(|bc| database::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
                 }),
             }
         }
-        common::ChainElement::GenericPrompt { id, prompt, session_group } => {
+        common::ChainElement::GenericPrompt { id, prompt, session_group, block_config } => {
             database::ChainElement::GenericPrompt {
                 id,
                 prompt,
@@ -106,19 +178,63 @@ pub fn to_database(e: common::ChainElement) -> database::ChainElement {
                     id: sg.id,
                     color: sg.color,
                     yolo_mode: sg.yolo_mode,
+                    working_dir: sg.working_dir,
+                }),
+                block_config: block_config.map(|bc| database::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
                 }),
             }
         }
-        common::ChainElement::Termination { id, termination_type, label } => {
+        common::ChainElement::Memory { id, key, mode } => {
+            database::ChainElement::Memory {
+                id,
+                key,
+                mode: match mode {
+                    common::MemoryMode::Store => database::MemoryMode::Store,
+                    common::MemoryMode::Retrieve => database::MemoryMode::Retrieve,
+                },
+            }
+        }
+        common::ChainElement::Loop { id, max_iterations } => {
+            database::ChainElement::Loop { id, max_iterations }
+        }
+        common::ChainElement::Tool { id, tool_name, tool_params, block_config } => {
+            database::ChainElement::Tool {
+                id,
+                tool_name,
+                tool_params,
+                block_config: block_config.map(|bc| database::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
+                }),
+            }
+        }
+        common::ChainElement::Payload { id, payload_id, block_config } => {
+            database::ChainElement::Payload {
+                id,
+                payload_id,
+                block_config: block_config.map(|bc| database::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
+                }),
+            }
+        }
+        common::ChainElement::Termination { id, block_config } => {
             database::ChainElement::Termination {
                 id,
-                termination_type: match termination_type {
-                    common::ChainTerminationType::Raw => database::TerminationType::Raw,
-                    common::ChainTerminationType::Semantic { prompt, model_ref } => {
-                        database::TerminationType::Semantic { prompt, model_ref }
-                    }
-                },
-                label,
+                block_config: block_config.map(|bc| database::BlockConfig {
+                    max_runtime: bc.max_runtime,
+                    yolo_mode: bc.yolo_mode,
+                    working_dir: bc.working_dir,
+                    require_all_inputs: bc.require_all_inputs,
+                }),
             }
         }
     }

@@ -89,11 +89,14 @@ pub async fn handle_browser_message(
         BrowserMessage::OpDefGet { full_name } => {
             state.rabbitmq.get_op_def(full_name).await?;
         }
+        BrowserMessage::OpDefSetDisabled { full_name, disabled } => {
+            state.rabbitmq.set_op_def_disabled(full_name, disabled).await?;
+        }
         BrowserMessage::OrchestratorStart => {
             state.rabbitmq.start_orchestrator().await?;
         }
-        BrowserMessage::OrchestratorPrompt { message } => {
-            state.rabbitmq.send_orchestrator_prompt(message).await?;
+        BrowserMessage::OrchestratorPrompt { prompt_id, message } => {
+            state.rabbitmq.send_orchestrator_prompt(prompt_id, message).await?;
         }
         BrowserMessage::OrchestratorStop => {
             state.rabbitmq.stop_orchestrator().await?;
@@ -188,15 +191,19 @@ pub async fn handle_browser_message(
         BrowserMessage::ChainDelete { chain_id } => {
             state.rabbitmq.delete_chain(chain_id).await?;
         }
+        BrowserMessage::ChainSetDisabled { chain_id, disabled } => {
+            state.rabbitmq.set_chain_disabled(chain_id, disabled).await?;
+        }
         BrowserMessage::ChainRun {
             chain_id,
             node_id,
             agent_short_name,
             working_dir,
+            target_spec,
         } => {
             state
                 .rabbitmq
-                .run_chain(chain_id, node_id, agent_short_name, working_dir)
+                .run_chain(chain_id, node_id, agent_short_name, working_dir, target_spec)
                 .await?;
         }
         BrowserMessage::ChainCancel { execution_id } => {
@@ -210,6 +217,22 @@ pub async fn handle_browser_message(
         }
         BrowserMessage::ChainExecutionClear => {
             state.rabbitmq.clear_chain_executions().await?;
+        }
+
+        //
+        // Chain trigger messages.
+        //
+        BrowserMessage::ChainTriggerCreate { chain_id, trigger_config, target_spec } => {
+            state.rabbitmq.create_chain_trigger(chain_id, trigger_config, target_spec).await?;
+        }
+        BrowserMessage::ChainTriggerUpdate { trigger_id, enabled, trigger_config, target_spec } => {
+            state.rabbitmq.update_chain_trigger(trigger_id, enabled, trigger_config, target_spec).await?;
+        }
+        BrowserMessage::ChainTriggerDelete { trigger_id } => {
+            state.rabbitmq.delete_chain_trigger(trigger_id).await?;
+        }
+        BrowserMessage::ChainTriggerList { chain_id } => {
+            state.rabbitmq.list_chain_triggers(chain_id).await?;
         }
 
         //
@@ -239,6 +262,31 @@ pub async fn handle_browser_message(
         //
         BrowserMessage::ReconGet { node_id, agent_short_name } => {
             state.rabbitmq.get_recon(node_id, agent_short_name).await?;
+        }
+        BrowserMessage::ToolkitList => {
+            state.rabbitmq.toolkit_list().await?;
+        }
+        BrowserMessage::ToolkitRecon { tool_name, target_spec } => {
+            state.rabbitmq.toolkit_recon(tool_name, target_spec).await?;
+        }
+        BrowserMessage::ToolkitExecute { tool_name, target_spec, params } => {
+            state.rabbitmq.toolkit_execute(tool_name, target_spec, params).await?;
+        }
+        BrowserMessage::ToolkitApply { tool_name, execution_id, targets } => {
+            state.rabbitmq.toolkit_apply(tool_name, execution_id, targets).await?;
+        }
+
+        //
+        // Payload messages.
+        //
+        BrowserMessage::PayloadList => {
+            state.rabbitmq.payload_list().await?;
+        }
+        BrowserMessage::PayloadUpsert { id, shortname, content } => {
+            state.rabbitmq.payload_upsert(id, shortname, content).await?;
+        }
+        BrowserMessage::PayloadDelete { id } => {
+            state.rabbitmq.payload_delete(id).await?;
         }
 
         //

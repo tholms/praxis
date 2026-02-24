@@ -80,9 +80,14 @@ pub async fn select_agent(
     };
 
     let message = NodeDirectMessage::Command(request);
-    publish_json(rabbitmq_channel, &node_queue_name(node_id), &message).await?;
+    let queue = node_queue_name(node_id);
+    let confirm = publish_json(rabbitmq_channel, &queue, &message).await?;
+    let confirmed = confirm.await;
 
-    common::log_info!("Sent agent select command, waiting for response...");
+    common::log_info!(
+        "Sent agent select command to queue '{}', confirm={:?}, waiting for response...",
+        queue, confirmed
+    );
 
     //
     // Wait for response with timeout (30 seconds).
@@ -222,6 +227,11 @@ pub async fn execute_one_shot(
     mut cancel_rx: oneshot::Receiver<()>,
     use_existing_session: bool,
 ) -> Result<(String, String)> {
+    common::log_debug!(
+        "[semop {}] START one-shot '{}' | input: {} bytes",
+        &operation_id[..8], spec.name, spec.operation_prompt.len()
+    );
+
     //
     // Create session if needed.
     //
@@ -312,11 +322,18 @@ pub async fn execute_one_shot(
                     common::log_error!("SemanticResponseError: op={} error=timeout", &operation_id[..8]);
 
                     //
-                    // Cancel the in-flight prompt on the node, then close session.
+                    // Cancel the in-flight prompt on the node, then close
+                    // session. The node's Close handler force-cancels all
+                    // pending transactions.
                     //
 
-                    let _ = cancel_transaction(node_id, &transaction_id, rabbitmq_channel).await;
-                    let _ = close_session(node_id, rabbitmq_channel).await;
+                    common::log_info!("Timeout cleanup: cancelling transaction {} and closing session on node {}", &transaction_id, &node_id[..8]);
+                    if let Err(e) = cancel_transaction(node_id, &transaction_id, rabbitmq_channel).await {
+                        common::log_error!("Failed to cancel transaction on timeout: {}", e);
+                    }
+                    if let Err(e) = close_session(node_id, rabbitmq_channel).await {
+                        common::log_error!("Failed to close session on timeout: {}", e);
+                    }
 
                     Err(anyhow::anyhow!("Operation timed out after {} seconds", spec.timeout))
                 }
@@ -330,8 +347,13 @@ pub async fn execute_one_shot(
             // Cancel the in-flight prompt on the node, then close session.
             //
 
-            let _ = cancel_transaction(node_id, &transaction_id, rabbitmq_channel).await;
-            let _ = close_session(node_id, rabbitmq_channel).await;
+            common::log_info!("Cancel cleanup: cancelling transaction {} and closing session on node {}", &transaction_id, &node_id[..8]);
+            if let Err(e) = cancel_transaction(node_id, &transaction_id, rabbitmq_channel).await {
+                common::log_error!("Failed to cancel transaction: {}", e);
+            }
+            if let Err(e) = close_session(node_id, rabbitmq_channel).await {
+                common::log_error!("Failed to close session: {}", e);
+            }
 
             Err(anyhow::anyhow!("Operation cancelled"))
         }
@@ -344,9 +366,11 @@ pub async fn execute_one_shot(
         let _ = close_session(node_id, rabbitmq_channel).await;
     }
 
-    //
-    // Response is already a (String, String) tuple from the match arm.
-    //
+    common::log_debug!(
+        "[semop {}] END   one-shot '{}' | output: {} bytes",
+        &operation_id[..8], spec.name, response.1.len()
+    );
+
     Ok(response)
 }
 
@@ -366,7 +390,12 @@ pub async fn execute_agent_mode(
     database: Arc<Database>,
     mut cancel_rx: oneshot::Receiver<()>,
     use_existing_session: bool,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<bool>)> {
+    common::log_debug!(
+        "[semop {}] START agent '{}' | iterations: {} | input: {} bytes",
+        &operation_id[..8], spec.name, spec.agent_iterations, spec.operation_prompt.len()
+    );
+
     //
     // Create session if needed.
     //
@@ -455,6 +484,7 @@ pub async fn execute_agent_mode(
 
     let mut final_summary = String::new();
     let mut final_result = String::new();
+    let mut semantic_success: Option<bool> = None;
     let start_time = std::time::Instant::now();
     let timeout_duration = std::time::Duration::from_secs(spec.timeout);
 
@@ -473,6 +503,7 @@ pub async fn execute_agent_mode(
         // Check timeout.
         //
         if start_time.elapsed() > timeout_duration {
+            let _ = database.append_output(operation_id, &fmt_error(&format!("Operation timed out after {} seconds", spec.timeout))).await;
             let _ = close_session(node_id, rabbitmq_channel).await;
             return Err(anyhow::anyhow!(
                 "Operation timed out after {} seconds",
@@ -492,11 +523,18 @@ pub async fn execute_agent_mode(
         //
         // Log iteration start.
         //
+        common::log_debug!(
+            "[semop {}] iteration {}/{}", &operation_id[..8], iteration, spec.agent_iterations
+        );
         let _ = database.append_output(operation_id, &fmt_iteration(iteration as usize, spec.agent_iterations as usize)).await;
 
         //
         // Build and execute AI request.
         //
+        common::log_debug!(
+            "[semop {}] sending to LLM ({}) | {} messages",
+            &operation_id[..8], model, conversation_history.len()
+        );
         let request = ChatCompletionRequest::new(model.clone(), conversation_history.clone())
             .with_max_tokens(4096);
 
@@ -518,6 +556,11 @@ pub async fn execute_agent_mode(
         // Extract response text.
         //
         let text_content = response.text().unwrap_or_default().to_string();
+
+        common::log_debug!(
+            "[semop {}] AI response: {} bytes\n{}",
+            &operation_id[..8], text_content.len(), text_content
+        );
 
         //
         // Log AI response.
@@ -553,6 +596,10 @@ pub async fn execute_agent_mode(
                 //
                 // Log tool call.
                 //
+                common::log_debug!(
+                    "[semop {}] tool call session_prompt: {} bytes\n{}",
+                    &operation_id[..8], prompt_text.len(), prompt_text
+                );
                 let _ = database.append_output(operation_id, &fmt_outgoing("Tool call: session_prompt", prompt_text)).await;
 
                 //
@@ -569,11 +616,18 @@ pub async fn execute_agent_mode(
                     ) => {
                         match result {
                             Ok(response) => {
+                                common::log_debug!(
+                                    "[semop {}] tool result: {} bytes\n{}",
+                                    &operation_id[..8], response.len(), response
+                                );
                                 let _ = database.append_output(operation_id, &fmt_incoming("Tool result", &response)).await;
                                 response
                             }
                             Err(e) => {
                                 let error_msg = format!("Tool error: {}", e);
+                                common::log_debug!(
+                                    "[semop {}] tool error: {}", &operation_id[..8], error_msg
+                                );
                                 let _ = database.append_output(operation_id, &fmt_error(&error_msg)).await;
                                 error_msg
                             }
@@ -605,7 +659,7 @@ pub async fn execute_agent_mode(
         //
         // No tool call found - check for completion signal.
         //
-        if let Some((is_complete, summary, result, _remaining_text)) =
+        if let Some((is_complete, summary, result, _remaining_text, success)) =
             parse_completion_signal(&text_content)
         {
             if is_complete {
@@ -615,11 +669,13 @@ pub async fn execute_agent_mode(
                     text_content.clone()
                 };
                 final_result = result;
+                semantic_success = success;
 
                 //
                 // Log completion.
                 //
-                let _ = database.append_output(operation_id, &fmt_complete(&final_summary)).await;
+                common::log_info!("SemanticOpComplete: op={} result={} summary={}", &operation_id[..8], final_result, final_summary);
+                let _ = database.append_output(operation_id, &fmt_complete(&final_result, &final_summary)).await;
 
                 //
                 // Add final assistant message to history.
@@ -646,14 +702,32 @@ pub async fn execute_agent_mode(
     }
 
     //
+    // If the loop ended without a proper completion signal, treat as failed —
+    // the agent exhausted its iterations without delivering a result.
+    //
+    if semantic_success.is_none() {
+        semantic_success = Some(false);
+        final_result = "failure".to_string();
+        if final_summary.is_empty() {
+            final_summary = "Agent did not complete: iteration limit reached without a result".to_string();
+        }
+    }
+
+    common::log_debug!(
+        "[semop {}] END   agent '{}' | success: {:?} | summary: {} bytes | result: {}",
+        &operation_id[..8], spec.name, semantic_success, final_summary.len(), final_result
+    );
+
+    //
     // Close session if we created it.
     //
     if !use_existing_session {
         let _ = close_session(node_id, rabbitmq_channel).await;
     }
 
-    Ok((final_summary, final_result))
+    Ok((final_summary, final_result, semantic_success))
 }
+
 
 /// Send a prompt to a remote node and wait for response
 async fn send_remote_prompt(
@@ -681,7 +755,7 @@ async fn send_remote_prompt(
         node_id: node_id.to_string(),
         command: NodeCommand::Session(SessionCommand::Prompt {
             text: prompt.to_string(),
-            transaction_id,
+            transaction_id: transaction_id.clone(),
         }),
     };
 
@@ -716,6 +790,15 @@ async fn send_remote_prompt(
         Ok(Err(_)) => Err(anyhow::anyhow!("Response channel closed")),
         Err(_) => {
             common::log_error!("SemanticToolError: op={} error=timeout", &operation_id[..8]);
+
+            common::log_info!("Timeout cleanup: cancelling transaction {} and closing session on node {}", &transaction_id, &node_id[..8]);
+            if let Err(e) = cancel_transaction(node_id, &transaction_id, rabbitmq_channel).await {
+                common::log_error!("Failed to cancel transaction on timeout: {}", e);
+            }
+            if let Err(e) = close_session(node_id, rabbitmq_channel).await {
+                common::log_error!("Failed to close session on timeout: {}", e);
+            }
+
             Err(anyhow::anyhow!(
                 "Prompt timed out after {} seconds",
                 timeout_secs

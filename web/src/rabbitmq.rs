@@ -4,7 +4,7 @@ use common::{
     CLIENT_SIGNAL_QUEUE, CLIENT_BROADCAST_EXCHANGE, WEB_EVENT_LOG_QUEUE,
     ClientSignalMessage, ClientDirectMessage, ClientBroadcastMessage,
     ClientRegistration, CommandRequest, InterceptMethod,
-    TrafficLogFilters, TrafficSearchFilters,
+    TrafficLogFilters, TrafficSearchFilters, TargetSpec, ToolkitApplyItem,
 };
 use futures_util::StreamExt;
 use lapin::{
@@ -154,7 +154,7 @@ impl RabbitMqClient {
         self.publish_signal(message).await
     }
 
-    /// Add/update an operation definition from YAML or JSON
+    /// Add/update an operation definition from JSON
     pub async fn add_op_def(&self, content: String) -> Result<()> {
         let message = ClientSignalMessage::OpDefAdd {
             client_id: self.state.client_id.clone(),
@@ -185,6 +185,16 @@ impl RabbitMqClient {
         let message = ClientSignalMessage::OpDefGet {
             client_id: self.state.client_id.clone(),
             full_name,
+        };
+        self.publish_signal(message).await
+    }
+
+    /// Set the disabled flag on an operation definition
+    pub async fn set_op_def_disabled(&self, full_name: String, disabled: bool) -> Result<()> {
+        let message = ClientSignalMessage::OpDefSetDisabled {
+            client_id: self.state.client_id.clone(),
+            full_name,
+            disabled,
         };
         self.publish_signal(message).await
     }
@@ -238,6 +248,16 @@ impl RabbitMqClient {
         self.publish_signal(message).await
     }
 
+    /// Set the disabled flag on a chain
+    pub async fn set_chain_disabled(&self, chain_id: String, disabled: bool) -> Result<()> {
+        let message = ClientSignalMessage::ChainSetDisabled {
+            client_id: self.state.client_id.clone(),
+            chain_id,
+            disabled,
+        };
+        self.publish_signal(message).await
+    }
+
     /// Run a chain
     pub async fn run_chain(
         &self,
@@ -245,6 +265,7 @@ impl RabbitMqClient {
         node_id: String,
         agent_short_name: String,
         working_dir: Option<String>,
+        target_spec: Option<common::TargetSpec>,
     ) -> Result<()> {
         let message = ClientSignalMessage::ChainRun {
             client_id: self.state.client_id.clone(),
@@ -252,6 +273,7 @@ impl RabbitMqClient {
             node_id,
             agent_short_name,
             working_dir,
+            target_spec,
         };
         self.publish_signal(message).await
     }
@@ -282,6 +304,58 @@ impl RabbitMqClient {
     /// Clear all finished chain executions
     pub async fn clear_chain_executions(&self) -> Result<()> {
         let message = ClientSignalMessage::ChainExecutionClear;
+        self.publish_signal(message).await
+    }
+
+    //
+    // Chain trigger methods.
+    //
+
+    pub async fn create_chain_trigger(
+        &self,
+        chain_id: String,
+        trigger_config: common::TriggerConfig,
+        target_spec: common::TargetSpec,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerCreate {
+            client_id: self.state.client_id.clone(),
+            chain_id,
+            trigger_config,
+            target_spec,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn update_chain_trigger(
+        &self,
+        trigger_id: String,
+        enabled: Option<bool>,
+        trigger_config: Option<common::TriggerConfig>,
+        target_spec: Option<common::TargetSpec>,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerUpdate {
+            client_id: self.state.client_id.clone(),
+            trigger_id,
+            enabled,
+            trigger_config,
+            target_spec,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn delete_chain_trigger(&self, trigger_id: String) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerDelete {
+            client_id: self.state.client_id.clone(),
+            trigger_id,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn list_chain_triggers(&self, chain_id: Option<String>) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerList {
+            client_id: self.state.client_id.clone(),
+            chain_id,
+        };
         self.publish_signal(message).await
     }
 
@@ -482,6 +556,90 @@ impl RabbitMqClient {
     }
 
     //
+    // Toolkit methods.
+    //
+
+    pub async fn toolkit_list(&self) -> Result<()> {
+        let message = ClientSignalMessage::ToolkitList {
+            client_id: self.state.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn toolkit_recon(&self, tool_name: String, target_spec: TargetSpec) -> Result<()> {
+        let message = ClientSignalMessage::ToolkitRecon {
+            client_id: self.state.client_id.clone(),
+            tool_name,
+            target_spec,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn toolkit_execute(
+        &self,
+        tool_name: String,
+        target_spec: TargetSpec,
+        params: serde_json::Value,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::ToolkitExecute {
+            client_id: self.state.client_id.clone(),
+            tool_name,
+            target_spec,
+            params,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn toolkit_apply(
+        &self,
+        tool_name: String,
+        execution_id: String,
+        targets: Vec<ToolkitApplyItem>,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::ToolkitApply {
+            client_id: self.state.client_id.clone(),
+            tool_name,
+            execution_id,
+            targets,
+        };
+        self.publish_signal(message).await
+    }
+
+    //
+    // Payload methods.
+    //
+
+    pub async fn payload_list(&self) -> Result<()> {
+        let message = ClientSignalMessage::PayloadList {
+            client_id: self.state.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn payload_upsert(
+        &self,
+        id: Option<String>,
+        shortname: String,
+        content: String,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::PayloadUpsert {
+            client_id: self.state.client_id.clone(),
+            id,
+            shortname,
+            content,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn payload_delete(&self, id: String) -> Result<()> {
+        let message = ClientSignalMessage::PayloadDelete {
+            client_id: self.state.client_id.clone(),
+            id,
+        };
+        self.publish_signal(message).await
+    }
+
+    //
     // Lua agent script methods.
     //
 
@@ -558,9 +716,10 @@ impl RabbitMqClient {
         self.publish_signal(message).await
     }
 
-    pub async fn send_orchestrator_prompt(&self, prompt: String) -> Result<()> {
+    pub async fn send_orchestrator_prompt(&self, prompt_id: String, prompt: String) -> Result<()> {
         let message = ClientSignalMessage::OrchestratorPrompt {
             client_id: self.state.client_id.clone(),
+            prompt_id,
             message: prompt,
         };
         self.publish_signal(message).await
@@ -1011,6 +1170,22 @@ impl RabbitMqClient {
             }
 
             //
+            // Chain trigger responses.
+            //
+            ClientDirectMessage::ChainTriggerCreated { trigger } => {
+                self.state.broadcast(ServerMessage::ChainTriggerCreated { trigger });
+            }
+            ClientDirectMessage::ChainTriggerUpdated { trigger } => {
+                self.state.broadcast(ServerMessage::ChainTriggerUpdated { trigger });
+            }
+            ClientDirectMessage::ChainTriggerDeleted { trigger_id } => {
+                self.state.broadcast(ServerMessage::ChainTriggerDeleted { trigger_id });
+            }
+            ClientDirectMessage::ChainTriggerListResponse { triggers } => {
+                self.state.broadcast(ServerMessage::ChainTriggerListResponse { triggers });
+            }
+
+            //
             // Agent discovery responses.
             //
             ClientDirectMessage::DiscoveredEndpointsListResponse { endpoints } => {
@@ -1035,6 +1210,40 @@ impl RabbitMqClient {
             //
             ClientDirectMessage::ReconGetResponse { node_id, agent_short_name, recon_result, performed_at, is_semantic } => {
                 self.state.broadcast(ServerMessage::ReconGetResponse { node_id, agent_short_name, recon_result, performed_at, is_semantic });
+            }
+            ClientDirectMessage::ToolkitListResponse { tools, models } => {
+                self.state.broadcast(ServerMessage::ToolkitListResponse { tools, models });
+            }
+            ClientDirectMessage::ToolkitReconResponse { tool_name, targets } => {
+                self.state.broadcast(ServerMessage::ToolkitReconResponse { tool_name, targets });
+            }
+            ClientDirectMessage::ToolkitExecutionResult { result } => {
+                self.state.broadcast(ServerMessage::ToolkitExecutionResult { result });
+            }
+            ClientDirectMessage::ToolkitApplyResult { execution_id, results } => {
+                self.state.broadcast(ServerMessage::ToolkitApplyResult { execution_id, results });
+            }
+            ClientDirectMessage::ToolkitExecutionProgress { execution_id, current, total } => {
+                self.state.broadcast(ServerMessage::ToolkitExecutionProgress { execution_id, current, total });
+            }
+            ClientDirectMessage::ToolkitError { message } => {
+                self.state.broadcast(ServerMessage::ToolkitError { message });
+            }
+
+            //
+            // Payload responses.
+            //
+            ClientDirectMessage::PayloadListResponse { payloads } => {
+                self.state.broadcast(ServerMessage::PayloadListResponse { payloads });
+            }
+            ClientDirectMessage::PayloadUpserted { payload } => {
+                self.state.broadcast(ServerMessage::PayloadUpserted { payload });
+            }
+            ClientDirectMessage::PayloadDeleted { id, success } => {
+                self.state.broadcast(ServerMessage::PayloadDeleted { id, success });
+            }
+            ClientDirectMessage::PayloadError { message } => {
+                self.state.broadcast(ServerMessage::PayloadError { message });
             }
 
             //
@@ -1075,29 +1284,29 @@ impl RabbitMqClient {
             ClientDirectMessage::OrchestratorStarted { provider, model } => {
                 self.state.broadcast(ServerMessage::OrchestratorStarted { provider, model });
             }
-            ClientDirectMessage::OrchestratorContent { content } => {
-                self.state.broadcast(ServerMessage::OrchestratorContent { content });
+            ClientDirectMessage::OrchestratorContent { prompt_id, content } => {
+                self.state.broadcast(ServerMessage::OrchestratorContent { prompt_id, content });
             }
-            ClientDirectMessage::OrchestratorToolExecuting { name, input } => {
-                self.state.broadcast(ServerMessage::OrchestratorToolExecuting { name, input });
+            ClientDirectMessage::OrchestratorToolExecuting { prompt_id, name, input } => {
+                self.state.broadcast(ServerMessage::OrchestratorToolExecuting { prompt_id, name, input });
             }
-            ClientDirectMessage::OrchestratorToolExecuted { name, display, success, result } => {
-                self.state.broadcast(ServerMessage::OrchestratorToolExecuted { name, display, success, result });
+            ClientDirectMessage::OrchestratorToolExecuted { prompt_id, name, display, success, result } => {
+                self.state.broadcast(ServerMessage::OrchestratorToolExecuted { prompt_id, name, display, success, result });
             }
-            ClientDirectMessage::OrchestratorPlanUpdated { plan } => {
-                self.state.broadcast(ServerMessage::OrchestratorPlanUpdated { plan });
+            ClientDirectMessage::OrchestratorPlanUpdated { prompt_id, plan } => {
+                self.state.broadcast(ServerMessage::OrchestratorPlanUpdated { prompt_id, plan });
             }
-            ClientDirectMessage::OrchestratorDone => {
-                self.state.broadcast(ServerMessage::OrchestratorDone);
+            ClientDirectMessage::OrchestratorDone { prompt_id } => {
+                self.state.broadcast(ServerMessage::OrchestratorDone { prompt_id });
             }
             ClientDirectMessage::OrchestratorStopped => {
                 self.state.broadcast(ServerMessage::OrchestratorStopped);
             }
-            ClientDirectMessage::OrchestratorError { message } => {
-                self.state.broadcast(ServerMessage::OrchestratorError { message });
+            ClientDirectMessage::OrchestratorError { prompt_id, message } => {
+                self.state.broadcast(ServerMessage::OrchestratorError { prompt_id, message });
             }
-            ClientDirectMessage::OrchestratorTokenUsage { prompt_tokens, completion_tokens, total_tokens } => {
-                self.state.broadcast(ServerMessage::OrchestratorTokenUsage { prompt_tokens, completion_tokens, total_tokens });
+            ClientDirectMessage::OrchestratorTokenUsage { prompt_id, prompt_tokens, completion_tokens, total_tokens } => {
+                self.state.broadcast(ServerMessage::OrchestratorTokenUsage { prompt_id, prompt_tokens, completion_tokens, total_tokens });
             }
 
             //

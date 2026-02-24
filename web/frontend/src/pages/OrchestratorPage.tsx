@@ -17,8 +17,10 @@ import {
   AlertCircle,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   Download,
   Activity,
+  Brain,
 } from 'lucide-react';
 import { exportOrchestratorSession, downloadTextFile } from '../utils/export';
 import { useApp, type OrchestratorMessage, type OrchestratorToolExecution } from '../context/AppContext';
@@ -39,6 +41,101 @@ function PlanStepIcon({ status }: { status: PlanStep['status'] }) {
     default:
       return <Circle size={10} className="text-muted" />;
   }
+}
+
+//
+// Extract thinking content from <think> tags (supports multiple).
+//
+function parseThinkingContent(content: string): { thinking: string[]; response: string } {
+  const startTag = '<think>';
+  const endTag = '</think>';
+  const thinking: string[] = [];
+  let remaining = content;
+  
+  while (true) {
+    const startIdx = remaining.indexOf(startTag);
+    const endIdx = remaining.indexOf(endTag);
+    
+    if (startIdx === -1 || endIdx === -1 || startIdx > endIdx) {
+      break;
+    }
+    
+    const block = remaining.substring(startIdx + startTag.length, endIdx).trim();
+    if (block) {
+      thinking.push(block);
+    }
+    remaining = remaining.substring(0, startIdx) + remaining.substring(endIdx + endTag.length);
+  }
+  
+  return { thinking, response: remaining.trim() };
+}
+
+//
+// Thinking display — collapsible summary for completed messages, individual
+// expandable blocks during streaming.
+//
+
+function ThinkingBlock({ content, autoExpand = false }: { content: string; autoExpand?: boolean }) {
+  const [show, setShow] = useState(false);
+
+  useEffect(() => {
+    setShow(autoExpand);
+  }, [autoExpand]);
+
+  return (
+    <div>
+      <button
+        onClick={() => setShow(!show)}
+        className="flex items-center gap-1.5 text-xs text-muted/30 hover:text-muted/50 transition-colors"
+      >
+        {show ? <ChevronUp size={12} /> : <ChevronRight size={12} />}
+        <span>Thinking</span>
+      </button>
+      {show && (
+        <div className="mt-1 ml-4 text-[11px] text-muted/25 whitespace-pre-wrap max-h-48 overflow-y-auto">
+          {content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThinkingDisplay({ blocks, collapsible = false }: { blocks: string[]; collapsible?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (blocks.length === 0) return null;
+
+  if (!collapsible) {
+    return (
+      <div className="mb-3 space-y-2">
+        {blocks.map((t, i) => (
+          <ThinkingBlock key={i} content={t} autoExpand={i === blocks.length - 1} />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-2">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-xs px-3 py-1.5 rounded bg-[var(--bg-tertiary)] text-muted hover:bg-[var(--bg-secondary)] transition-colors w-full text-left"
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <Brain size={12} />
+        <span>
+          {blocks.length} thinking block{blocks.length !== 1 ? 's' : ''}
+        </span>
+      </button>
+      {expanded && (
+        <div className="space-y-2 mt-1 pl-2 border-l border-subtle">
+          {blocks.map((t, i) => (
+            <ThinkingBlock key={i} content={t} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 //
@@ -262,6 +359,10 @@ function ToolExecutionDisplay({
 function ChatMessage({ message }: { message: OrchestratorMessage }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+  const isAssistant = !isUser && !isSystem;
+  const { thinking, response } = isAssistant
+    ? parseThinkingContent(message.content)
+    : { thinking: [], response: message.content };
 
   return (
     <div
@@ -292,6 +393,8 @@ function ChatMessage({ message }: { message: OrchestratorMessage }) {
           <ToolExecutionDisplay executions={message.toolExecutions} collapsible={true} />
         )}
 
+        <ThinkingDisplay blocks={thinking} collapsible={true} />
+
         {/*
         //
         // Content.
@@ -299,11 +402,11 @@ function ChatMessage({ message }: { message: OrchestratorMessage }) {
         */}
         {isUser || isSystem ? (
           <div className="whitespace-pre-wrap break-words">{message.content}</div>
-        ) : (
+        ) : response ? (
           <div className="prose prose-invert prose-sm max-w-none break-words prose-table:border-collapse prose-th:border prose-th:border-subtle prose-th:px-3 prose-th:py-2 prose-th:bg-[var(--bg-tertiary)] prose-td:border prose-td:border-subtle prose-td:px-3 prose-td:py-2">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{response}</ReactMarkdown>
           </div>
-        )}
+        ) : null}
 
         <p className="text-xs text-muted mt-2">{message.timestamp.toLocaleTimeString()}</p>
       </div>
@@ -321,6 +424,8 @@ function StreamingMessage({
   content: string;
   toolExecutions: OrchestratorToolExecution[];
 }) {
+  const { thinking, response } = parseThinkingContent(content);
+
   return (
     <div className="flex justify-start">
       <div className="w-full md:max-w-[85%] ascii-box px-3 md:px-4 py-3 bg-[var(--bg-secondary)] text-[var(--text-highlight)]/80">
@@ -332,9 +437,11 @@ function StreamingMessage({
 
         <ToolExecutionDisplay executions={toolExecutions} />
 
-        {content && (
+        <ThinkingDisplay blocks={thinking} />
+
+        {response && (
           <div className="prose prose-invert prose-sm max-w-none break-words prose-table:border-collapse prose-th:border prose-th:border-subtle prose-th:px-3 prose-th:py-2 prose-th:bg-[var(--bg-tertiary)] prose-td:border prose-td:border-subtle prose-td:px-3 prose-td:py-2">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{response}</ReactMarkdown>
           </div>
         )}
 
@@ -809,7 +916,7 @@ function OrchestratorLiveMap({
 }
 
 export function OrchestratorPage() {
-  const { state, orchestratorStart, orchestratorStop, orchestratorCancel, orchestratorPrompt, getConfig } = useApp();
+  const { state, orchestratorStart, orchestratorStop, orchestratorCancel, orchestratorPrompt, getConfig, setConfig } = useApp();
   const { orchestrator } = state;
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -863,28 +970,26 @@ export function OrchestratorPage() {
   };
 
   //
-  // Check if Orchestrator is configured via the LLM feature system.
+  // Parse model definitions and check configuration.
   //
-  const orchestratorConfig = (() => {
-    const selectedModelName = state.config.llm_feature_orchestrator;
-    if (!selectedModelName) return null;
-
-    const modelDefsRaw = state.config.llm_model_definitions;
-    if (!modelDefsRaw) return null;
-
+  const modelDefs: Array<{ name: string; provider: string; model: string }> = useMemo(() => {
+    const raw = state.config.llm_model_definitions;
+    if (!raw) return [];
     try {
-      const defs = JSON.parse(modelDefsRaw) as Array<{ name: string; provider: string; model: string }>;
-      const def = defs.find((d) => d.name === selectedModelName);
-      if (def) {
-        return { provider: def.provider, model: def.model };
-      }
+      const defs = JSON.parse(raw);
+      return Array.isArray(defs) ? defs : [];
     } catch {
-      // Parse error
+      return [];
     }
-    return null;
-  })();
+  }, [state.config.llm_model_definitions]);
 
+  const selectedModelName = state.config.llm_feature_orchestrator || '';
+  const orchestratorConfig = modelDefs.find(d => d.name === selectedModelName) ?? null;
   const isConfigured = !!orchestratorConfig;
+
+  const handleModelChange = (name: string) => {
+    setConfig({ llm_feature_orchestrator: name });
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -905,14 +1010,26 @@ export function OrchestratorPage() {
                 Experimental
               </span>
             </div>
-            <p className="text-muted mt-1">
-              AI-powered red teaming orchestration
-              {orchestratorConfig && (
-                <span className="ml-2 text-[var(--accent-info)]">
-                  · {orchestratorConfig.provider}/{orchestratorConfig.model}
+            <div className="flex items-center gap-3 mt-1">
+              <p className="text-muted">AI-powered red teaming orchestration</p>
+              {!orchestrator.sessionActive && modelDefs.length > 0 && (
+                <select
+                  value={selectedModelName}
+                  onChange={e => handleModelChange(e.target.value)}
+                  className="bg-[var(--bg-secondary)] border border-subtle px-2 py-0.5 text-xs text-highlight focus:outline-none focus:border-[var(--border-active)]"
+                >
+                  {!selectedModelName && <option value="">Select model...</option>}
+                  {modelDefs.map(d => (
+                    <option key={d.name} value={d.name}>{d.name}</option>
+                  ))}
+                </select>
+              )}
+              {orchestrator.sessionActive && orchestratorConfig && (
+                <span className="text-xs text-[var(--accent-info)]">
+                  {orchestratorConfig.provider}/{orchestratorConfig.model}
                 </span>
               )}
-            </p>
+            </div>
           </div>
         </div>
 

@@ -164,7 +164,7 @@ The RabbitMQ URL can also be set via the `PRAXIS_RABBITMQ_URL` environment varia
 ### Node Management
 
 ```bash
-# List all connected nodes
+# List all connected nodes (shows [privileged] tag for root/admin nodes)
 node list
 
 # Select a node by ID prefix
@@ -211,8 +211,10 @@ recon session-read                              # omit path to read all
 # Grep config/session content with regex (pattern first, then optional path)
 recon config-grep "model|profile" /home/user/.codex/config.toml
 recon session-grep "error|warning" /home/user/.codex/sessions/2026-02-13.jsonl
-recon config-grep "model|profile"               # omit path to grep all (interactive picker)
+recon config-grep "model|profile"               # omit path to grep all
 recon session-grep "error|warning"              # omit path to grep all
+# Glob patterns are supported for config files
+recon config-grep "api_key" "/home/user/.config/**/*.toml"
 ```
 
 ### Sessions
@@ -288,6 +290,39 @@ The orchestrator displays:
 Prerequisites:
 - MCP server must be enabled in Settings
 - An LLM model must be configured for the Orchestrator feature in Settings > LLM Providers > Feature Selection
+
+### Chain Triggers
+
+Triggers automate chain execution based on schedules or events. The trigger commands are available through the shared operations layer.
+
+```bash
+# List all triggers
+trigger list
+
+# List triggers for a specific chain
+trigger list --chain my_recon_chain
+
+# Create a scheduled trigger (interval)
+trigger create my_recon_chain --type scheduled --interval 60
+
+# Create a scheduled trigger (daily at specific time, UTC)
+trigger create my_recon_chain --type scheduled --daily-at 14:30
+
+# Create an intercept match trigger
+trigger create my_recon_chain --type intercept-match --rule-id 3
+
+# Create a new-node trigger
+trigger create my_recon_chain --type new-node
+
+# Toggle a trigger on/off
+trigger toggle abc123 --enable
+trigger toggle abc123 --disable
+
+# Delete a trigger
+trigger delete abc123
+```
+
+Trigger IDs support prefix matching - you only need to type enough characters to uniquely identify the trigger.
 
 ### Traffic Search
 
@@ -373,7 +408,7 @@ For other MCP-compatible clients, use JSON configuration:
 The MCP server exposes the following tools:
 
 **Node Management:**
-- `node_list` - List all connected nodes
+- `node_list` - List all connected nodes (includes privileged status)
 - `node_select` - Get details for a specific node
 
 **Agent Management:**
@@ -387,8 +422,8 @@ The MCP server exposes the following tools:
 - `recon_list` - List stored recon data (section: all/sessions/tools/projects/configs)
 - `recon_config_read` - Read config file content (omit path to read all)
 - `recon_session_read` - Read session file content (omit path to read all)
-- `recon_config_grep` - Grep config files with regex (omit path to grep all)
-- `recon_session_grep` - Grep session files with regex (omit path to grep all)
+- `recon_config_grep` - Grep config files with regex. Supports glob patterns and multiple paths. Omit paths to grep all.
+- `recon_session_grep` - Grep session files with regex. Supports multiple paths. Omit paths to grep all.
 - `write_file` - Write file content
 
 **Sessions:**
@@ -402,6 +437,12 @@ The MCP server exposes the following tools:
 - `op_info` - Show full info for an operation or chain execution (includes result/output)
 - `op_cancel` - Cancel a running operation or chain execution
 - `op_list` - List tracked operations and chain executions
+
+**Chain Triggers:**
+- `trigger_list` - List all chain triggers (optionally filter by chain name or ID)
+- `trigger_create` - Create a trigger for a chain (scheduled, intercept match, or new node)
+- `trigger_delete` - Delete a trigger by ID prefix
+- `trigger_toggle` - Enable or disable a trigger by ID prefix
 
 **Traffic:**
 - `traffic_search` - Search intercepted traffic
@@ -451,12 +492,12 @@ The CLI currently supports a subset of Praxis features focused on orchestration:
 - Node and agent management
 - Sessions and prompts
 - Semantic operations and chains
+- Chain trigger management
 - Interactive LLM orchestrator
 - Traffic search
 - MCP server mode for AI assistant integration
 
 Features **not** available in the CLI:
-- AgentChat (IRC-style multi-agent chat)
 - Visual chain editor
 - Real-time traffic monitoring
 - Terminal emulation

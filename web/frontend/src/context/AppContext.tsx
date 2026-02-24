@@ -32,13 +32,22 @@ import type {
   ChainDefinitionFull,
   ChainDefinitionInput,
   ChainExecutionUpdate,
+  ChainTriggerInfo,
+  TriggerConfig,
+  TargetSpec,
   DiscoveredLlmEndpoint,
+  PayloadInfo,
   AgentChatAgentInfo,
   AgentChatAgentStatus,
   AgentChatChannelInfo,
   AgentChatMessageInfo,
   AgentChatSessionState,
   LuaAgentScriptInfo,
+  ToolkitExecuteResult,
+  ToolkitApplyOutcome,
+  ToolkitModelOption,
+  ToolkitReconTarget,
+  ToolkitToolInfo,
 } from '../api/types';
 
 //
@@ -61,6 +70,7 @@ const initialOrchestratorState: OrchestratorState = {
   streamingContent: '',
   currentToolExecutions: [],
   tokenUsage: null,
+  currentPromptId: null,
 };
 
 const MAX_RECENT_NODES = 3;
@@ -97,8 +107,10 @@ interface ChainState {
   chainDefinitionsCache: Record<string, ChainDefinitionFull>;
   loadingChains: Set<string>;
   executions: ChainExecutionUpdate[];
+  triggers: ChainTriggerInfo[];
   chainError: string | null;
   chainSuccess: string | null;
+  lastCreatedChainId: string | null;
 }
 
 const initialChainState: ChainState = {
@@ -107,8 +119,10 @@ const initialChainState: ChainState = {
   chainDefinitionsCache: {},
   loadingChains: new Set(),
   executions: [],
+  triggers: [],
   chainError: null,
   chainSuccess: null,
+  lastCreatedChainId: null,
 };
 
 //
@@ -134,6 +148,16 @@ interface AgentChatState {
   currentChannelId: string | null;
   messages: AgentChatMessageInfo[];
   isLoading: boolean;
+  error: string | null;
+}
+
+interface ToolkitState {
+  tools: ToolkitToolInfo[];
+  models: ToolkitModelOption[];
+  reconTargets: ToolkitReconTarget[];
+  executeResult: ToolkitExecuteResult | null;
+  applyResults: ToolkitApplyOutcome[] | null;
+  executionProgress: { current: number; total: number } | null;
   error: string | null;
 }
 
@@ -166,6 +190,16 @@ const initialAgentChatState: AgentChatState = {
   error: null,
 };
 
+const initialToolkitState: ToolkitState = {
+  tools: [],
+  models: [],
+  reconTargets: [],
+  executeResult: null,
+  applyResults: null,
+  executionProgress: null,
+  error: null,
+};
+
 //
 // State.
 //
@@ -186,7 +220,9 @@ interface AppState {
   chains: ChainState;
   discovery: DiscoveryState;
   agentChat: AgentChatState;
+  toolkit: ToolkitState;
   luaAgentScripts: LuaAgentScriptInfo[];
+  payloads: PayloadInfo[];
   //
   // Agent session messages keyed by session_id.
   //
@@ -219,7 +255,9 @@ function createInitialState(): AppState {
     chains: initialChainState,
     discovery: initialDiscoveryState,
     agentChat: initialAgentChatState,
+    toolkit: initialToolkitState,
     luaAgentScripts: [],
+    payloads: [],
     agentSessionMessages: {},
     recentlyAccessedNodeIds: loadRecentNodes(MAX_RECENT_NODES),
   };
@@ -242,7 +280,7 @@ type Action =
   | { type: 'ORCHESTRATOR_STARTING' }
   | { type: 'ORCHESTRATOR_STARTED'; provider: string; model: string }
   | { type: 'ORCHESTRATOR_STOPPED' }
-  | { type: 'ORCHESTRATOR_ADD_USER_MESSAGE'; message: string }
+  | { type: 'ORCHESTRATOR_ADD_USER_MESSAGE'; message: string; promptId: string }
   | { type: 'ORCHESTRATOR_ADD_CONTENT'; content: string }
   | { type: 'ORCHESTRATOR_TOOL_EXECUTING'; name: string; input?: string }
   | { type: 'ORCHESTRATOR_TOOL_EXECUTED'; name: string; display: string; success: boolean; result: string }
@@ -287,8 +325,13 @@ type Action =
   | { type: 'DELETE_CHAIN'; chain_id: string }
   | { type: 'SET_CHAIN_EXECUTIONS'; executions: ChainExecutionUpdate[] }
   | { type: 'UPDATE_CHAIN_EXECUTION'; execution: ChainExecutionUpdate }
+  | { type: 'SET_CHAIN_TRIGGERS'; triggers: ChainTriggerInfo[] }
+  | { type: 'ADD_CHAIN_TRIGGER'; trigger: ChainTriggerInfo }
+  | { type: 'UPDATE_CHAIN_TRIGGER'; trigger: ChainTriggerInfo }
+  | { type: 'DELETE_CHAIN_TRIGGER'; trigger_id: string }
   | { type: 'SET_CHAIN_ERROR'; error: string | null }
   | { type: 'SET_CHAIN_SUCCESS'; message: string | null }
+  | { type: 'SET_LAST_CREATED_CHAIN_ID'; chainId: string | null }
   //
   // Recent nodes action.
   //
@@ -320,9 +363,22 @@ type Action =
   | { type: 'AGENT_CHAT_CLEAR_ERROR' }
   | { type: 'AGENT_CHAT_SET_LOADING'; loading: boolean }
   //
+  // Toolkit actions.
+  //
+  | { type: 'TOOLKIT_LIST_RESPONSE'; tools: ToolkitToolInfo[]; models: ToolkitModelOption[] }
+  | { type: 'TOOLKIT_RECON_RESPONSE'; targets: ToolkitReconTarget[] }
+  | { type: 'TOOLKIT_EXECUTE_RESULT'; result: ToolkitExecuteResult }
+  | { type: 'TOOLKIT_EXECUTION_PROGRESS'; current: number; total: number }
+  | { type: 'TOOLKIT_APPLY_RESULT'; results: ToolkitApplyOutcome[] }
+  | { type: 'TOOLKIT_ERROR'; message: string }
+  //
   // Lua agent script actions.
   //
-  | { type: 'SET_LUA_AGENT_SCRIPTS'; scripts: LuaAgentScriptInfo[] };
+  | { type: 'SET_LUA_AGENT_SCRIPTS'; scripts: LuaAgentScriptInfo[] }
+  //
+  // Payload actions.
+  //
+  | { type: 'SET_PAYLOADS'; payloads: PayloadInfo[] };
 
 function reduceCore(state: AppState, action: Action): AppState | null {
   switch (action.type) {
@@ -358,6 +414,8 @@ function reduceCore(state: AppState, action: Action): AppState | null {
       return { ...state, opDefSuccess: action.fullName, opDefError: null };
     case 'SET_LUA_AGENT_SCRIPTS':
       return { ...state, luaAgentScripts: action.scripts };
+    case 'SET_PAYLOADS':
+      return { ...state, payloads: action.payloads };
     default:
       return null;
   }
@@ -398,6 +456,17 @@ function reduceOrchestrator(state: AppState, action: Action): AppState | null {
           sessionActive: false,
           isStarting: false,
           isLoading: false,
+          messages: state.orchestrator.sessionActive
+            ? [
+                ...state.orchestrator.messages,
+                {
+                  id: generateUUID(),
+                  role: 'system',
+                  content: 'Orchestrator session stopped.',
+                  timestamp: new Date(),
+                },
+              ]
+            : state.orchestrator.messages,
         },
       };
     case 'ORCHESTRATOR_ADD_USER_MESSAGE':
@@ -414,6 +483,7 @@ function reduceOrchestrator(state: AppState, action: Action): AppState | null {
           isLoading: true,
           streamingContent: '',
           currentToolExecutions: [],
+          currentPromptId: action.promptId,
         },
       };
     case 'ORCHESTRATOR_ADD_CONTENT': {
@@ -518,9 +588,10 @@ function reduceOrchestrator(state: AppState, action: Action): AppState | null {
       return {
         ...state,
         orchestrator: {
-          ...state.orchestrator,
-          messages: [],
-          currentPlan: null,
+          ...initialOrchestratorState,
+          sessionActive: state.orchestrator.sessionActive,
+          provider: state.orchestrator.provider,
+          model: state.orchestrator.model,
         },
       };
     case 'ORCHESTRATOR_SET_LOADING':
@@ -731,7 +802,15 @@ function reduceChains(state: AppState, action: Action): AppState | null {
       return { ...state, chains: { ...state.chains, chains: [...state.chains.chains, action.chain] } };
     case 'UPDATE_CHAIN': {
       const updatedChains = state.chains.chains.map(c => c.id === action.chain.id ? action.chain : c);
-      return { ...state, chains: { ...state.chains, chains: updatedChains } };
+      //
+      // Invalidate cached full definition so next load fetches fresh data
+      // with updated block_config and other settings.
+      //
+      const { [action.chain.id]: _, ...remainingCache } = state.chains.chainDefinitionsCache;
+      const clearedCurrentChain = state.chains.currentChain?.id === action.chain.id
+        ? null
+        : state.chains.currentChain;
+      return { ...state, chains: { ...state.chains, chains: updatedChains, currentChain: clearedCurrentChain, chainDefinitionsCache: remainingCache } };
     }
     case 'DELETE_CHAIN':
       return { ...state, chains: { ...state.chains, chains: state.chains.chains.filter(c => c.id !== action.chain_id) } };
@@ -746,10 +825,27 @@ function reduceChains(state: AppState, action: Action): AppState | null {
       }
       return { ...state, chains: { ...state.chains, executions: [...state.chains.executions, action.execution] } };
     }
+    case 'SET_CHAIN_TRIGGERS':
+      return { ...state, chains: { ...state.chains, triggers: action.triggers } };
+    case 'ADD_CHAIN_TRIGGER':
+      return { ...state, chains: { ...state.chains, triggers: [...state.chains.triggers, action.trigger] } };
+    case 'UPDATE_CHAIN_TRIGGER': {
+      const triggerIndex = state.chains.triggers.findIndex(t => t.id === action.trigger.id);
+      if (triggerIndex >= 0) {
+        const newTriggers = [...state.chains.triggers];
+        newTriggers[triggerIndex] = action.trigger;
+        return { ...state, chains: { ...state.chains, triggers: newTriggers } };
+      }
+      return { ...state, chains: { ...state.chains, triggers: [...state.chains.triggers, action.trigger] } };
+    }
+    case 'DELETE_CHAIN_TRIGGER':
+      return { ...state, chains: { ...state.chains, triggers: state.chains.triggers.filter(t => t.id !== action.trigger_id) } };
     case 'SET_CHAIN_ERROR':
       return { ...state, chains: { ...state.chains, chainError: action.error, chainSuccess: null } };
     case 'SET_CHAIN_SUCCESS':
       return { ...state, chains: { ...state.chains, chainSuccess: action.message, chainError: null } };
+    case 'SET_LAST_CREATED_CHAIN_ID':
+      return { ...state, chains: { ...state.chains, lastCreatedChainId: action.chainId } };
     default:
       return null;
   }
@@ -995,6 +1091,43 @@ function reduceAgentChat(state: AppState, action: Action): AppState | null {
   }
 }
 
+function reduceToolkit(state: AppState, action: Action): AppState | null {
+  switch (action.type) {
+    case 'TOOLKIT_LIST_RESPONSE':
+      return {
+        ...state,
+        toolkit: { ...state.toolkit, tools: action.tools, models: action.models, error: null },
+      };
+    case 'TOOLKIT_RECON_RESPONSE':
+      return {
+        ...state,
+        toolkit: { ...state.toolkit, reconTargets: action.targets, error: null },
+      };
+    case 'TOOLKIT_EXECUTE_RESULT':
+      return {
+        ...state,
+        toolkit: { ...state.toolkit, executeResult: action.result, applyResults: null, executionProgress: null, error: null },
+      };
+    case 'TOOLKIT_EXECUTION_PROGRESS':
+      return {
+        ...state,
+        toolkit: { ...state.toolkit, executionProgress: { current: action.current, total: action.total } },
+      };
+    case 'TOOLKIT_APPLY_RESULT':
+      return {
+        ...state,
+        toolkit: { ...state.toolkit, applyResults: action.results, error: null },
+      };
+    case 'TOOLKIT_ERROR':
+      return {
+        ...state,
+        toolkit: { ...state.toolkit, error: action.message, executionProgress: null },
+      };
+    default:
+      return null;
+  }
+}
+
 function reducer(state: AppState, action: Action): AppState {
   return (
     reduceCore(state, action)
@@ -1006,6 +1139,7 @@ function reducer(state: AppState, action: Action): AppState {
     ?? reduceRecentNodes(state, action)
     ?? reduceDiscovery(state, action)
     ?? reduceAgentChat(state, action)
+    ?? reduceToolkit(state, action)
     ?? state
   );
 }
@@ -1088,7 +1222,7 @@ interface AppContextValue {
   createChain: (definition: ChainDefinitionInput) => void;
   updateChain: (chainId: string, definition: ChainDefinitionInput) => void;
   deleteChain: (chainId: string) => void;
-  runChain: (chainId: string, nodeId: string, agentShortName: string, workingDir?: string) => void;
+  runChain: (chainId: string, nodeId: string, agentShortName: string, workingDir?: string, targetSpec?: TargetSpec) => void;
   cancelChainExecution: (executionId: string) => void;
   removeChainExecution: (executionId: string) => void;
   //
@@ -1098,6 +1232,14 @@ interface AppContextValue {
   clearChainExecutions: () => void;
   requestChainExecutions: () => void;
   clearChainStatus: () => void;
+  clearLastCreatedChain: () => void;
+  //
+  // Chain triggers.
+  //
+  requestChainTriggers: (chainId?: string) => void;
+  createChainTrigger: (chainId: string, triggerConfig: TriggerConfig, targetSpec: TargetSpec) => void;
+  updateChainTrigger: (triggerId: string, updates: { enabled?: boolean; trigger_config?: TriggerConfig; target_spec?: TargetSpec }) => void;
+  deleteChainTrigger: (triggerId: string) => void;
   //
   // Agent discovery.
   //
@@ -1223,7 +1365,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'SET_OP_DEF_SUCCESS', fullName: message.full_name });
           break;
         //
-        // Orchestrator messages.
+        // Orchestrator messages. Events carry a prompt_id; discard stale
+        // events that don't match the current prompt.
         //
         case 'orchestrator_started':
           dispatch({ type: 'ORCHESTRATOR_STARTED', provider: message.provider, model: message.model });
@@ -1232,34 +1375,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'ORCHESTRATOR_STOPPED' });
           break;
         case 'orchestrator_content':
-          dispatch({ type: 'ORCHESTRATOR_ADD_CONTENT', content: message.content });
+          if (message.prompt_id === String(orchestratorPromptSeq.current)) {
+            dispatch({ type: 'ORCHESTRATOR_ADD_CONTENT', content: message.content });
+          }
           break;
         case 'orchestrator_tool_executing':
-          if (message.name !== 'report_plan') {
+          if (message.prompt_id === String(orchestratorPromptSeq.current) && message.name !== 'report_plan') {
             dispatch({ type: 'ORCHESTRATOR_TOOL_EXECUTING', name: message.name, input: message.input });
           }
           break;
         case 'orchestrator_tool_executed':
-          if (message.name !== 'report_plan') {
+          if (message.prompt_id === String(orchestratorPromptSeq.current) && message.name !== 'report_plan') {
             dispatch({ type: 'ORCHESTRATOR_TOOL_EXECUTED', name: message.name, display: message.display, success: message.success, result: message.result });
           }
           break;
         case 'orchestrator_plan_updated':
-          dispatch({ type: 'ORCHESTRATOR_PLAN_UPDATED', plan: message.plan });
+          if (message.prompt_id === String(orchestratorPromptSeq.current)) {
+            dispatch({ type: 'ORCHESTRATOR_PLAN_UPDATED', plan: message.plan });
+          }
           break;
         case 'orchestrator_done':
-          dispatch({ type: 'ORCHESTRATOR_DONE' });
+          if (message.prompt_id === String(orchestratorPromptSeq.current)) {
+            dispatch({ type: 'ORCHESTRATOR_DONE' });
+          }
           break;
         case 'orchestrator_error':
-          dispatch({ type: 'ORCHESTRATOR_ERROR', message: message.message });
+          if (message.prompt_id === String(orchestratorPromptSeq.current)) {
+            dispatch({ type: 'ORCHESTRATOR_ERROR', message: message.message });
+          }
           break;
         case 'orchestrator_token_usage':
-          dispatch({
-            type: 'ORCHESTRATOR_TOKEN_USAGE',
-            promptTokens: message.prompt_tokens,
-            completionTokens: message.completion_tokens,
-            totalTokens: message.total_tokens,
-          });
+          if (message.prompt_id === String(orchestratorPromptSeq.current)) {
+            dispatch({
+              type: 'ORCHESTRATOR_TOKEN_USAGE',
+              promptTokens: message.prompt_tokens,
+              completionTokens: message.completion_tokens,
+              totalTokens: message.total_tokens,
+            });
+          }
           break;
         //
         // Traffic interception messages.
@@ -1304,6 +1457,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         case 'chain_created':
           dispatch({ type: 'ADD_CHAIN', chain: message.chain });
           dispatch({ type: 'SET_CHAIN_SUCCESS', message: `Chain '${message.chain.name}' created` });
+          dispatch({ type: 'SET_LAST_CREATED_CHAIN_ID', chainId: message.chain.id });
           break;
         case 'chain_updated':
           dispatch({ type: 'UPDATE_CHAIN', chain: message.chain });
@@ -1327,6 +1481,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
           break;
         case 'chain_execution_list':
           dispatch({ type: 'SET_CHAIN_EXECUTIONS', executions: message.executions });
+          break;
+
+        //
+        // Chain trigger messages.
+        //
+        case 'chain_trigger_created':
+          dispatch({ type: 'ADD_CHAIN_TRIGGER', trigger: message.trigger });
+          break;
+        case 'chain_trigger_updated':
+          dispatch({ type: 'UPDATE_CHAIN_TRIGGER', trigger: message.trigger });
+          break;
+        case 'chain_trigger_deleted':
+          dispatch({ type: 'DELETE_CHAIN_TRIGGER', trigger_id: message.trigger_id });
+          break;
+        case 'chain_trigger_list_response':
+          dispatch({ type: 'SET_CHAIN_TRIGGERS', triggers: message.triggers });
           break;
 
         //
@@ -1358,10 +1528,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
           //
           window.dispatchEvent(new CustomEvent('ws-message', { detail: message }));
           break;
+        case 'toolkit_list_response':
+          dispatch({ type: 'TOOLKIT_LIST_RESPONSE', tools: message.tools, models: message.models });
+          break;
+        case 'toolkit_recon_response':
+          dispatch({ type: 'TOOLKIT_RECON_RESPONSE', targets: message.targets });
+          break;
+        case 'toolkit_execution_result':
+          dispatch({ type: 'TOOLKIT_EXECUTE_RESULT', result: message.result });
+          break;
+        case 'toolkit_execution_progress':
+          dispatch({ type: 'TOOLKIT_EXECUTION_PROGRESS', current: message.current, total: message.total });
+          break;
+        case 'toolkit_apply_result':
+          dispatch({ type: 'TOOLKIT_APPLY_RESULT', results: message.results });
+          break;
+        case 'toolkit_error':
+          dispatch({ type: 'TOOLKIT_ERROR', message: message.message });
+          break;
 
         //
         // Lua agent script messages.
         //
+        //
+        // Payload messages.
+        //
+        case 'payload_list_response':
+          dispatch({ type: 'SET_PAYLOADS', payloads: message.payloads });
+          break;
+        case 'payload_upserted':
+        case 'payload_deleted':
+          wsClient.send({ type: 'payload_list' });
+          break;
+        case 'payload_error':
+          break;
+
         case 'lua_agent_script_added':
         case 'lua_agent_script_updated':
         case 'lua_agent_script_deleted':
@@ -1574,9 +1775,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'ORCHESTRATOR_DONE' });
   }, []);
 
+  const orchestratorPromptSeq = useRef(0);
+
   const orchestratorPrompt = useCallback((message: string) => {
-    dispatch({ type: 'ORCHESTRATOR_ADD_USER_MESSAGE', message });
-    wsClient.send({ type: 'orchestrator_prompt', message });
+    orchestratorPromptSeq.current += 1;
+    const promptId = String(orchestratorPromptSeq.current);
+    dispatch({ type: 'ORCHESTRATOR_ADD_USER_MESSAGE', message, promptId });
+    wsClient.send({ type: 'orchestrator_prompt', prompt_id: promptId, message });
   }, []);
 
   const orchestratorClearMessages = useCallback(() => {
@@ -1688,13 +1893,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     wsClient.send({ type: 'chain_delete', chain_id: chainId });
   }, []);
 
-  const runChain = useCallback((chainId: string, nodeId: string, agentShortName: string, workingDir?: string) => {
+  const runChain = useCallback((chainId: string, nodeId: string, agentShortName: string, workingDir?: string, targetSpec?: TargetSpec) => {
     wsClient.send({
       type: 'chain_run',
       chain_id: chainId,
       node_id: nodeId,
       agent_short_name: agentShortName,
       working_dir: workingDir ?? null,
+      target_spec: targetSpec ?? null,
     });
   }, []);
 
@@ -1733,6 +1939,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const clearChainStatus = useCallback(() => {
     dispatch({ type: 'SET_CHAIN_ERROR', error: null });
     dispatch({ type: 'SET_CHAIN_SUCCESS', message: null });
+  }, []);
+
+  const clearLastCreatedChain = useCallback(() => {
+    dispatch({ type: 'SET_LAST_CREATED_CHAIN_ID', chainId: null });
+  }, []);
+
+  //
+  // Chain trigger methods.
+  //
+
+  const requestChainTriggers = useCallback((chainId?: string) => {
+    wsClient.send({ type: 'chain_trigger_list', chain_id: chainId ?? null });
+  }, []);
+
+  const createChainTrigger = useCallback((chainId: string, triggerConfig: TriggerConfig, targetSpec: TargetSpec) => {
+    wsClient.send({ type: 'chain_trigger_create', chain_id: chainId, trigger_config: triggerConfig, target_spec: targetSpec });
+  }, []);
+
+  const updateChainTrigger = useCallback((triggerId: string, updates: { enabled?: boolean; trigger_config?: TriggerConfig; target_spec?: TargetSpec }) => {
+    wsClient.send({ type: 'chain_trigger_update', trigger_id: triggerId, ...updates });
+  }, []);
+
+  const deleteChainTrigger = useCallback((triggerId: string) => {
+    wsClient.send({ type: 'chain_trigger_delete', trigger_id: triggerId });
   }, []);
 
   const trackNodeAccess = useCallback((nodeId: string) => {
@@ -1939,6 +2169,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     clearChainExecutions,
     requestChainExecutions,
     clearChainStatus,
+    clearLastCreatedChain,
+    //
+    // Chain triggers.
+    //
+    requestChainTriggers,
+    createChainTrigger,
+    updateChainTrigger,
+    deleteChainTrigger,
     trackNodeAccess,
     //
     // Agent discovery.

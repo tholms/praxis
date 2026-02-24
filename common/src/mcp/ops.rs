@@ -4,8 +4,9 @@ use std::time::Duration;
 use crate::mcp::McpClient;
 use crate::{
     AgentCommand, AgentCommandResult, AgentFileType, AgentTool, ChainDefinitionInfo,
-    ChainExecutionUpdate, ConfigItem, GrepMatch, McpServer, NodeCommand, NodeCommandResult,
-    OperationDefinitionInfo, SemanticOpUpdate, SessionItem, SystemState,
+    ChainExecutionUpdate, ChainTriggerInfo, ConfigItem, GrepFileEntry, McpServer, NodeCommand,
+    NodeCommandResult, OperationDefinitionInfo, SemanticOpUpdate, SessionItem, SystemState,
+    TargetSpec, TriggerConfig,
 };
 
 //
@@ -370,16 +371,25 @@ async fn resolve_recon(
     Ok(ResolvedRecon { node_id, paths })
 }
 
-fn validate_path(paths: &[String], path: &str, file_type: AgentFileType) -> Result<()> {
-    if !paths.iter().any(|p| p == path) {
-        let type_name = match file_type {
-            AgentFileType::Config => "config",
-            AgentFileType::Session => "session",
-        };
-        return Err(anyhow!(
-            "Path '{}' not found in recon {} files. Use recon_list to see available files.",
-            path, type_name
-        ));
+fn has_glob_chars(path: &str) -> bool {
+    path.contains('*') || path.contains('?') || path.contains('[')
+}
+
+fn validate_paths(recon_paths: &[String], paths: &[String], file_type: AgentFileType) -> Result<()> {
+    let type_name = match file_type {
+        AgentFileType::Config => "config",
+        AgentFileType::Session => "session",
+    };
+    for path in paths {
+        if has_glob_chars(path) {
+            continue; // glob paths are validated by the node after expansion
+        }
+        if !recon_paths.iter().any(|p| p == path) {
+            return Err(anyhow!(
+                "Path '{}' not found in recon {} files. Use recon_list to see available files.",
+                path, type_name
+            ));
+        }
     }
     Ok(())
 }
@@ -406,7 +416,7 @@ pub async fn recon_read_file(
     line_end: Option<usize>,
 ) -> Result<ReadFileResult> {
     let resolved = resolve_recon(client, node_prefix, file_type).await?;
-    validate_path(&resolved.paths, path, file_type)?;
+    validate_paths(&resolved.paths, &[path.to_string()], file_type)?;
     read_file_inner(client, &resolved.node_id, file_type, path, line_start, line_end).await
 }
 
@@ -468,54 +478,51 @@ pub async fn recon_read_all(
 }
 
 //
-// Grep a single file on a node. Resolves node prefix, validates the path
-// exists in stored recon data.
+// Grep files on a node. Sends a single GrepFiles command with all paths.
 //
 
-pub struct GrepFileResult {
-    pub path: String,
+pub struct GrepFilesResult {
     pub pattern: String,
-    pub matches: Vec<GrepMatch>,
-    pub error: Option<String>,
+    pub results: Vec<GrepFileEntry>,
+    pub errors: Vec<String>,
 }
 
 pub async fn recon_grep_file(
     client: &(impl McpClient + Sync),
     node_prefix: &str,
     file_type: AgentFileType,
-    path: &str,
+    paths: &[String],
     pattern: &str,
-) -> Result<GrepFileResult> {
+) -> Result<GrepFilesResult> {
     let resolved = resolve_recon(client, node_prefix, file_type).await?;
-    validate_path(&resolved.paths, path, file_type)?;
-    grep_file_inner(client, &resolved.node_id, file_type, path, pattern).await
+    grep_files_inner(client, &resolved.node_id, file_type, paths, pattern).await
 }
 
-async fn grep_file_inner(
+async fn grep_files_inner(
     client: &(impl McpClient + Sync),
     node_id: &str,
     file_type: AgentFileType,
-    path: &str,
+    paths: &[String],
     pattern: &str,
-) -> Result<GrepFileResult> {
-    let cmd = NodeCommand::Agent(AgentCommand::GrepFile {
+) -> Result<GrepFilesResult> {
+    let cmd = NodeCommand::Agent(AgentCommand::GrepFiles {
         file_type,
-        path: path.to_string(),
+        paths: paths.to_vec(),
         pattern: pattern.to_string(),
     });
     let response = client.send_command(node_id, cmd).await?;
     match response.result {
-        NodeCommandResult::Agent(AgentCommandResult::GrepFileResult {
-            path, pattern, matches, error, ..
-        }) => Ok(GrepFileResult { path, pattern, matches, error }),
+        NodeCommandResult::Agent(AgentCommandResult::GrepFilesResult {
+            pattern, results, errors, ..
+        }) => Ok(GrepFilesResult { pattern, results, errors }),
         NodeCommandResult::Error { message } => Err(anyhow!(message)),
         _ => Err(anyhow!("Unexpected response")),
     }
 }
 
 //
-// Grep all files of a given type from stored recon. Returns only files with
-// matches (skips files with zero matches).
+// Grep all files of a given type from stored recon in a single round-trip.
+// Returns only files with matches (filters out empty results).
 //
 
 pub async fn recon_grep_all(
@@ -523,20 +530,85 @@ pub async fn recon_grep_all(
     node_prefix: &str,
     file_type: AgentFileType,
     pattern: &str,
-) -> Result<Vec<GrepFileResult>> {
+) -> Result<GrepFilesResult> {
     let resolved = resolve_recon(client, node_prefix, file_type).await?;
 
     if resolved.paths.is_empty() {
         return Err(anyhow!("No files found in recon data. Run recon_run to discover files."));
     }
 
-    let mut results = Vec::new();
-    for path in &resolved.paths {
-        if let Ok(r) = grep_file_inner(client, &resolved.node_id, file_type, path, pattern).await {
-            if r.error.is_none() && !r.matches.is_empty() {
-                results.push(r);
-            }
-        }
-    }
-    Ok(results)
+    let mut result = grep_files_inner(
+        client, &resolved.node_id, file_type, &resolved.paths, pattern,
+    ).await?;
+
+    // Filter to only files with matches
+    result.results.retain(|r| r.error.is_some() || !r.matches.is_empty());
+    Ok(result)
+}
+
+//
+// Chain trigger operations.
+//
+
+pub async fn trigger_list(
+    client: &(impl McpClient + Sync),
+    chain_id: Option<String>,
+) -> Result<Vec<ChainTriggerInfo>> {
+    client.request_chain_trigger_list(chain_id).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    Ok(client.get_chain_triggers().await)
+}
+
+pub async fn trigger_create(
+    client: &(impl McpClient + Sync),
+    chain_name: &str,
+    trigger_config: TriggerConfig,
+    target_spec: TargetSpec,
+) -> Result<String> {
+    //
+    // Resolve chain by name or ID prefix.
+    //
+    client.request_chain_list().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let chains = client.get_chain_definitions().await;
+    let chain = chains
+        .iter()
+        .find(|c| {
+            c.id.to_lowercase().starts_with(&chain_name.to_lowercase())
+                || c.name.to_lowercase() == chain_name.to_lowercase()
+        })
+        .ok_or_else(|| anyhow!("No chain found matching '{}'", chain_name))?;
+    let chain_id = chain.id.clone();
+
+    client.create_chain_trigger(chain_id.clone(), trigger_config, target_spec).await?;
+    Ok(chain_id)
+}
+
+pub async fn trigger_delete(
+    client: &(impl McpClient + Sync),
+    trigger_id_prefix: &str,
+) -> Result<String> {
+    let triggers = trigger_list(client, None).await?;
+    let trigger = triggers
+        .iter()
+        .find(|t| t.id.starts_with(trigger_id_prefix))
+        .ok_or_else(|| anyhow!("No trigger found matching '{}'", trigger_id_prefix))?;
+    let id = trigger.id.clone();
+    client.delete_chain_trigger(id.clone()).await?;
+    Ok(id)
+}
+
+pub async fn trigger_toggle(
+    client: &(impl McpClient + Sync),
+    trigger_id_prefix: &str,
+    enabled: bool,
+) -> Result<(String, bool)> {
+    let triggers = trigger_list(client, None).await?;
+    let trigger = triggers
+        .iter()
+        .find(|t| t.id.starts_with(trigger_id_prefix))
+        .ok_or_else(|| anyhow!("No trigger found matching '{}'", trigger_id_prefix))?;
+    let id = trigger.id.clone();
+    client.toggle_chain_trigger(id.clone(), enabled).await?;
+    Ok((id, enabled))
 }

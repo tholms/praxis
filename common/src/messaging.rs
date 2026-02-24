@@ -365,10 +365,12 @@ pub struct SelectedAgent {
     pub yolo_mode: bool,
     /// Working directory context for the session
     pub working_dir: Option<String>,
-    //
-    // Note: Tools and config are now retrieved via Recon/ReconSemantic
-    // commands.
-    //
+    /// Transaction ID of the currently in-flight prompt (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_transaction_id: Option<String>,
+    /// Prompt text of the currently in-flight prompt (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_prompt_text: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -395,6 +397,9 @@ pub struct NodeInformationUpdate {
     /// Active terminal session ID (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_terminal_id: Option<String>,
+    /// Whether the node is running with elevated privileges (root/admin)
+    #[serde(default)]
+    pub privileged: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -474,11 +479,20 @@ pub enum AgentCommand {
         path: String,
         contents: String,
     },
-    /// Search file content using a regex pattern and return matching lines
-    GrepFile {
+    /// Search file content using a regex pattern and return matching lines.
+    /// Accepts multiple paths (including globs) for batch grep in a single
+    /// round-trip.
+    GrepFiles {
         file_type: AgentFileType,
-        path: String,
+        paths: Vec<String>,
         pattern: String,
+    },
+    /// Write session content for a specific session path.
+    /// This is separate from WriteFile to allow agents with virtual/DB-backed
+    /// session stores to implement custom write behavior.
+    WriteSessionContent {
+        path: String,
+        contents: String,
     },
 }
 
@@ -492,6 +506,13 @@ pub enum AgentFileType {
 pub struct GrepMatch {
     pub line_number: usize,
     pub line_content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GrepFileEntry {
+    pub path: String,
+    pub matches: Vec<GrepMatch>,
+    pub error: Option<String>,
 }
 
 /// Unique identifier for tracking session transactions
@@ -593,6 +614,8 @@ pub enum TerminalCommand {
     Resize { rows: u16, cols: u16 },
     /// Close the terminal session
     Close,
+    /// Request scrollback buffer replay (returns buffered output)
+    Replay,
 }
 
 /// Configuration-related commands (fire-and-forget node settings)
@@ -664,12 +687,17 @@ pub enum AgentCommandResult {
         line_end: Option<usize>,
         error: Option<String>,
     },
-    /// File grep response
-    GrepFileResult {
+    /// Batch file grep response
+    GrepFilesResult {
         file_type: AgentFileType,
-        path: String,
         pattern: String,
-        matches: Vec<GrepMatch>,
+        results: Vec<GrepFileEntry>,
+        errors: Vec<String>,
+    },
+    /// Session content write result
+    WriteSessionContentResult {
+        path: String,
+        success: bool,
         error: Option<String>,
     },
 }
@@ -713,6 +741,8 @@ pub enum TerminalCommandResult {
     Resized,
     /// Terminal closed
     Closed,
+    /// Scrollback buffer replay
+    Replay { data: Vec<u8> },
 }
 
 /// Result of a config command
@@ -860,20 +890,6 @@ pub enum ChainTriggerType {
     Manual,
 }
 
-/// Termination element types (end of chain)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ChainTerminationType {
-    /// Raw dump - outputs the accumulated input data
-    Raw,
-    /// Semantic termination - runs LLM with prompt on accumulated data
-    Semantic {
-        prompt: String,
-        /// Optional model override (format: "provider::model")
-        model_ref: Option<String>,
-    },
-}
-
 /// Session group for elements that share a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGroup {
@@ -883,6 +899,31 @@ pub struct SessionGroup {
     pub color: String,
     /// Whether YOLO mode is enabled for the session
     pub yolo_mode: bool,
+    /// Working directory override for this session group
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+}
+
+/// Per-block configuration overrides
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BlockConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yolo_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// When false, the element runs as soon as any input fires (for merge
+    /// points with conditional branches). Default (None/true): wait for all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_all_inputs: Option<bool>,
+}
+
+/// Memory element mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MemoryMode {
+    Store,
+    Retrieve,
 }
 
 /// Chain element variants
@@ -904,6 +945,9 @@ pub enum ChainElement {
         model_ref: Option<String>,
         /// Session group for shared session execution
         session_group: Option<SessionGroup>,
+        /// Per-block configuration overrides
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_config: Option<BlockConfig>,
     },
     /// Transform element - runs LLM on input and passes result to next element
     Transform {
@@ -914,6 +958,9 @@ pub enum ChainElement {
         model_ref: Option<String>,
         /// Session group for shared session execution
         session_group: Option<SessionGroup>,
+        /// Per-block configuration overrides
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_config: Option<BlockConfig>,
     },
     /// Generic prompt element - sends prompt to agent via session
     GenericPrompt {
@@ -922,14 +969,49 @@ pub enum ChainElement {
         prompt: String,
         /// Session group for shared session execution
         session_group: Option<SessionGroup>,
+        /// Per-block configuration overrides
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_config: Option<BlockConfig>,
     },
-    /// Termination element - end of a branch
+    /// Memory element - stores or retrieves data by key
+    Memory {
+        id: String,
+        key: String,
+        mode: MemoryMode,
+    },
+    /// Loop element - retries via port 0 until max_iterations, then exits via port 1
+    Loop {
+        id: String,
+        max_iterations: u32,
+    },
+    /// Tool element - invokes a registered toolkit tool
+    Tool {
+        id: String,
+        tool_name: String,
+        tool_params: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_config: Option<BlockConfig>,
+    },
+    /// Payload element - outputs static content from a stored payload
+    Payload {
+        id: String,
+        payload_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_config: Option<BlockConfig>,
+    },
+    /// Termination element - explicit end of chain (exactly one per chain)
     Termination {
         id: String,
-        termination_type: ChainTerminationType,
-        /// Label for this output
-        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_config: Option<BlockConfig>,
     },
+}
+
+/// Condition for when a connection fires
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConnectionCondition {
+    OnSuccess,
+    OnFailure,
 }
 
 /// Connection between two chain elements
@@ -940,6 +1022,15 @@ pub struct ChainConnection {
     pub to_element: String,
     pub from_port: u32,
     pub to_port: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<ConnectionCondition>,
+}
+
+/// Element position for visual layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementPosition {
+    pub x: f64,
+    pub y: f64,
 }
 
 /// Complete chain definition (for create/update)
@@ -958,6 +1049,8 @@ pub struct ChainDefinitionInput {
     pub disabled: bool,
     /// Timeout for the entire chain execution in seconds
     pub timeout: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub positions: HashMap<String, ElementPosition>,
 }
 
 /// Full chain definition (including server-generated fields)
@@ -971,6 +1064,8 @@ pub struct ChainDefinitionFull {
     pub connections: Vec<ChainConnection>,
     pub disabled: bool,
     pub timeout: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub positions: HashMap<String, ElementPosition>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -986,6 +1081,8 @@ pub struct ChainDefinitionInfo {
     pub timeout: Option<u64>,
     pub element_count: usize,
     pub operation_count: usize,
+    #[serde(default)]
+    pub trigger_count: usize,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1018,7 +1115,11 @@ pub enum ElementExecutionStatus {
     Pending,
     WaitingForInputs,
     Running,
-    Completed { output: String },
+    Completed {
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+    },
     Failed { error: String },
     Skipped,
 }
@@ -1049,15 +1150,26 @@ pub enum ElementConfig {
         /// Prompt to send to agent
         prompt: String,
     },
-    /// Raw output config (no LLM processing)
-    RawOutput,
-    /// Semantic output config (LLM processing)
-    SemanticOutput {
-        /// Prompt for LLM processing
-        prompt: String,
-        /// Model to use (format: "provider::model")
-        model_ref: Option<String>,
+    /// Memory element config (store or retrieve)
+    Memory {
+        key: String,
+        mode: MemoryMode,
     },
+    /// Loop element config
+    Loop {
+        max_iterations: u32,
+    },
+    /// Tool element config
+    Tool {
+        tool_name: String,
+        tool_params: serde_json::Value,
+    },
+    /// Payload element config
+    Payload {
+        payload_id: String,
+    },
+    /// Termination element config
+    Termination,
 }
 
 /// Element runtime context (dynamic, during execution)
@@ -1104,6 +1216,184 @@ pub struct ChainExecutionUpdate {
     pub ended_at: Option<DateTime<Utc>>,
     /// Final outputs from termination elements
     pub outputs: HashMap<String, String>,
+}
+
+//
+// Chain triggers and targeting.
+//
+
+/// Schedule specification for scheduled triggers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ScheduleSpec {
+    DailyAt { hour: u8, minute: u8 },
+    Interval { minutes: u32 },
+}
+
+/// Trigger configuration for automated chain execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TriggerConfig {
+    Scheduled { schedule: ScheduleSpec, recurring: bool },
+    InterceptMatch { rule_id: i64 },
+    NewNode,
+}
+
+/// Target specification - which nodes and agents to run against
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetSpec {
+    /// Specific node IDs (empty = all registered nodes)
+    #[serde(default)]
+    pub node_ids: Vec<String>,
+    /// Case-insensitive substring filter on node os_details
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_filter: Option<String>,
+    /// Specific agent short names (empty = all available agents)
+    #[serde(default)]
+    pub agent_short_names: Vec<String>,
+    /// For event triggers: include the node that triggered the event
+    #[serde(default)]
+    pub include_triggering_node: bool,
+}
+
+/// Toolkit model option exposed to clients (from service model definitions)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitModelOption {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Toolkit tool config field schema (drives dynamic UI)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfigField {
+    pub name: String,
+    pub label: String,
+    pub field_type: String,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<ToolConfigOption>>,
+}
+
+/// Option for a select-type config field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfigOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// Toolkit tool metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitToolInfo {
+    pub tool_name: String,
+    pub display_name: String,
+    pub description: String,
+    #[serde(default)]
+    pub config_schema: Vec<ToolConfigField>,
+}
+
+/// A concrete target/session selection for toolkit execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitTargetRef {
+    pub node_id: String,
+    pub agent_short_name: String,
+    pub session_id: String,
+    pub session_file: String,
+}
+
+/// Recon output for a specific (node, agent) pair
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitReconTarget {
+    pub node_id: String,
+    pub agent_short_name: String,
+    pub sessions: Vec<SessionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolkitDiffLineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitDiffLine {
+    pub kind: ToolkitDiffLineKind,
+    pub old_line_no: Option<usize>,
+    pub new_line_no: Option<usize>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitDiffHunk {
+    pub old_start: usize,
+    pub old_len: usize,
+    pub new_start: usize,
+    pub new_len: usize,
+    pub lines: Vec<ToolkitDiffLine>,
+}
+
+/// Per-target preview/result state for toolkit execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitTargetPreview {
+    pub target: ToolkitTargetRef,
+    pub success: bool,
+    pub preview_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_hunks: Option<Vec<ToolkitDiffHunk>>,
+    pub error: Option<String>,
+}
+
+/// Result of a toolkit execute (preview stage)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitExecuteResult {
+    pub execution_id: String,
+    pub tool_name: String,
+    pub previews: Vec<ToolkitTargetPreview>,
+    pub error: Option<String>,
+}
+
+/// Item sent from frontend to apply a specific target's content
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitApplyItem {
+    pub target: ToolkitTargetRef,
+    pub content: String,
+}
+
+/// Per-target outcome from the apply operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolkitApplyOutcome {
+    pub target: ToolkitTargetRef,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Payload info (shared DTO for API/UI)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayloadInfo {
+    pub id: String,
+    pub shortname: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Chain trigger info (shared DTO for API/UI)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainTriggerInfo {
+    pub id: String,
+    pub chain_id: String,
+    pub trigger_config: TriggerConfig,
+    pub target_spec: TargetSpec,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_fire_at: Option<DateTime<Utc>>,
 }
 
 /// Operation status update broadcast to all clients
@@ -1298,9 +1588,7 @@ pub enum ClientSignalMessage {
     //
     // Operation definitions (stored in service database).
     //
-    /// Add/update an operation definition from YAML or JSON content.
-    /// Format is auto-detected: content starting with '{' is treated as JSON,
-    /// otherwise as YAML.
+    /// Add/update an operation definition from JSON content.
     OpDefAdd {
         client_id: String,
         content: String,
@@ -1313,6 +1601,12 @@ pub enum ClientSignalMessage {
     OpDefDelete {
         client_id: String,
         full_name: String,
+    },
+    /// Set the disabled flag on an operation definition
+    OpDefSetDisabled {
+        client_id: String,
+        full_name: String,
+        disabled: bool,
     },
     /// Get a specific operation definition
     OpDefGet {
@@ -1348,6 +1642,12 @@ pub enum ClientSignalMessage {
         client_id: String,
         chain_id: String,
     },
+    /// Set the disabled flag on a chain
+    ChainSetDisabled {
+        client_id: String,
+        chain_id: String,
+        disabled: bool,
+    },
     /// Run a chain
     ChainRun {
         client_id: String,
@@ -1356,6 +1656,9 @@ pub enum ClientSignalMessage {
         agent_short_name: String,
         /// Working directory for the chain session
         working_dir: Option<String>,
+        /// Optional target spec for multi-target fan-out (overrides node_id/agent_short_name)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_spec: Option<TargetSpec>,
     },
     /// Cancel a running chain execution
     ChainCancel {
@@ -1372,6 +1675,40 @@ pub enum ClientSignalMessage {
     },
     /// Clear all finished chain executions
     ChainExecutionClear,
+
+    //
+    // Chain triggers.
+    //
+    /// Create a chain trigger
+    ChainTriggerCreate {
+        client_id: String,
+        chain_id: String,
+        trigger_config: TriggerConfig,
+        target_spec: TargetSpec,
+    },
+    /// Update a chain trigger
+    ChainTriggerUpdate {
+        client_id: String,
+        trigger_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_config: Option<TriggerConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_spec: Option<TargetSpec>,
+    },
+    /// Delete a chain trigger
+    ChainTriggerDelete {
+        client_id: String,
+        trigger_id: String,
+    },
+    /// List chain triggers
+    ChainTriggerList {
+        client_id: String,
+        /// If provided, list triggers for this chain only
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chain_id: Option<String>,
+    },
 
     //
     // Traffic interception.
@@ -1489,6 +1826,51 @@ pub enum ClientSignalMessage {
     },
 
     //
+    // Toolkit.
+    //
+    /// List available toolkit tools and model options
+    ToolkitList {
+        client_id: String,
+    },
+    /// Run static recon for a toolkit tool and target scope
+    ToolkitRecon {
+        client_id: String,
+        tool_name: String,
+        target_spec: TargetSpec,
+    },
+    /// Execute a toolkit tool (preview stage)
+    ToolkitExecute {
+        client_id: String,
+        tool_name: String,
+        target_spec: TargetSpec,
+        params: serde_json::Value,
+    },
+    /// Apply targets for an execution
+    ToolkitApply {
+        client_id: String,
+        tool_name: String,
+        execution_id: String,
+        targets: Vec<ToolkitApplyItem>,
+    },
+
+    //
+    // Payloads (static content for Payload chain elements).
+    //
+    PayloadList {
+        client_id: String,
+    },
+    PayloadUpsert {
+        client_id: String,
+        id: Option<String>,
+        shortname: String,
+        content: String,
+    },
+    PayloadDelete {
+        client_id: String,
+        id: String,
+    },
+
+    //
     // Lua agent scripts (stored in service database).
     //
     LuaAgentScriptAdd {
@@ -1532,7 +1914,7 @@ pub enum ClientSignalMessage {
     /// Start an orchestrator session for this client
     OrchestratorStart { client_id: String },
     /// Send a prompt to the orchestrator session
-    OrchestratorPrompt { client_id: String, message: String },
+    OrchestratorPrompt { client_id: String, prompt_id: String, message: String },
     /// Stop the orchestrator session (ends entirely)
     OrchestratorStop { client_id: String },
     /// Cancel current orchestrator inference (keeps session alive)
@@ -1710,6 +2092,26 @@ pub enum ClientDirectMessage {
     },
 
     //
+    // Chain trigger responses.
+    //
+    /// Chain trigger created
+    ChainTriggerCreated {
+        trigger: ChainTriggerInfo,
+    },
+    /// Chain trigger updated
+    ChainTriggerUpdated {
+        trigger: ChainTriggerInfo,
+    },
+    /// Chain trigger deleted
+    ChainTriggerDeleted {
+        trigger_id: String,
+    },
+    /// Chain trigger list response
+    ChainTriggerListResponse {
+        triggers: Vec<ChainTriggerInfo>,
+    },
+
+    //
     // Traffic interception responses.
     //
     /// Traffic log response
@@ -1797,6 +2199,50 @@ pub enum ClientDirectMessage {
     },
 
     //
+    // Toolkit responses.
+    //
+    ToolkitListResponse {
+        tools: Vec<ToolkitToolInfo>,
+        models: Vec<ToolkitModelOption>,
+    },
+    ToolkitReconResponse {
+        tool_name: String,
+        targets: Vec<ToolkitReconTarget>,
+    },
+    ToolkitExecutionResult {
+        result: ToolkitExecuteResult,
+    },
+    ToolkitApplyResult {
+        execution_id: String,
+        results: Vec<ToolkitApplyOutcome>,
+    },
+    ToolkitExecutionProgress {
+        execution_id: String,
+        current: usize,
+        total: usize,
+    },
+    ToolkitError {
+        message: String,
+    },
+
+    //
+    // Payload responses.
+    //
+    PayloadListResponse {
+        payloads: Vec<PayloadInfo>,
+    },
+    PayloadUpserted {
+        payload: PayloadInfo,
+    },
+    PayloadDeleted {
+        id: String,
+        success: bool,
+    },
+    PayloadError {
+        message: String,
+    },
+
+    //
     // Lua agent script responses.
     //
     LuaAgentScriptAdded {
@@ -1843,21 +2289,21 @@ pub enum ClientDirectMessage {
         model: String,
     },
     /// Orchestrator streaming text content
-    OrchestratorContent { content: String },
+    OrchestratorContent { prompt_id: String, content: String },
     /// Orchestrator started executing a tool
-    OrchestratorToolExecuting { name: String, input: Option<String> },
+    OrchestratorToolExecuting { prompt_id: String, name: String, input: Option<String> },
     /// Orchestrator finished executing a tool
-    OrchestratorToolExecuted { name: String, display: String, success: bool, result: String },
+    OrchestratorToolExecuted { prompt_id: String, name: String, display: String, success: bool, result: String },
     /// Orchestrator plan updated
-    OrchestratorPlanUpdated { plan: OrchestratorPlan },
+    OrchestratorPlanUpdated { prompt_id: String, plan: OrchestratorPlan },
     /// Orchestrator response complete
-    OrchestratorDone,
+    OrchestratorDone { prompt_id: String },
     /// Orchestrator session stopped
     OrchestratorStopped,
     /// Orchestrator error
-    OrchestratorError { message: String },
+    OrchestratorError { prompt_id: String, message: String },
     /// Orchestrator token usage update
-    OrchestratorTokenUsage { prompt_tokens: u32, completion_tokens: u32, total_tokens: u32 },
+    OrchestratorTokenUsage { prompt_id: String, prompt_tokens: u32, completion_tokens: u32, total_tokens: u32 },
 
     //
     // AgentChat responses.
@@ -2225,6 +2671,9 @@ pub struct NodeState {
     /// Active terminal session ID (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_terminal_id: Option<String>,
+    /// Whether the node is running with elevated privileges (root/admin)
+    #[serde(default)]
+    pub privileged: bool,
 }
 
 /// Complete system state broadcast to clients

@@ -15,6 +15,9 @@ pub enum VirtualTable {
     ReconSessionLogs,
     ReconMetadataLogs,
     EventLogs,
+    ToolkitActionsLog,
+    OperationLogs,
+    ChainExecutionLogs,
 }
 
 impl VirtualTable {
@@ -29,6 +32,9 @@ impl VirtualTable {
                 | VirtualTable::ReconSessionLogs
                 | VirtualTable::ReconMetadataLogs
                 | VirtualTable::EventLogs
+                | VirtualTable::ToolkitActionsLog
+                | VirtualTable::OperationLogs
+                | VirtualTable::ChainExecutionLogs
         )
     }
 }
@@ -44,6 +50,9 @@ pub fn resolve_table(name: &str) -> Option<VirtualTable> {
         "reconsessionlogs" => Some(VirtualTable::ReconSessionLogs),
         "reconmetadatalogs" => Some(VirtualTable::ReconMetadataLogs),
         "eventlogs" => Some(VirtualTable::EventLogs),
+        "toolkitactionslog" => Some(VirtualTable::ToolkitActionsLog),
+        "operationlogs" => Some(VirtualTable::OperationLogs),
+        "chainexecutionlogs" => Some(VirtualTable::ChainExecutionLogs),
         _ => None,
     }
 }
@@ -84,6 +93,28 @@ pub fn table_columns(table: VirtualTable) -> Vec<&'static str> {
         ],
         VirtualTable::EventLogs => vec![
             "timestamp", "source", "source_id", "level", "target", "message",
+        ],
+        VirtualTable::ToolkitActionsLog => vec![
+            "timestamp",
+            "id",
+            "execution_id",
+            "tool_name",
+            "action",
+            "status",
+            "node_id",
+            "agent_short_name",
+            "session_id",
+            "details_json",
+        ],
+        VirtualTable::OperationLogs => vec![
+            "timestamp", "operation_id", "node_id", "agent_short_name",
+            "status", "operation_spec", "start_time", "end_time",
+            "summary", "result", "chain_execution_id",
+        ],
+        VirtualTable::ChainExecutionLogs => vec![
+            "timestamp", "execution_id", "chain_id", "chain_name",
+            "node_id", "agent_short_name", "status", "elements",
+            "outputs", "started_at", "ended_at",
         ],
     }
 }
@@ -308,6 +339,36 @@ pub async fn materialize_recon_metadata_logs(
             }
         }
     }
+
+    Ok((columns, rows))
+}
+
+pub async fn materialize_toolkit_actions_log(
+    database: &Arc<Database>,
+) -> anyhow::Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let columns: Vec<String> = table_columns(VirtualTable::ToolkitActionsLog)
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    let actions = database.list_toolkit_actions().await?;
+    let rows = actions
+        .into_iter()
+        .map(|a| {
+            vec![
+                Value::String(a.created_at.to_rfc3339()),
+                Value::String(a.id),
+                Value::String(a.execution_id),
+                Value::String(a.tool_name),
+                Value::String(a.action),
+                Value::String(a.status),
+                a.node_id.map(Value::String).unwrap_or(Value::Null),
+                a.agent_short_name.map(Value::String).unwrap_or(Value::Null),
+                a.session_id.map(Value::String).unwrap_or(Value::Null),
+                Value::String(serde_json::to_string(&a.details).unwrap_or_else(|_| "{}".to_string())),
+            ]
+        })
+        .collect();
 
     Ok((columns, rows))
 }

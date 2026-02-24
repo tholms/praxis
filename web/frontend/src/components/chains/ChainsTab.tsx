@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Play, Trash2, Clock, Edit2 } from 'lucide-react';
+import { Play, Trash2, Clock, Edit2, Zap } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ChainBuilder } from './ChainBuilder';
 import { Modal } from '../common/Modal';
 import { RunModal } from '../common/RunModal';
+import { DataTable, type ColumnDef, type RowAction } from '../common/DataTable';
 import type { ChainDefinitionInfo, ChainDefinitionInput, NodeState } from '../../api/types';
 
 //
@@ -35,10 +36,11 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
     deleteChain,
     runChain,
     clearChainStatus,
+    clearLastCreatedChain,
     getConfig,
   } = useApp();
 
-  const { chains, currentChain, chainError, chainSuccess } = state.chains;
+  const { chains, currentChain, chainError, chainSuccess, lastCreatedChainId } = state.chains;
   const operationDefs = state.operationDefs;
 
   //
@@ -69,6 +71,7 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [chainToDelete, setChainToDelete] = useState<ChainDefinitionInfo | null>(null);
 
+
   //
   // Fetch chains on mount.
   //
@@ -82,6 +85,8 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
   useEffect(() => {
     if (showBuilder) {
       send({ type: 'op_def_list' });
+      send({ type: 'toolkit_list' });
+      send({ type: 'payload_list' });
       getConfig(['llm_model_definitions']);
     }
   }, [showBuilder, send, getConfig]);
@@ -115,6 +120,17 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
       setShowBuilder(true);
     }
   }, [editingChainId, currentChain]);
+
+  //
+  // After creating a new chain, transition to editing it so subsequent saves
+  // update the same instance instead of creating duplicates.
+  //
+  useEffect(() => {
+    if (lastCreatedChainId && showBuilder && !editingChainId) {
+      setEditingChainId(lastCreatedChainId);
+      clearLastCreatedChain();
+    }
+  }, [lastCreatedChainId, showBuilder, editingChainId, clearLastCreatedChain]);
 
   //
   // Handle external trigger to create new chain.
@@ -166,12 +182,41 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
     runChain(chainId, nodeId, agentName);
   };
 
+  const handleRunAdvanced = (chainId: string, targetSpec: import('../../api/types').TargetSpec) => {
+    //
+    // Use the first available node/agent as the primary executor, but pass
+    // the target spec for multi-node targeting.
+    //
+    const primaryNode = nodes[0];
+    if (!primaryNode) return;
+    const agentName = primaryNode.selected_agent?.short_name || primaryNode.discovered_agents?.[0]?.short_name || '';
+    runChain(chainId, primaryNode.node_id, agentName, undefined, targetSpec);
+  };
+
   const handleSave = (definition: ChainDefinitionInput) => {
     if (editingChainId) {
       updateChain(editingChainId, definition);
     } else {
+
+      //
+      // If a chain with this name already exists, update it instead of
+      // creating a duplicate.
+      //
+
+      const existing = chains.find(
+        c => c.name.toLowerCase() === definition.name.trim().toLowerCase()
+      );
+      if (existing) {
+        setEditingChainId(existing.id);
+        updateChain(existing.id, definition);
+        return;
+      }
       createChain(definition);
     }
+  };
+
+  const handleDuplicate = (definition: ChainDefinitionInput) => {
+    createChain(definition);
     setShowBuilder(false);
     setEditingChainId(null);
   };
@@ -181,15 +226,106 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
     setEditingChainId(null);
   };
 
+  const chainColumns: ColumnDef<ChainDefinitionInfo>[] = [
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: false,
+      render: (_: unknown, chain: ChainDefinitionInfo) => (
+        <div>
+          <p className="font-medium text-highlight">
+            {chain.name}
+            {(chain.trigger_count ?? 0) > 0 && (
+              <span className="ml-2 inline-flex items-center gap-0.5 text-[10px] text-[var(--accent-warning)]">
+                <Zap size={10} />
+                {chain.trigger_count}
+              </span>
+            )}
+          </p>
+          {chain.description && (
+            <p className="text-muted text-xs">{chain.description}</p>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'operation_count',
+      header: 'Operations',
+      sortable: false,
+    },
+    {
+      key: 'timeout',
+      header: 'Timeout',
+      sortable: false,
+      render: (_: unknown, chain: ChainDefinitionInfo) => (
+        <div className="flex items-center gap-1 text-muted">
+          <Clock size={12} />
+          {chain.timeout || 300}s
+        </div>
+      ),
+    },
+  ];
+
+  const chainActions: RowAction<ChainDefinitionInfo>[] = [
+    {
+      icon: <Play size={14} />,
+      label: 'Run chain',
+      onClick: (chain) => handleRun(chain),
+      disabled: (chain) => !!chain.disabled,
+      hoverColor: 'var(--accent-success)',
+    },
+    {
+      icon: <Edit2 size={14} />,
+      label: 'Edit chain',
+      onClick: (chain) => handleEdit(chain),
+      hoverColor: 'var(--accent-info)',
+    },
+    {
+      icon: <Trash2 size={14} />,
+      label: 'Delete chain',
+      onClick: (chain) => handleDeleteClick(chain),
+      hoverColor: 'var(--accent-error)',
+    },
+  ];
+
   if (showBuilder) {
     return (
-      <div className="h-[calc(100vh-280px)] min-h-[300px] border border-subtle ascii-box">
+      <div className="flex-1 min-h-[400px] border border-subtle" style={{ height: 'calc(100vh - 160px)' }}>
         <ChainBuilder
           chain={editingChainId ? currentChain : null}
           onSave={handleSave}
+          onDuplicate={handleDuplicate}
+          onExport={editingChainId ? (definition) => {
+            const exportData = {
+              item_type: 'chain',
+              name: definition.name,
+              description: definition.description,
+              category: definition.category,
+              elements: definition.elements,
+              connections: definition.connections,
+              disabled: definition.disabled,
+              timeout: definition.timeout,
+              positions: definition.positions,
+            };
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `chain_${definition.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          } : undefined}
           onCancel={handleCancel}
           operationDefs={operationDefs}
           modelDefs={modelDefs}
+          nodes={nodes}
+          toolkitTools={state.toolkit.tools}
+          payloads={state.payloads}
+          send={send}
+          saveStatus={chainSuccess}
+          saveError={chainError}
         />
       </div>
     );
@@ -218,77 +354,16 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
       // Chains list.
       //
       */}
-      {chains.length === 0 ? (
-        <div className="text-center text-muted py-8">
-          No chains defined. Create your first chain to get started.
-        </div>
-      ) : (
-        <div className="border border-subtle ascii-box">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-subtle bg-[var(--bg-tertiary)]">
-                <th className="text-left px-4 py-2 text-muted tracking-wider">NAME</th>
-                <th className="text-left px-4 py-2 text-muted tracking-wider">OPERATIONS</th>
-                <th className="text-left px-4 py-2 text-muted tracking-wider">TIMEOUT</th>
-                <th className="px-4 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {chains.map((chain) => (
-                <tr
-                  key={chain.id}
-                  className="border-b border-dim last:border-0 hover:bg-[var(--highlight)] transition-colors"
-                >
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => handleEdit(chain)}
-                      className="text-left hover:text-[var(--accent-info)] transition-colors"
-                    >
-                      <p className="font-medium text-highlight">{chain.name}</p>
-                      {chain.description && (
-                        <p className="text-muted text-xs">{chain.description}</p>
-                      )}
-                    </button>
-                  </td>
-                  <td className="px-4 py-3">{chain.operation_count}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1 text-muted">
-                      <Clock size={12} />
-                      {chain.timeout || 300}s
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => handleRun(chain)}
-                        className="p-2 hover:bg-[var(--accent-success)]/10 text-muted hover:text-[var(--accent-success)] transition-colors"
-                        title="Run chain"
-                        disabled={chain.disabled}
-                      >
-                        <Play size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleEdit(chain)}
-                        className="p-2 hover:bg-[var(--accent-info)]/10 text-muted hover:text-[var(--accent-info)] transition-colors"
-                        title="Edit chain"
-                      >
-                        <Edit2 size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteClick(chain)}
-                        className="p-2 hover:bg-[var(--accent-error)]/10 text-muted hover:text-[var(--accent-error)] transition-colors"
-                        title="Delete chain"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <div className="border border-subtle ascii-box">
+        <DataTable
+          data={chains}
+          columns={chainColumns}
+          getRowKey={c => c.id}
+          actions={chainActions}
+          pinnedActions
+          emptyMessage="No chains defined. Create your first chain to get started."
+        />
+      </div>
 
       {/*
       //
@@ -302,8 +377,9 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
           setPreSelectedChain(null);
         }}
         onRun={handleRunFromModal}
+        onRunAdvanced={handleRunAdvanced}
         title="Run Chain"
-        items={chains.filter(c => !c.disabled).map(chain => ({
+        items={chains.filter(c => !c.disabled).sort((a, b) => a.name.localeCompare(b.name)).map(chain => ({
           id: chain.id,
           name: chain.name,
           description: chain.description,
@@ -361,6 +437,7 @@ export function ChainsTab({ nodes, triggerNew, onNewHandled, triggerEdit, onEdit
           </div>
         </div>
       </Modal>
+
     </div>
   );
 }

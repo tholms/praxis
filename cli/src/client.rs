@@ -42,6 +42,7 @@ struct ClientState {
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
     chain_executions: Vec<ChainExecutionUpdate>,
+    chain_triggers: Vec<common::ChainTriggerInfo>,
     orchestrator_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientDirectMessage>>,
 }
 
@@ -259,6 +260,20 @@ impl CliClient {
             ClientDirectMessage::ChainExecutionListResponse { executions } => {
                 state.chain_executions = executions;
             }
+            ClientDirectMessage::ChainTriggerListResponse { triggers } => {
+                state.chain_triggers = triggers;
+            }
+            ClientDirectMessage::ChainTriggerCreated { trigger } => {
+                state.chain_triggers.push(trigger);
+            }
+            ClientDirectMessage::ChainTriggerUpdated { trigger } => {
+                if let Some(idx) = state.chain_triggers.iter().position(|t| t.id == trigger.id) {
+                    state.chain_triggers[idx] = trigger;
+                }
+            }
+            ClientDirectMessage::ChainTriggerDeleted { trigger_id } => {
+                state.chain_triggers.retain(|t| t.id != trigger_id);
+            }
             ClientDirectMessage::ReconGetResponse { recon_result, performed_at, is_semantic, .. } => {
                 if let Some(ref recon) = recon_result {
                     state.cached_project_paths = recon.project_paths.clone();
@@ -280,7 +295,7 @@ impl CliClient {
                 | ClientDirectMessage::OrchestratorToolExecuting { .. }
                 | ClientDirectMessage::OrchestratorToolExecuted { .. }
                 | ClientDirectMessage::OrchestratorPlanUpdated { .. }
-                | ClientDirectMessage::OrchestratorDone
+                | ClientDirectMessage::OrchestratorDone { .. }
                 | ClientDirectMessage::OrchestratorStopped
                 | ClientDirectMessage::OrchestratorError { .. }
                 | ClientDirectMessage::OrchestratorTokenUsage { .. }) => {
@@ -535,6 +550,7 @@ impl CliClient {
             node_id,
             agent_short_name,
             working_dir,
+            target_spec: None,
         };
         self.publish_signal(message).await
     }
@@ -654,9 +670,10 @@ impl CliClient {
         self.publish_signal(message).await
     }
 
-    pub async fn send_orchestrator_prompt(&self, prompt: String) -> Result<()> {
+    pub async fn send_orchestrator_prompt(&self, prompt_id: String, prompt: String) -> Result<()> {
         let message = ClientSignalMessage::OrchestratorPrompt {
             client_id: self.client_id.clone(),
+            prompt_id,
             message: prompt,
         };
         self.publish_signal(message).await
@@ -672,6 +689,56 @@ impl CliClient {
     pub async fn cancel_orchestrator(&self) -> Result<()> {
         let message = ClientSignalMessage::OrchestratorCancel {
             client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    //
+    // Chain trigger methods.
+    //
+
+    pub async fn request_chain_trigger_list(&self, chain_id: Option<String>) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerList {
+            client_id: self.client_id.clone(),
+            chain_id,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn get_chain_triggers(&self) -> Vec<common::ChainTriggerInfo> {
+        self.state.lock().await.chain_triggers.clone()
+    }
+
+    pub async fn create_chain_trigger(
+        &self,
+        chain_id: String,
+        trigger_config: common::TriggerConfig,
+        target_spec: common::TargetSpec,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerCreate {
+            client_id: self.client_id.clone(),
+            chain_id,
+            trigger_config,
+            target_spec,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn delete_chain_trigger(&self, trigger_id: String) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerDelete {
+            client_id: self.client_id.clone(),
+            trigger_id,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn toggle_chain_trigger(&self, trigger_id: String, enabled: bool) -> Result<()> {
+        let message = ClientSignalMessage::ChainTriggerUpdate {
+            client_id: self.client_id.clone(),
+            trigger_id,
+            enabled: Some(enabled),
+            trigger_config: None,
+            target_spec: None,
         };
         self.publish_signal(message).await
     }
@@ -767,5 +834,30 @@ impl McpClient for CliClient {
         agent_short_name: &str,
     ) -> Result<Option<ReconResult>> {
         CliClient::get_recon_result(self, node_id, agent_short_name).await
+    }
+
+    async fn request_chain_trigger_list(&self, chain_id: Option<String>) -> Result<()> {
+        CliClient::request_chain_trigger_list(self, chain_id).await
+    }
+
+    async fn get_chain_triggers(&self) -> Vec<common::ChainTriggerInfo> {
+        CliClient::get_chain_triggers(self).await
+    }
+
+    async fn create_chain_trigger(
+        &self,
+        chain_id: String,
+        trigger_config: common::TriggerConfig,
+        target_spec: common::TargetSpec,
+    ) -> Result<()> {
+        CliClient::create_chain_trigger(self, chain_id, trigger_config, target_spec).await
+    }
+
+    async fn delete_chain_trigger(&self, trigger_id: String) -> Result<()> {
+        CliClient::delete_chain_trigger(self, trigger_id).await
+    }
+
+    async fn toggle_chain_trigger(&self, trigger_id: String, enabled: bool) -> Result<()> {
+        CliClient::toggle_chain_trigger(self, trigger_id, enabled).await
     }
 }

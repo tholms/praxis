@@ -18,8 +18,8 @@ import {
   Zap,
   Clock,
   Sparkles,
-  ToggleLeft,
-  ToggleRight,
+  Circle,
+  CircleCheck,
   Shield,
   FolderOpen,
   Pencil,
@@ -41,7 +41,8 @@ import { RunModal } from '../components/common/RunModal';
 import { OperationDetailModal } from '../components/common/OperationDetailModal';
 import { ChainExecutionModal } from '../components/common/ChainExecutionModal';
 import { Tooltip } from '../components/common/Tooltip';
-import type { SemanticOpUpdate, ReconResult, TrafficLogFilters, SessionContext, ChainDefinitionFull } from '../api/types';
+import { DataTable, type ColumnDef } from '../components/common/DataTable';
+import type { SemanticOpUpdate, ChainExecutionUpdate, ReconResult, TrafficLogFilters, SessionContext, ChainDefinitionFull } from '../api/types';
 import { StatusBadge, getOperationStatusColor } from '../components/common/StatusBadge';
 import {
   ScrollableTrafficTable,
@@ -222,9 +223,13 @@ export function AgentDetailPage() {
   const [expandedMcpContexts, setExpandedMcpContexts] = useState<Set<string>>(new Set(['Global']));
 
   //
-  // Selected operation for detail modal.
+  // Selected operation for detail modal — store ID, derive live from state.
   //
-  const [selectedOp, setSelectedOp] = useState<SemanticOpUpdate | null>(null);
+  const [selectedOpId, setSelectedOpId] = useState<string | null>(null);
+  const selectedOp = useMemo(() => {
+    if (!selectedOpId) return null;
+    return state.operations.find(op => op.operation_id === selectedOpId) ?? null;
+  }, [selectedOpId, state.operations]);
 
   //
   // Local YOLO mode state (used when creating sessions).
@@ -954,6 +959,94 @@ export function AgentDetailPage() {
     return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
   };
 
+  type OpOrChainItem = { type: 'op'; id: string; startTime: number; data: SemanticOpUpdate }
+    | { type: 'chain'; id: string; startTime: number; data: ChainExecutionUpdate };
+
+  const opsAndChainsColumns: ColumnDef<OpOrChainItem>[] = [
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: false,
+      render: (_: unknown, item: OpOrChainItem) => {
+        if (item.type === 'chain') {
+          const d = item.data as ChainExecutionUpdate;
+          return (
+            <div className="flex items-center gap-3">
+              {d.status === 'Running' || d.status === 'Queued'
+                ? <Loader2 size={14} className="animate-spin text-[var(--accent-info)]" />
+                : <GitBranch size={14} className="text-muted" />}
+              <span className="font-medium">{d.chain_name}</span>
+            </div>
+          );
+        }
+        const d = item.data as SemanticOpUpdate;
+        return (
+          <div className="flex items-center gap-3">
+            {d.status === 'Running'
+              ? <Loader2 size={14} className="animate-spin text-[var(--accent-info)]" />
+              : <Zap size={14} className="text-muted" />}
+            <span className="font-medium">{d.spec.name}</span>
+          </div>
+        );
+      },
+    },
+    {
+      key: 'id',
+      header: 'ID',
+      sortable: false,
+      render: (_: unknown, item: OpOrChainItem) => (
+        <span className="text-muted font-mono">{item.id.slice(0, 8)}...</span>
+      ),
+    },
+    {
+      key: 'type',
+      header: 'Type',
+      sortable: false,
+      render: (_: unknown, item: OpOrChainItem) =>
+        item.type === 'chain'
+          ? <span className="text-xs text-muted flex items-center gap-1"><GitBranch size={10} /> Chain</span>
+          : <span className="text-xs text-muted flex items-center gap-1"><Zap size={10} /> Op</span>,
+    },
+    {
+      key: 'started',
+      header: 'Started',
+      sortable: false,
+      render: (_: unknown, item: OpOrChainItem) => {
+        const time = item.type === 'chain'
+          ? (item.data as ChainExecutionUpdate).started_at
+          : (item.data as SemanticOpUpdate).start_time;
+        return <span className="text-muted">{new Date(time).toLocaleString()}</span>;
+      },
+    },
+    {
+      key: 'duration',
+      header: 'Duration',
+      sortable: false,
+      render: (_: unknown, item: OpOrChainItem) => {
+        const [start, end] = item.type === 'chain'
+          ? [(item.data as ChainExecutionUpdate).started_at, (item.data as ChainExecutionUpdate).ended_at]
+          : [(item.data as SemanticOpUpdate).start_time, (item.data as SemanticOpUpdate).end_time];
+        return (
+          <div className="flex items-center gap-1 text-muted">
+            <Clock size={12} />
+            {formatOpDuration(start, end)}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      sortable: false,
+      render: (_: unknown, item: OpOrChainItem) => {
+        const status = item.type === 'chain'
+          ? (item.data as ChainExecutionUpdate).status
+          : (item.data as SemanticOpUpdate).status;
+        return <StatusBadge status={getOperationStatusColor(status)} label={status} />;
+      },
+    },
+  ];
+
   //
   // Filter traffic log for this agent.
   //
@@ -1114,9 +1207,9 @@ export function AgentDetailPage() {
               title={hasSession ? "Close session to change YOLO mode" : (localYoloMode ? "YOLO mode enabled - agent will auto-approve actions" : "YOLO mode disabled - agent requires approval")}
             >
               {localYoloMode ? (
-                <ToggleRight size={16} className="text-[var(--accent-warning)]" />
+                <CircleCheck size={16} className="text-[var(--accent-warning)]" />
               ) : (
-                <ToggleLeft size={16} className="text-muted" />
+                <Circle size={16} className="text-[var(--text-secondary)]" />
               )}
               <span className={localYoloMode ? "text-[var(--accent-warning)]" : "text-muted"}>
                 YOLO
@@ -1292,105 +1385,25 @@ export function AgentDetailPage() {
 
         {activeTab === 'ops' && (
           <div className="bg-card ascii-box border border-subtle overflow-hidden">
-            {sortedOpsAndChains.length === 0 ? (
-              <div className="p-12 text-center">
-                <Zap size={48} className="mx-auto mb-4 text-muted opacity-50" />
-                <h2 className="text-title font-semibold text-lg mb-2">No Operations</h2>
-                <p className="text-muted">No operations have been run on this agent yet</p>
-              </div>
-            ) : (
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-subtle bg-[var(--bg-tertiary)]">
-                    <th className="text-left px-4 py-2 text-muted tracking-wider">NAME</th>
-                    <th className="text-left px-4 py-2 text-muted tracking-wider">ID</th>
-                    <th className="text-left px-4 py-2 text-muted tracking-wider">TYPE</th>
-                    <th className="text-left px-4 py-2 text-muted tracking-wider">STARTED</th>
-                    <th className="text-left px-4 py-2 text-muted tracking-wider">DURATION</th>
-                    <th className="text-left px-4 py-2 text-muted tracking-wider">STATUS</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedOpsAndChains.map((item) => item.type === 'chain' ? (
-                    <tr
-                      key={item.id}
-                      className="border-b border-dim last:border-0 hover:bg-[var(--highlight)] transition-colors cursor-pointer"
-                      onClick={() => setSelectedChainExecId(item.data.execution_id)}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          {item.data.status === 'Running' || item.data.status === 'Queued' ? (
-                            <Loader2 size={14} className="animate-spin text-[var(--accent-info)]" />
-                          ) : (
-                            <GitBranch size={14} className="text-muted" />
-                          )}
-                          <span className="font-medium">{item.data.chain_name}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-muted font-mono">{item.data.execution_id.slice(0, 8)}...</td>
-                      <td className="px-4 py-3">
-                        <span className="text-xs text-muted flex items-center gap-1">
-                          <GitBranch size={10} /> Chain
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-muted">
-                        {new Date(item.data.started_at).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1 text-muted">
-                          <Clock size={12} />
-                          {formatOpDuration(item.data.started_at, item.data.ended_at)}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge
-                          status={getOperationStatusColor(item.data.status)}
-                          label={item.data.status}
-                        />
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr
-                      key={item.id}
-                      className="border-b border-dim last:border-0 hover:bg-[var(--highlight)] transition-colors cursor-pointer"
-                      onClick={() => setSelectedOp(item.data)}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          {item.data.status === 'Running' ? (
-                            <Loader2 size={14} className="animate-spin text-[var(--accent-info)]" />
-                          ) : (
-                            <Zap size={14} className="text-muted" />
-                          )}
-                          <span className="font-medium">{item.data.spec.name}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-muted font-mono">{item.data.operation_id.slice(0, 8)}...</td>
-                      <td className="px-4 py-3">
-                        <span className="text-xs text-muted flex items-center gap-1">
-                          <Zap size={10} /> Op
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-muted">
-                        {new Date(item.data.start_time).toLocaleString()}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1 text-muted">
-                          <Clock size={12} />
-                          {formatOpDuration(item.data.start_time, item.data.end_time)}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <StatusBadge
-                          status={getOperationStatusColor(item.data.status)}
-                          label={item.data.status}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <DataTable
+              data={sortedOpsAndChains}
+              columns={opsAndChainsColumns}
+              getRowKey={item => item.id}
+              onRowClick={(item) => {
+                if (item.type === 'chain') {
+                  setSelectedChainExecId((item.data as ChainExecutionUpdate).execution_id);
+                } else {
+                  setSelectedOpId((item.data as SemanticOpUpdate).operation_id);
+                }
+              }}
+              emptyMessage={
+                <div className="py-8">
+                  <Zap size={48} className="mx-auto mb-4 text-muted opacity-50" />
+                  <h2 className="text-title font-semibold text-lg mb-2">No Operations</h2>
+                  <p className="text-muted">No operations have been run on this agent yet</p>
+                </div>
+              }
+            />
           </div>
         )}
 
@@ -2348,7 +2361,7 @@ export function AgentDetailPage() {
       */}
       <OperationDetailModal
         operation={selectedOp}
-        onClose={() => setSelectedOp(null)}
+        onClose={() => setSelectedOpId(null)}
       />
 
       {/*
@@ -2361,7 +2374,7 @@ export function AgentDetailPage() {
         onClose={() => setShowRunOpModal(false)}
         onRun={handleRunOpFromModal}
         title="Run Operation"
-        items={operationDefs.filter(d => !d.disabled).map(def => ({
+        items={operationDefs.filter(d => !d.disabled).sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name)).map(def => ({
           id: def.full_name,
           name: def.name,
           description: def.description,
@@ -2383,7 +2396,7 @@ export function AgentDetailPage() {
         onClose={() => setShowRunChainModal(false)}
         onRun={handleRunChainFromModal}
         title="Run Chain"
-        items={chainDefs.filter(c => !c.disabled).map(chain => ({
+        items={chainDefs.filter(c => !c.disabled).sort((a, b) => a.name.localeCompare(b.name)).map(chain => ({
           id: chain.id,
           name: chain.name,
           description: chain.description,
@@ -2445,6 +2458,7 @@ export function AgentDetailPage() {
         chain={selectedChainDef}
         isLoading={isChainLoading}
         onClose={() => setSelectedChainExecId(null)}
+        payloads={state.payloads}
       />
 
       {/*
@@ -2506,7 +2520,6 @@ function AgentInterceptTab({
   agentTraffic: ReturnType<typeof useApp>['state']['intercept']['trafficLog'];
   send: ReturnType<typeof useApp>['send'];
 }) {
-  const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [protocolFilter, setProtocolFilter] = useState<ProtocolFilter>('all');
   const [searchFilter, setSearchFilter] = useState('');
   const [filters, setFilters] = useState<TrafficLogFilters>({
@@ -2583,8 +2596,8 @@ function AgentInterceptTab({
           entries={agentTraffic}
           protocolFilter={protocolFilter}
           searchFilter={searchFilter}
-          expandedRow={expandedRow}
-          setExpandedRow={setExpandedRow}
+          expandedRow={null}
+          setExpandedRow={() => {}}
           showNodeColumn={false}
           displayLimit={100}
           heightMode="fixed"

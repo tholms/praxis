@@ -14,6 +14,8 @@ mod orchestrator;
 mod semantic_helpers;
 mod semantic_ops;
 mod state;
+mod tools;
+pub mod trigger_engine;
 
 use anyhow::Result;
 pub use common::rabbitmq_url;
@@ -50,6 +52,7 @@ use orchestrator::OrchestratorManager;
 use config::service_config::APPLICATION_LOGS_ENABLED;
 use semantic_ops::{SemanticOpsManager, ResponseTracker, ChainExecutor};
 use state::{NodeRegistry, ClientRegistry, PendingCommands};
+use tools::ToolkitManager;
 use messaging::broadcast_state_to_clients;
 
 const RABBITMQ_RETRY_SECS: u64 = 5;
@@ -285,6 +288,12 @@ async fn run_main_loop() -> Result<()> {
         response_tracker.clone(),
     ));
 
+    if let Ok(count) = semantic_ops_manager.cancel_stale_operations().await {
+        if count > 0 {
+            common::log_info!("Cancelled {} stale operations from previous run", count);
+        }
+    }
+
     common::log_info!("Initialized semantic operations manager");
 
     //
@@ -310,6 +319,18 @@ async fn run_main_loop() -> Result<()> {
     //
     let orchestrator_manager = Arc::new(OrchestratorManager::new());
     common::log_info!("Initialized Orchestrator manager");
+
+    //
+    // Initialize Toolkit manager.
+    //
+    let toolkit_manager = Arc::new(ToolkitManager::new(
+        database.clone(),
+        service_config.clone(),
+        node_registry.clone(),
+        response_tracker.clone(),
+        publish_channel.clone(),
+    ));
+    common::log_info!("Initialized Toolkit manager");
 
     //
     // Initialize event logging system.
@@ -559,6 +580,22 @@ async fn run_main_loop() -> Result<()> {
     }
 
     //
+    // Initialize and start the trigger engine.
+    //
+    let trigger_engine = Arc::new(trigger_engine::TriggerEngine::new(
+        database.clone(),
+        chain_executor.clone(),
+        node_registry.clone(),
+        service_config.clone(),
+        response_tracker.clone(),
+        semantic_ops_channel.clone(),
+        broadcast_channel.clone(),
+        toolkit_manager.clone(),
+    ));
+    trigger_engine.start_scheduler();
+    common::log_info!("Initialized trigger engine");
+
+    //
     // Create the service context for message dispatch.
     //
     let ctx = ServiceContext {
@@ -574,7 +611,9 @@ async fn run_main_loop() -> Result<()> {
         chain_executor,
         agent_chat_manager,
         orchestrator_manager,
+        toolkit_manager,
         mcp_manager,
+        trigger_engine: Some(trigger_engine.clone()),
         publish_channel,
         client_publish_channel,
         broadcast_channel,

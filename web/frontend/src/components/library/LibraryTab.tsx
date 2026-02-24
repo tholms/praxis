@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { Play, Trash2, Edit2, Zap, GitBranch, Download, Upload, Search, Plus, ChevronDown, Loader2, ToggleLeft, ToggleRight, Save } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Play, Trash2, Edit2, Zap, GitBranch, Download, Upload, Search, Plus, ChevronDown, Loader2, Circle, CircleCheck, Save } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { ChainBuilder } from '../chains/ChainBuilder';
 import { Modal } from '../common/Modal';
 import { RunModal } from '../common/RunModal';
+import { DataTable, type ColumnDef, type RowAction } from '../common/DataTable';
 import { ImportModal } from './ImportModal';
 import type { LibraryItem, LibraryItemType, OperationDefinitionInfo, ChainDefinitionInput, NodeState } from '../../api/types';
 
@@ -113,8 +114,10 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
   useEffect(() => {
     if (showChainBuilder) {
       getConfig(['llm_model_definitions']);
+      send({ type: 'toolkit_list' });
+      send({ type: 'payload_list' });
     }
-  }, [showChainBuilder, getConfig]);
+  }, [showChainBuilder, send, getConfig]);
 
   //
   // Load chain for editing.
@@ -148,6 +151,7 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
         connections: currentChain.connections,
         disabled: currentChain.disabled,
         timeout: currentChain.timeout,
+        positions: currentChain.positions,
       };
       const content = JSON.stringify(exportData, null, 2);
       const filename = `chain_${currentChain.name.toLowerCase().replace(/\s+/g, '_')}.json`;
@@ -473,6 +477,10 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
     } else {
       createChain(definition);
     }
+  };
+
+  const handleDuplicateChain = (definition: ChainDefinitionInput) => {
+    createChain(definition);
     setShowChainBuilder(false);
     setEditingChainId(null);
   };
@@ -485,15 +493,143 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
   //
   // If chain builder is open, show it full screen.
   //
+  //
+  // Dynamic height for chain builder: measure container top offset and fill
+  // to bottom of viewport.
+  //
+  const chainBuilderRef = useRef<HTMLDivElement>(null);
+  const [chainBuilderHeight, setChainBuilderHeight] = useState<number | null>(null);
+
+  const updateChainBuilderHeight = useCallback(() => {
+    if (chainBuilderRef.current) {
+      const top = chainBuilderRef.current.getBoundingClientRect().top;
+      setChainBuilderHeight(window.innerHeight - top - 16);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showChainBuilder) {
+      updateChainBuilderHeight();
+      window.addEventListener('resize', updateChainBuilderHeight);
+      return () => window.removeEventListener('resize', updateChainBuilderHeight);
+    }
+  }, [showChainBuilder, updateChainBuilderHeight]);
+
+  const libraryColumns: ColumnDef<LibraryItem>[] = [
+    {
+      key: 'name',
+      header: 'Name',
+      sortable: false,
+      render: (_: unknown, item: LibraryItem) => (
+        <div className={`flex items-start gap-3 ${item.disabled ? 'opacity-50' : ''}`}>
+          <span className="flex-shrink-0 mt-0.5" title={item.type === 'operation' ? 'Operation' : 'Chain'}>
+            {item.type === 'operation'
+              ? <Zap size={14} className="text-[var(--accent-purple)]" />
+              : <GitBranch size={14} className="text-[var(--accent-info)]" />}
+          </span>
+          <div>
+            <p className="font-medium text-highlight flex items-center gap-2">
+              {item.name}
+              {item.disabled && (
+                <span className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] text-muted text-xs">Disabled</span>
+              )}
+            </p>
+            {item.description && (
+              <p className="text-muted text-xs truncate max-w-md">{item.description}</p>
+            )}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: 'category',
+      header: 'Category',
+      sortable: false,
+      render: (_: unknown, item: LibraryItem) => (
+        <span className={item.disabled ? 'opacity-50' : ''}>{item.category}</span>
+      ),
+    },
+    {
+      key: 'details',
+      header: 'Details',
+      sortable: false,
+      render: (_: unknown, item: LibraryItem) => (
+        <span className={`text-muted ${item.disabled ? 'opacity-50' : ''}`}>
+          {item.type === 'operation'
+            ? `${item.mode} | ${item.timeout}s`
+            : `${item.elementCount} elements | ${item.operationCount} ops`}
+        </span>
+      ),
+    },
+  ];
+
+  const libraryActions: RowAction<LibraryItem>[] = [
+    {
+      icon: <Play size={14} />,
+      label: 'Run',
+      onClick: (item) => handleRunItem(item),
+      disabled: (item) => !!item.disabled,
+      hoverColor: 'var(--accent-success)',
+    },
+    {
+      icon: <Edit2 size={14} />,
+      label: 'Edit',
+      onClick: (item) => handleEditItem(item),
+      hoverColor: 'var(--accent-info)',
+    },
+    {
+      icon: <Download size={14} />,
+      label: 'Export JSON',
+      onClick: (item) => handleExportItem(item),
+      hoverColor: 'var(--accent-purple)',
+    },
+    {
+      icon: <Trash2 size={14} />,
+      label: 'Delete',
+      onClick: (item) => handleDeleteClick(item),
+      hoverColor: 'var(--accent-error)',
+    },
+  ];
+
   if (showChainBuilder) {
     return (
-      <div className="h-[calc(100vh-280px)] min-h-[300px] border border-subtle ascii-box">
+      <div
+        ref={chainBuilderRef}
+        className="border border-subtle"
+        style={{ height: chainBuilderHeight ? `${chainBuilderHeight}px` : 'calc(100vh - 200px)', minHeight: 400 }}
+      >
         <ChainBuilder
           chain={editingChainId ? currentChain : null}
           onSave={handleSaveChain}
+          onDuplicate={handleDuplicateChain}
+          onExport={editingChainId ? (definition) => {
+            const exportData = {
+              item_type: 'chain',
+              name: definition.name,
+              description: definition.description,
+              category: definition.category,
+              elements: definition.elements,
+              connections: definition.connections,
+              disabled: definition.disabled,
+              timeout: definition.timeout,
+              positions: definition.positions,
+            };
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `chain_${definition.name.toLowerCase().replace(/\s+/g, '_')}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          } : undefined}
           onCancel={handleCancelChain}
           operationDefs={operationDefs}
           modelDefs={modelDefs}
+          toolkitTools={state.toolkit.tools}
+          payloads={state.payloads}
+          send={send}
         />
       </div>
     );
@@ -615,112 +751,25 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
       // Library table.
       //
       */}
-      {filteredItems.length === 0 ? (
-        <div className="text-center text-muted py-8 border border-subtle ascii-box">
-          {searchQuery
-            ? 'No items match your search.'
-            : filter === 'all'
-            ? 'No operations or chains defined. Click "Add" to create one.'
-            : filter === 'operation'
-            ? 'No operations defined.'
-            : 'No chains defined.'}
-        </div>
-      ) : (
-        <div className="border border-subtle ascii-box overflow-x-auto">
-          <table className="w-full min-w-[760px] text-xs">
-            <thead>
-              <tr className="border-b border-subtle bg-[var(--bg-tertiary)]">
-                <th className="text-left px-4 py-2 text-muted tracking-wider w-8">TYPE</th>
-                <th className="text-left px-4 py-2 text-muted tracking-wider">NAME</th>
-                <th className="text-left px-4 py-2 text-muted tracking-wider">CATEGORY</th>
-                <th className="text-left px-4 py-2 text-muted tracking-wider">DETAILS</th>
-                <th className="px-4 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredItems.map((item) => (
-                <tr
-                  key={`${item.type}-${item.id}`}
-                  className="border-b border-dim last:border-0 hover:bg-[var(--highlight)] transition-colors cursor-pointer"
-                  onClick={() => handleEditItem(item)}
-                >
-                  <td className="px-4 py-3">
-                    <span title={item.type === 'operation' ? 'Operation' : 'Chain'}>
-                      {item.type === 'operation' ? (
-                        <Zap size={14} className="text-[var(--accent-purple)]" />
-                      ) : (
-                        <GitBranch size={14} className="text-[var(--accent-info)]" />
-                      )}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className={item.disabled ? 'opacity-50' : ''}>
-                      <p className="font-medium text-highlight flex items-center gap-2">
-                        {item.name}
-                        {item.disabled && (
-                          <span className="px-1.5 py-0.5 bg-[var(--bg-tertiary)] text-muted text-xs">
-                            Disabled
-                          </span>
-                        )}
-                      </p>
-                      {item.description && (
-                        <p className="text-muted text-xs truncate max-w-md">{item.description}</p>
-                      )}
-                    </div>
-                  </td>
-                  <td className={`px-4 py-3 ${item.disabled ? 'opacity-50' : ''}`}>
-                    {item.category}
-                  </td>
-                  <td className={`px-4 py-3 text-muted ${item.disabled ? 'opacity-50' : ''}`}>
-                    {item.type === 'operation' ? (
-                      <span>{item.mode} | {item.timeout}s</span>
-                    ) : (
-                      <span>{item.elementCount} elements | {item.operationCount} ops</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={() => handleRunItem(item)}
-                        disabled={item.disabled}
-                        className={`p-2 transition-colors ${
-                          item.disabled
-                            ? 'opacity-30 cursor-not-allowed text-muted'
-                            : 'hover:bg-[var(--accent-success)]/10 text-muted hover:text-[var(--accent-success)]'
-                        }`}
-                        title="Run"
-                      >
-                        <Play size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleEditItem(item)}
-                        className="p-2 hover:bg-[var(--accent-info)]/10 text-muted hover:text-[var(--accent-info)] transition-colors"
-                        title="Edit"
-                      >
-                        <Edit2 size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleExportItem(item)}
-                        className="p-2 hover:bg-[var(--accent-purple)]/10 text-muted hover:text-[var(--accent-purple)] transition-colors"
-                        title="Export JSON"
-                      >
-                        <Download size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteClick(item)}
-                        className="p-2 hover:bg-[var(--accent-error)]/10 text-muted hover:text-[var(--accent-error)] transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <div className="border border-subtle ascii-box overflow-x-auto">
+        <DataTable
+          data={filteredItems}
+          columns={libraryColumns}
+          getRowKey={item => `${item.type}-${item.id}`}
+          actions={libraryActions}
+          pinnedActions
+          onRowClick={(item) => handleEditItem(item)}
+          emptyMessage={
+            searchQuery
+              ? 'No items match your search.'
+              : filter === 'all'
+              ? 'No operations or chains defined. Click "Add" to create one.'
+              : filter === 'operation'
+              ? 'No operations defined.'
+              : 'No chains defined.'
+          }
+        />
+      </div>
 
       {/*
       //
@@ -737,13 +786,13 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
         title={runModalVariant === 'operation' ? 'Run Operation' : 'Run Chain'}
         items={
           runModalVariant === 'operation'
-            ? operationDefs.filter((d) => !d.disabled).map((def) => ({
+            ? operationDefs.filter((d) => !d.disabled).sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name)).map((def) => ({
                 id: def.full_name,
                 name: def.name,
                 description: def.description,
                 badge: def.category,
               }))
-            : chains.filter((c) => !c.disabled).map((chain) => ({
+            : chains.filter((c) => !c.disabled).sort((a, b) => a.name.localeCompare(b.name)).map((chain) => ({
                 id: chain.id,
                 name: chain.name,
                 description: chain.description,
@@ -884,7 +933,7 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className={`grid ${editDef.mode === 'agent' ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
                 <div>
                   <label className="block text-xs tracking-wider text-[var(--text-secondary)] mb-1.5">Timeout (seconds)</label>
                   <input
@@ -895,16 +944,18 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
                     className="w-full bg-[var(--bg-primary)] border border-dim px-3 py-2 text-sm text-highlight focus:outline-none focus:border-subtle disabled:opacity-50 transition-colors"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs tracking-wider text-[var(--text-secondary)] mb-1.5">Agent Iterations</label>
-                  <input
-                    type="number"
-                    value={editDef.agent_iterations}
-                    onChange={(e) => updateEditDef('agent_iterations', parseInt(e.target.value) || 5)}
-                    disabled={isEditing}
-                    className="w-full bg-[var(--bg-primary)] border border-dim px-3 py-2 text-sm text-highlight focus:outline-none focus:border-subtle disabled:opacity-50 transition-colors"
-                  />
-                </div>
+                {editDef.mode === 'agent' && (
+                  <div>
+                    <label className="block text-xs tracking-wider text-[var(--text-secondary)] mb-1.5">Agent Iterations</label>
+                    <input
+                      type="number"
+                      value={editDef.agent_iterations}
+                      onChange={(e) => updateEditDef('agent_iterations', parseInt(e.target.value) || 5)}
+                      disabled={isEditing}
+                      className="w-full bg-[var(--bg-primary)] border border-dim px-3 py-2 text-sm text-highlight focus:outline-none focus:border-subtle disabled:opacity-50 transition-colors"
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
@@ -984,11 +1035,11 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
                   type="button"
                 >
                   {editDef.yolo_mode ? (
-                    <ToggleLeft size={20} className="text-muted/60" />
+                    <CircleCheck size={16} className="text-[var(--accent-error)]" />
                   ) : (
-                    <ToggleRight size={20} className="text-muted" />
+                    <Circle size={16} className="text-[var(--text-secondary)]" />
                   )}
-                  <span className={`text-xs tracking-wider ${editDef.yolo_mode ? 'text-muted/60' : 'text-muted'}`}>
+                  <span className={`text-xs tracking-wider ${editDef.yolo_mode ? 'text-[var(--accent-error)]' : 'text-[var(--text-secondary)]'}`}>
                     YOLO Mode
                   </span>
                 </button>
@@ -1000,11 +1051,11 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
                   type="button"
                 >
                   {editDef.disabled ? (
-                    <ToggleLeft size={20} className="text-muted/60" />
+                    <CircleCheck size={16} className="text-[var(--accent-error)]" />
                   ) : (
-                    <ToggleRight size={20} className="text-muted" />
+                    <Circle size={16} className="text-[var(--text-secondary)]" />
                   )}
-                  <span className={`text-xs tracking-wider ${editDef.disabled ? 'text-muted/60' : 'text-muted'}`}>
+                  <span className={`text-xs tracking-wider ${editDef.disabled ? 'text-[var(--accent-error)]' : 'text-[var(--text-secondary)]'}`}>
                     Disabled
                   </span>
                 </button>
@@ -1017,6 +1068,40 @@ export function LibraryTab({ nodes }: LibraryTabProps) {
               )}
 
               <div className="flex justify-end gap-2">
+                {!isNewOperation && editDef && (
+                  <button
+                    onClick={() => {
+                      const exportData = {
+                        item_type: 'operation',
+                        name: editDef.name,
+                        short_name: editDef.short_name,
+                        category: editDef.category,
+                        description: editDef.description,
+                        agent_info: editDef.agent_info,
+                        timeout: editDef.timeout,
+                        operation_prompt: editDef.operation_prompt,
+                        mode: editDef.mode,
+                        agent_iterations: editDef.agent_iterations,
+                        disabled: editDef.disabled,
+                        yolo_mode: editDef.yolo_mode,
+                        ...(editDef.model_ref && { model_ref: editDef.model_ref }),
+                      };
+                      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `${editDef.category}_${editDef.short_name}.json`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs tracking-wider text-muted border border-dim hover:border-[var(--accent-purple)] hover:text-[var(--accent-purple)] hover:bg-[var(--accent-purple)]/10 transition-colors"
+                  >
+                    <Download size={14} />
+                    Export
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     setShowEditOpModal(false);
