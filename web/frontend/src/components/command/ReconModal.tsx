@@ -380,7 +380,7 @@ export function ReconModal({ nodeId, agentShortName, onClose }: ReconModalProps)
   //
 
   const configByDir = useMemo(() => {
-    if (!reconResult?.config) return { grouped: {} as Record<string, { item: typeof reconResult.config[0]; idx: number; filename: string }[]>, dirs: [] as string[] };
+    if (!reconResult?.config) return { grouped: {} as Record<string, { item: ReconResult['config'][number]; idx: number; filename: string }[]>, dirs: [] as string[] };
     const grouped = reconResult.config.reduce((acc, item, idx) => {
       const parts = item.path.split('/');
       const filename = parts.pop() || item.path;

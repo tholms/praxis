@@ -13,12 +13,6 @@ const statusColors = {
   info: 'status-info',
 };
 
-const statusBgColors = {
-  online: 'bg-[var(--accent-success)]/10',
-  warning: 'bg-[var(--accent-warning)]/10',
-  offline: 'bg-[var(--accent-error)]/10',
-  info: 'bg-[var(--accent-info)]/10',
-};
 
 export function StatusBadge({ status, label, showDot = true }: StatusBadgeProps) {
   return (

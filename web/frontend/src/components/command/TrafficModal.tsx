@@ -210,7 +210,7 @@ export function TrafficModal({ onClose, fixedNodeId }: TrafficModalProps) {
 //
 
 function RulesTab() {
-  const { state, createInterceptRule, updateInterceptRule, deleteInterceptRule } = useApp();
+  const { state, updateInterceptRule, deleteInterceptRule } = useApp();
   const rules = state.intercept.rules;
   const nodes = state.systemState?.nodes ?? [];
 
@@ -455,7 +455,7 @@ function RuleFormModal({ rule, nodes, onClose }: {
             <label className="block text-[10px] tracking-wider text-[var(--text-secondary)] mb-1">Direction</label>
             <select
               value={values.target_direction}
-              onChange={e => setValues(v => ({ ...v, target_direction: e.target.value }))}
+              onChange={e => setValues(v => ({ ...v, target_direction: e.target.value as TargetDirection }))}
               className={inputClass}
             >
               <option value="both">Both</option>
