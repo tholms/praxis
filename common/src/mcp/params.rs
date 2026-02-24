@@ -123,3 +123,9 @@ pub struct ShortIdParams {
     #[schemars(description = "Short ID to look up")]
     pub short_id: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NameParams {
+    #[schemars(description = "Operation name (e.g. recon::system_info) or chain name")]
+    pub name: String,
+}

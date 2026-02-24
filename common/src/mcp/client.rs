@@ -2,9 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::{
-    ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo, CommandResponse,
-    InterceptedTrafficEntry, NodeCommand, OperationDefinitionInfo, ReconResult,
-    SemanticOpUpdate, SystemState, TargetSpec, TrafficSearchFilters, TriggerConfig,
+    ChainDefinitionFull, ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo,
+    CommandResponse, InterceptedTrafficEntry, NodeCommand, OperationDefinitionInfo,
+    ReconResult, SemanticOpUpdate, SystemState, TargetSpec, TrafficSearchFilters,
+    TriggerConfig,
 };
 
 //
@@ -73,6 +74,12 @@ pub trait McpClient: Send + Sync {
 
     /// Get cached chain executions.
     async fn get_chain_executions(&self) -> Vec<ChainExecutionUpdate>;
+
+    /// Request a specific chain definition by ID.
+    async fn request_chain(&self, chain_id: &str) -> Result<()>;
+
+    /// Get the most recently fetched full chain definition.
+    async fn get_current_chain(&self) -> Option<ChainDefinitionFull>;
 
     /// Get stored recon result for a node+agent from the service database.
     async fn get_stored_recon(

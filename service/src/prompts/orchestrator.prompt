@@ -62,10 +62,16 @@ YOLO mode (`session_create` with `yolo: true`):
 NOTE: For semantic operations (op_run), you do NOT need to manage sessions manually.
 Sessions are only needed for manual `session_prompt` calls.
 
-### Semantic Operations
+### Semantic Operations & Chains
 - Semantic Operations are atomic 'tasks' that interact with a remote agent.
-- These operations can be listed to see what's available and used in lieu of manually issuing prompts.
-- Always look for relevant ops with op_list prior to doing anything else.
+- Chains are multi-step workflows composed of operations, tools, prompts, and control flow.
+- Use `op_available` to list what's available. Use `op_definition` to fetch the full
+  definition of an operation or chain (including element types, connections, and topology).
+- Use `op_info` to check execution status. For chains, `op_info` returns `final_output`
+  (the terminal element's result) and an array of elements keyed by UUID. Elements are
+  unordered — to understand their types, execution order, and connections, fetch the chain
+  definition with `op_definition` and correlate element IDs.
+- Always look for relevant ops with `op_available` prior to doing anything else.
 - (Manually issuing prompts is always an option if the operations are not sufficient.)
 
 IMPORTANT: op_run behavior:

@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use crate::mcp::McpClient;
 use crate::{
-    AgentCommand, AgentCommandResult, AgentFileType, AgentTool, ChainDefinitionInfo,
-    ChainExecutionUpdate, ChainTriggerInfo, ConfigItem, GrepFileEntry, McpServer, NodeCommand,
-    NodeCommandResult, OperationDefinitionInfo, SemanticOpUpdate, SessionItem, SystemState,
-    TargetSpec, TriggerConfig,
+    AgentCommand, AgentCommandResult, AgentFileType, AgentTool, ChainDefinitionFull,
+    ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo, ConfigItem, GrepFileEntry,
+    McpServer, NodeCommand, NodeCommandResult, OperationDefinitionInfo, SemanticOpUpdate,
+    SessionItem, SystemState, TargetSpec, TriggerConfig,
 };
 
 //
@@ -37,6 +37,11 @@ pub enum OpCancelResult {
 pub struct OpListResult {
     pub operations: Vec<SemanticOpUpdate>,
     pub chains: Vec<ChainExecutionUpdate>,
+}
+
+pub enum OpDefinitionResult {
+    Operation(OperationDefinitionInfo),
+    Chain(ChainDefinitionFull),
 }
 
 //
@@ -94,6 +99,40 @@ pub async fn list_available(client: &(impl McpClient + Sync)) -> Result<OpAvaila
         .collect();
 
     Ok(OpAvailableResult { operations, chains })
+}
+
+//
+// Get the full definition of an operation or chain by name.
+//
+
+pub async fn get_definition(
+    client: &(impl McpClient + Sync),
+    name: &str,
+) -> Result<OpDefinitionResult> {
+    client.request_op_def_list().await?;
+    client.request_chain_list().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let ops = client.get_operation_definitions().await;
+    if let Some(op) = ops.iter().find(|d| d.full_name == name || d.short_name == name || d.name == name) {
+        return Ok(OpDefinitionResult::Operation(op.clone()));
+    }
+
+    let chains = client.get_chain_definitions().await;
+    if let Some(chain_info) = chains.iter().find(|c| c.name == name || c.id.starts_with(name)) {
+        client.request_chain(&chain_info.id).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        if let Some(chain_full) = client.get_current_chain().await {
+            return Ok(OpDefinitionResult::Chain(chain_full));
+        }
+        return Err(anyhow!("Chain '{}' found but failed to fetch full definition", name));
+    }
+
+    Err(anyhow!(
+        "No operation or chain found matching '{}'. Use op_available to see definitions.",
+        name
+    ))
 }
 
 //

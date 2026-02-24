@@ -90,6 +90,14 @@ impl McpClient for CliMcpClient {
         self.inner.lock().await.get_chain_definitions().await
     }
 
+    async fn request_chain(&self, chain_id: &str) -> Result<()> {
+        self.inner.lock().await.request_chain(chain_id).await
+    }
+
+    async fn get_current_chain(&self) -> Option<common::ChainDefinitionFull> {
+        self.inner.lock().await.get_current_chain().await
+    }
+
     async fn run_chain(
         &self,
         chain_id: String,

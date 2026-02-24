@@ -46,6 +46,12 @@ pub enum OpCommand {
 
     /// List tracked operations and chains
     List,
+
+    /// Show operation or chain definition
+    Definition {
+        /// Operation or chain name
+        name: String,
+    },
 }
 
 pub async fn execute(client: &mut CliClient, command: OpCommand, output: &OutputFormat) -> Result<()> {
@@ -57,6 +63,7 @@ pub async fn execute(client: &mut CliClient, command: OpCommand, output: &Output
         OpCommand::Info { short_id } => get_info(client, &short_id, output).await,
         OpCommand::Cancel { short_id } => cancel(client, &short_id, output).await,
         OpCommand::List => list_tracked(client, output).await,
+        OpCommand::Definition { name } => get_definition(client, &name, output).await,
     }
 }
 
@@ -295,16 +302,20 @@ fn show_chain_info(exec: &common::ChainExecutionUpdate, output: &OutputFormat) -
                 })
             }).collect();
 
+            let final_output: String = exec.outputs.values().cloned().collect::<Vec<_>>().join("\n");
+
             print_json(&json!({
                 "status": "success",
                 "execution": {
                     "id": format_short_id(&exec.execution_id),
                     "chain_name": exec.chain_name,
+                    "chain_id": exec.chain_id,
                     "node_id": format_short_id(&exec.node_id),
                     "agent": exec.agent_short_name,
                     "exec_status": status_str,
                     "element_count": exec.elements.len(),
                     "elements": element_statuses,
+                    "final_output": if final_output.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(final_output) },
                     "started_at": exec.started_at.to_rfc3339(),
                     "ended_at": exec.ended_at.map(|t: DateTime<Utc>| t.to_rfc3339())
                 }
@@ -322,6 +333,13 @@ fn show_chain_info(exec: &common::ChainExecutionUpdate, output: &OutputFormat) -
                 let ended: DateTime<Utc> = ended;
                 let duration = ended - exec.started_at;
                 println!("  Ended:    {} ({}s)", ended.format("%Y-%m-%d %H:%M:%S"), duration.num_seconds());
+            }
+
+            let final_output: String = exec.outputs.values().cloned().collect::<Vec<_>>().join("\n");
+            if !final_output.is_empty() {
+                println!();
+                println!("  {}", "Final Output:".bold());
+                print_markdown(&final_output);
             }
 
             if !exec.elements.is_empty() {
@@ -463,6 +481,85 @@ async fn list_tracked(client: &CliClient, output: &OutputFormat) -> Result<()> {
 
                 println!();
                 print_success(&format!("{} chain execution(s) tracked", result.chains.len()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn get_definition(client: &CliClient, name: &str, output: &OutputFormat) -> Result<()> {
+    let result = ops::get_definition(client, name).await?;
+
+    match result {
+        ops::OpDefinitionResult::Operation(op) => {
+            match output {
+                OutputFormat::Json => print_json(&json!({
+                    "type": "operation",
+                    "full_name": op.full_name,
+                    "name": op.name,
+                    "category": op.category,
+                    "description": op.description,
+                    "agent_info": op.agent_info,
+                    "mode": op.mode,
+                    "timeout": op.timeout,
+                    "agent_iterations": op.agent_iterations,
+                    "operation_prompt": op.operation_prompt,
+                })),
+                OutputFormat::Text => {
+                    print_header(&format!("Operation: {}", op.full_name));
+                    println!();
+                    println!("  Name:        {}", op.name);
+                    println!("  Category:    {}", op.category);
+                    println!("  Mode:        {}", op.mode);
+                    println!("  Timeout:     {}s", op.timeout);
+                    if !op.description.is_empty() {
+                        println!("  Description: {}", op.description);
+                    }
+                    if !op.operation_prompt.is_empty() {
+                        println!();
+                        println!("  {}", "Prompt:".bold());
+                        print_markdown(&op.operation_prompt);
+                    }
+                }
+            }
+        }
+        ops::OpDefinitionResult::Chain(chain) => {
+            match output {
+                OutputFormat::Json => {
+                    print_json(&serde_json::to_value(&chain).unwrap_or_default());
+                }
+                OutputFormat::Text => {
+                    print_header(&format!("Chain: {}", chain.name));
+                    println!();
+                    println!("  ID:          {}", &chain.id[..8.min(chain.id.len())]);
+                    if !chain.description.is_empty() {
+                        println!("  Description: {}", chain.description);
+                    }
+                    if !chain.category.is_empty() {
+                        println!("  Category:    {}", chain.category);
+                    }
+                    println!("  Elements:    {}", chain.elements.len());
+                    println!("  Connections: {}", chain.connections.len());
+
+                    if !chain.elements.is_empty() {
+                        println!();
+                        println!("  {}", "Elements:".bold());
+                        for elem in &chain.elements {
+                            let elem_json = serde_json::to_string(elem).unwrap_or_default();
+                            println!("    {}", elem_json);
+                        }
+                    }
+
+                    if !chain.connections.is_empty() {
+                        println!();
+                        println!("  {}", "Connections:".bold());
+                        for conn in &chain.connections {
+                            let cond = conn.condition.as_ref().map(|c| format!(" [{:?}]", c)).unwrap_or_default();
+                            println!("    {} -> {}{}", &conn.from_element[..8.min(conn.from_element.len())], &conn.to_element[..8.min(conn.to_element.len())], cond);
+                        }
+                    }
+                }
             }
         }
     }

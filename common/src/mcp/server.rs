@@ -696,6 +696,61 @@ impl<C: McpClient + Clone + 'static> PraxisServer<C> {
         }))
     }
 
+    #[tool(description = "Get the full definition of an operation or chain by name. For operations: returns prompt, mode, timeout, agent_info. For chains: returns elements (with types and IDs), connections (topology), and configuration. Use this to understand chain structure when correlating with op_info element results.")]
+    async fn op_definition(
+        &self,
+        Parameters(params): Parameters<NameParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+
+        let result = super::ops::get_definition(client, &params.name).await.map_err(mcp_err)?;
+
+        let response = match result {
+            super::ops::OpDefinitionResult::Operation(op) => json!({
+                "type": "operation",
+                "full_name": op.full_name,
+                "name": op.name,
+                "category": op.category,
+                "description": op.description,
+                "agent_info": op.agent_info,
+                "mode": op.mode,
+                "timeout": op.timeout,
+                "agent_iterations": op.agent_iterations,
+                "operation_prompt": op.operation_prompt,
+            }),
+            super::ops::OpDefinitionResult::Chain(chain) => {
+                let elements: Vec<_> = chain.elements.iter().map(|e| {
+                    json!({
+                        "element": serde_json::to_value(e).unwrap_or_default()
+                    })
+                }).collect();
+                let connections: Vec<_> = chain.connections.iter().map(|c| {
+                    json!({
+                        "id": c.id,
+                        "from_element": c.from_element,
+                        "to_element": c.to_element,
+                        "from_port": c.from_port,
+                        "to_port": c.to_port,
+                        "condition": c.condition.as_ref().map(|cond| format!("{:?}", cond)),
+                    })
+                }).collect();
+                json!({
+                    "type": "chain",
+                    "id": chain.id,
+                    "name": chain.name,
+                    "description": chain.description,
+                    "category": chain.category,
+                    "timeout": chain.timeout,
+                    "elements": elements,
+                    "connections": connections,
+                })
+            }
+        };
+
+        json_result(response)
+    }
+
     #[tool(description = "Run a semantic operation or chain")]
     async fn op_run(
         &self,
@@ -748,15 +803,18 @@ impl<C: McpClient + Clone + 'static> PraxisServer<C> {
                     "element_id": id,
                     "status": format!("{:?}", elem.status)
                 })).collect();
+                let final_output: String = exec.outputs.values().cloned().collect::<Vec<_>>().join("\n");
                 json!({
                     "type": "chain",
                     "id": &exec.execution_id[..8.min(exec.execution_id.len())],
                     "chain_name": exec.chain_name,
+                    "chain_id": exec.chain_id,
                     "status": exec.status.to_string(),
                     "node_id": &exec.node_id[..8.min(exec.node_id.len())],
                     "agent": exec.agent_short_name,
                     "element_count": exec.elements.len(),
                     "elements": elements,
+                    "final_output": if final_output.is_empty() { None } else { Some(final_output) },
                     "started_at": exec.started_at.to_rfc3339(),
                     "ended_at": exec.ended_at.map(|t| t.to_rfc3339())
                 })

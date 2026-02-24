@@ -289,9 +289,7 @@ export function OperationsPage() {
     for (const node of filteredNodes) {
       const agents = targetSpec.agent_short_names.length > 0
         ? node.discovered_agents.filter(a => targetSpec.agent_short_names.includes(a.short_name))
-        : node.selected_agent
-          ? [{ short_name: node.selected_agent.short_name }]
-          : node.discovered_agents.slice(0, 1);
+        : node.discovered_agents;
 
       for (const agent of agents) {
         send({
@@ -413,7 +411,10 @@ export function OperationsPage() {
       key: 'node_id',
       header: 'Node',
       sortable: false,
-      cellClassName: 'text-muted font-mono',
+      render: (_: unknown, exec: ChainExecutionUpdate) => {
+        const node = (state.systemState?.nodes || []).find(n => n.node_id === exec.node_id);
+        return <span className="text-muted">{node?.machine_name || exec.node_id.slice(0, 8)}</span>;
+      },
     },
     {
       key: 'started_at',

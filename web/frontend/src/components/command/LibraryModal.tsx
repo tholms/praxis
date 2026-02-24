@@ -239,9 +239,7 @@ export function LibraryModal({ onClose }: LibraryModalProps) {
       for (const node of filteredNodes) {
         const agents = targetSpec.agent_short_names.length > 0
           ? node.discovered_agents.filter(a => targetSpec.agent_short_names.includes(a.short_name))
-          : node.selected_agent
-            ? [{ short_name: node.selected_agent.short_name }]
-            : node.discovered_agents.slice(0, 1);
+          : node.discovered_agents;
 
         for (const agent of agents) {
           runOperation(node.node_id, agent.short_name, itemId);
@@ -257,13 +255,9 @@ export function LibraryModal({ onClose }: LibraryModalProps) {
       const primaryNode = filteredNodes[0];
       if (!primaryNode) return;
 
-      const agents = targetSpec.agent_short_names.length > 0
-        ? primaryNode.discovered_agents.filter(a => targetSpec.agent_short_names.includes(a.short_name))
-        : primaryNode.selected_agent
-          ? [{ short_name: primaryNode.selected_agent.short_name }]
-          : primaryNode.discovered_agents.slice(0, 1);
-
-      const agentName = agents[0]?.short_name || '';
+      const agentName = targetSpec.agent_short_names.length > 0
+        ? targetSpec.agent_short_names[0]
+        : primaryNode.discovered_agents[0]?.short_name || '';
       runChain(itemId, primaryNode.node_id, agentName, undefined, targetSpec);
     }
 

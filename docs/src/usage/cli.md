@@ -433,8 +433,9 @@ The MCP server exposes the following tools:
 
 **Operations & Chains:**
 - `op_available` - List available operations and chains
+- `op_definition` - Show the full definition of an operation or chain (prompt, elements, connections)
 - `op_run` - Run an operation or chain
-- `op_info` - Show full info for an operation or chain execution (includes result/output)
+- `op_info` - Show full info for an operation or chain execution (includes result/output and final_output for chains)
 - `op_cancel` - Cancel a running operation or chain execution
 - `op_list` - List tracked operations and chain executions
 

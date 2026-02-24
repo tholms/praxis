@@ -41,6 +41,17 @@
 - For PostgreSQL, use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
 - The `service_config` table can store version tracking keys (e.g., `builtin_scripts_version`) to coordinate data migrations across service upgrades.
 
+## Hunting Tables
+
+- Any hunting table changes (additions, removals, or field changes) require updating the table schemas in all three locations:
+  - `service/src/hunting/tables.rs` — backend column definitions and `resolve_table()`
+  - `service/src/hunting/sql.rs` — SQL config for DB-backed tables
+  - `web/frontend/src/components/hunting/KqlCodeEditor.tsx` — `TABLE_SCHEMAS` for autocomplete
+  - `web/frontend/src/pages/HuntingPage.tsx` — `TABLES` schema sidebar
+  - `web/frontend/src/components/command/HuntingModal.tsx` — `TABLES` schema sidebar (command center)
+  - `docs/src/usage/hunting.md` — documentation
+- All table lists must be in **alphabetical order** by table name.
+
 ## CLI / MCP Parity
 
 - Capabilities of the CLI REPL and non-interactive CLI must always match. Any command available in the REPL must also work in one-shot mode (`-C`) and as a direct subcommand.

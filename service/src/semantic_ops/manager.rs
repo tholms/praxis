@@ -58,6 +58,9 @@ pub struct SemanticOpsManager {
 
     /// Response tracker for command responses
     response_tracker: Arc<ResponseTracker>,
+
+    /// Shared per-node execution lock (coordinates with chain executor)
+    node_exec_lock: super::NodeExecLock,
 }
 
 impl SemanticOpsManager {
@@ -67,6 +70,7 @@ impl SemanticOpsManager {
         config: Arc<TokioRwLock<ServiceConfig>>,
         rabbitmq_channel: Channel,
         response_tracker: Arc<ResponseTracker>,
+        node_exec_lock: super::NodeExecLock,
     ) -> Self {
         Self {
             queues: Arc::new(StdRwLock::new(HashMap::new())),
@@ -76,6 +80,7 @@ impl SemanticOpsManager {
             config,
             rabbitmq_channel,
             response_tracker,
+            node_exec_lock,
         }
     }
 
@@ -590,6 +595,7 @@ impl SemanticOpsManager {
         let running = self.running.clone();
         let queues = self.queues.clone();
         let op_to_node = self.op_to_node.clone();
+        let node_exec_lock = self.node_exec_lock.clone();
 
         //
         // Spawn execution task.
@@ -608,6 +614,7 @@ impl SemanticOpsManager {
             running,
             queues,
             op_to_node,
+            node_exec_lock,
         ));
     }
 
@@ -626,8 +633,16 @@ impl SemanticOpsManager {
         running: Arc<StdRwLock<HashMap<String, RunningOperation>>>,
         queues: Arc<StdRwLock<HashMap<String, VecDeque<QueuedOperation>>>>,
         op_to_node: Arc<StdRwLock<HashMap<String, String>>>,
+        node_exec_lock: super::NodeExecLock,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         Box::pin(async move {
+
+        //
+        // Acquire per-node execution lock. This ensures no chain or other
+        // operation runs concurrently on the same node.
+        //
+        let _node_guard = node_exec_lock.get(&node_id).lock_owned().await;
+
         //
         // Log the start of op execution with session management.
         //
@@ -731,6 +746,11 @@ impl SemanticOpsManager {
         let _ = database.update_status(&operation_id, status, Some(Utc::now()), summary_text, result_text).await;
 
         //
+        // Release node lock before cleanup/dequeue so the next op can acquire it.
+        //
+        drop(_node_guard);
+
+        //
         // Remove from running.
         //
         {
@@ -832,6 +852,7 @@ impl SemanticOpsManager {
                 running,
                 queues,
                 op_to_node,
+                node_exec_lock,
             ));
         }
         })
@@ -848,6 +869,7 @@ impl Clone for SemanticOpsManager {
             config: self.config.clone(),
             rabbitmq_channel: self.rabbitmq_channel.clone(),
             response_tracker: self.response_tracker.clone(),
+            node_exec_lock: self.node_exec_lock.clone(),
         }
     }
 }

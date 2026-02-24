@@ -2130,6 +2130,7 @@ async fn handle_chain_run(
         let response_tracker = ctx.response_tracker.clone();
         let database = ctx.database.clone();
         let toolkit_manager = ctx.toolkit_manager.clone();
+        let node_exec_lock = ctx.node_exec_lock.clone();
 
         tokio::spawn(async move {
             let results = chain_executor.execute_fan_out(
@@ -2143,6 +2144,7 @@ async fn handle_chain_run(
                 response_tracker,
                 database,
                 Some(toolkit_manager),
+                Some(node_exec_lock),
             ).await;
             for result in results {
                 match result {
@@ -2190,6 +2192,8 @@ async fn handle_chain_run(
             ctx.response_tracker.clone(),
             ctx.database.clone(),
             Some(ctx.toolkit_manager.clone()),
+            None,
+            Some(ctx.node_exec_lock.clone()),
         )
         .await
     {
@@ -2225,17 +2229,47 @@ async fn handle_chain_cancel(ctx: &ServiceContext, client_id: String, execution_
     );
     let cancelled = ctx.chain_executor.cancel(&execution_id).await;
     if !cancelled {
-        let _ = send_to_client(
-            &ctx.client_publish_channel,
-            &client_id,
-            ClientDirectMessage::ChainError {
-                message: format!(
-                    "Execution not found or already completed: {}",
-                    execution_id
-                ),
-            },
-        )
-        .await;
+        //
+        // Not running — may be a pre-registered Queued chain from fan-out.
+        // Mark as cancelled in the registry and DB.
+        //
+        let found_queued = {
+            let execs = ctx.chain_executor.registry.list();
+            execs.iter().any(|e| e.execution_id == execution_id && e.status == common::ChainExecutionStatus::Queued)
+        };
+        if found_queued {
+            //
+            // Get the full state before removing so we can broadcast
+            // a Cancelled update to all clients.
+            //
+            let mut cancelled_update = ctx.chain_executor.registry.list()
+                .into_iter()
+                .find(|e| e.execution_id == execution_id);
+            ctx.chain_executor.registry.remove(&execution_id);
+            let _ = ctx.database.delete_chain_execution(&execution_id).await;
+
+            if let Some(ref mut update) = cancelled_update {
+                update.status = common::ChainExecutionStatus::Cancelled;
+                update.ended_at = Some(chrono::Utc::now());
+                let _ = common::publish_json_exchange(
+                    &ctx.broadcast_channel,
+                    common::CLIENT_BROADCAST_EXCHANGE,
+                    &common::ClientBroadcastMessage::ChainExecutionUpdate(update.clone()),
+                ).await;
+            }
+        } else {
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::ChainError {
+                    message: format!(
+                        "Execution not found or already completed: {}",
+                        execution_id
+                    ),
+                },
+            )
+            .await;
+        }
     }
 }
 

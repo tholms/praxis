@@ -22,6 +22,7 @@ pub struct TriggerEngine {
     semantic_ops_channel: Channel,
     broadcast_channel: Channel,
     toolkit_manager: Arc<ToolkitManager>,
+    node_exec_lock: crate::semantic_ops::NodeExecLock,
     refresh_notify: Notify,
 }
 
@@ -35,6 +36,7 @@ impl TriggerEngine {
         semantic_ops_channel: Channel,
         broadcast_channel: Channel,
         toolkit_manager: Arc<ToolkitManager>,
+        node_exec_lock: crate::semantic_ops::NodeExecLock,
     ) -> Self {
         Self {
             database,
@@ -45,6 +47,7 @@ impl TriggerEngine {
             semantic_ops_channel,
             broadcast_channel,
             toolkit_manager,
+            node_exec_lock,
             refresh_notify: Notify::new(),
         }
     }
@@ -120,6 +123,7 @@ impl TriggerEngine {
                     self.response_tracker.clone(),
                     self.database.clone(),
                     Some(self.toolkit_manager.clone()),
+                    Some(self.node_exec_lock.clone()),
                 ).await;
             }
 
@@ -203,6 +207,7 @@ impl TriggerEngine {
                     self.response_tracker.clone(),
                     self.database.clone(),
                     Some(self.toolkit_manager.clone()),
+                    Some(self.node_exec_lock.clone()),
                 ).await;
             }
 
@@ -251,6 +256,7 @@ impl TriggerEngine {
                     self.response_tracker.clone(),
                     self.database.clone(),
                     Some(self.toolkit_manager.clone()),
+                    Some(self.node_exec_lock.clone()),
                 ).await;
             }
 

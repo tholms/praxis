@@ -30,6 +30,8 @@ const MAX_PANEL_HEIGHT = 600;
 
 export function ActivityBar() {
   const { state, cancelOperation, cancelChainExecution, removeOperation, removeChainExecution, clearOperations, clearChainExecutions } = useApp();
+  const nodes = state.systemState?.nodes || [];
+  const nodeName = (nodeId: string) => nodes.find(n => n.node_id === nodeId)?.machine_name || nodeId.slice(0, 8);
   const [expanded, setExpanded] = useState(false);
   const [panelHeight, setPanelHeight] = useState(DEFAULT_PANEL_HEIGHT);
   const [selectedOpId, setSelectedOpId] = useState<string | null>(null);
@@ -147,7 +149,8 @@ export function ActivityBar() {
                         <Zap size={10} className="text-[var(--accent-purple)] flex-shrink-0" />
                         <span className="text-highlight truncate">{item.op.spec.name}</span>
                         <span className="text-muted truncate">{item.op.agent_short_name}</span>
-                        <span className="text-[9px] text-muted/50">{new Date(item.op.start_time).toLocaleTimeString()}</span>
+                        <span className="text-[9px] text-muted/50 truncate">{nodeName(item.op.node_id)}</span>
+                        <span className="text-[9px] text-muted opacity-70">{new Date(item.op.start_time).toLocaleTimeString()}</span>
                       </div>
                       <div className="flex items-center gap-1.5 flex-shrink-0">
                         <StatusBadge status={getOperationStatusColor(item.op.status)} label={item.op.status} />
@@ -181,7 +184,8 @@ export function ActivityBar() {
                         <GitBranch size={10} className="text-[var(--accent-info)] flex-shrink-0" />
                         <span className="text-highlight truncate">{item.exec.chain_name}</span>
                         <span className="text-muted truncate">{item.exec.agent_short_name}</span>
-                        <span className="text-[9px] text-muted/50">{new Date(item.exec.started_at).toLocaleTimeString()}</span>
+                        <span className="text-[9px] text-muted/50 truncate">{nodeName(item.exec.node_id)}</span>
+                        <span className="text-[9px] text-muted opacity-70">{new Date(item.exec.started_at).toLocaleTimeString()}</span>
                       </div>
                       <div className="flex items-center gap-1.5 flex-shrink-0">
                         <StatusBadge status={getOperationStatusColor(item.exec.status)} label={item.exec.status} />

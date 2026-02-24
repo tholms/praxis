@@ -281,11 +281,13 @@ async fn run_main_loop() -> Result<()> {
     //
     // Semantic operations use LLM config from service_config.
     //
+    let node_exec_lock = semantic_ops::NodeExecLock::new();
     let semantic_ops_manager = Arc::new(SemanticOpsManager::new(
         database.clone(),
         service_config.clone(),
         semantic_ops_channel.clone(),
         response_tracker.clone(),
+        node_exec_lock.clone(),
     ));
 
     if let Ok(count) = semantic_ops_manager.cancel_stale_operations().await {
@@ -591,6 +593,7 @@ async fn run_main_loop() -> Result<()> {
         semantic_ops_channel.clone(),
         broadcast_channel.clone(),
         toolkit_manager.clone(),
+        node_exec_lock.clone(),
     ));
     trigger_engine.start_scheduler();
     common::log_info!("Initialized trigger engine");
@@ -609,6 +612,7 @@ async fn run_main_loop() -> Result<()> {
         response_tracker,
         semantic_ops_manager,
         chain_executor,
+        node_exec_lock: node_exec_lock.clone(),
         agent_chat_manager,
         orchestrator_manager,
         toolkit_manager,

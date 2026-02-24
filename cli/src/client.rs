@@ -41,6 +41,7 @@ struct ClientState {
     operations: Vec<SemanticOpUpdate>,
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
+    current_chain: Option<common::ChainDefinitionFull>,
     chain_executions: Vec<ChainExecutionUpdate>,
     chain_triggers: Vec<common::ChainTriggerInfo>,
     orchestrator_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientDirectMessage>>,
@@ -249,6 +250,9 @@ impl CliClient {
             }
             ClientDirectMessage::ChainDefListResponse { chains } => {
                 state.chain_definitions = chains;
+            }
+            ClientDirectMessage::ChainGetResponse { chain } => {
+                state.current_chain = chain;
             }
             ClientDirectMessage::ChainExecutionUpdate(execution) => {
                 if let Some(idx) = state.chain_executions.iter().position(|e| e.execution_id == execution.execution_id) {
@@ -537,6 +541,18 @@ impl CliClient {
         self.state.lock().await.chain_definitions.clone()
     }
 
+    pub async fn request_chain(&self, chain_id: &str) -> Result<()> {
+        let message = ClientSignalMessage::ChainGet {
+            client_id: self.client_id.clone(),
+            chain_id: chain_id.to_string(),
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn get_current_chain(&self) -> Option<common::ChainDefinitionFull> {
+        self.state.lock().await.current_chain.clone()
+    }
+
     pub async fn run_chain(
         &self,
         chain_id: String,
@@ -804,6 +820,14 @@ impl McpClient for CliClient {
 
     async fn get_chain_definitions(&self) -> Vec<ChainDefinitionInfo> {
         CliClient::get_chain_definitions(self).await
+    }
+
+    async fn request_chain(&self, chain_id: &str) -> Result<()> {
+        CliClient::request_chain(self, chain_id).await
+    }
+
+    async fn get_current_chain(&self) -> Option<common::ChainDefinitionFull> {
+        CliClient::get_current_chain(self).await
     }
 
     async fn run_chain(

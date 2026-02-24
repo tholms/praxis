@@ -666,9 +666,7 @@ export function NodeCard({ node }: NodeCardProps) {
         onRun={(itemId, spec) => {
           const targetAgents = spec.agent_short_names.length > 0
             ? node.discovered_agents.filter(a => spec.agent_short_names.includes(a.short_name))
-            : node.selected_agent
-              ? [{ short_name: node.selected_agent.short_name }]
-              : node.discovered_agents.slice(0, 1);
+            : node.discovered_agents;
           for (const agent of targetAgents) {
             runOperation(node.node_id, agent.short_name, itemId);
           }

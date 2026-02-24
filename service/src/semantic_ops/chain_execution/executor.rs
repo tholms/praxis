@@ -46,7 +46,9 @@ impl ChainExecutor {
         }
     }
 
-    /// Execute a chain with optional initial input for trigger context
+    /// Execute a chain with optional initial input for trigger context.
+    /// When `preset_execution_id` is provided (from fan-out), reuses the
+    /// pre-registered execution ID and updates the existing DB record.
     pub async fn execute(
         &self,
         chain: ChainDefinition,
@@ -60,8 +62,11 @@ impl ChainExecutor {
         response_tracker: Arc<ResponseTracker>,
         database: Arc<Database>,
         toolkit_manager: Option<Arc<ToolkitManager>>,
+        preset_execution_id: Option<String>,
+        node_exec_lock: Option<crate::semantic_ops::NodeExecLock>,
     ) -> Result<String> {
-        let execution_id = Uuid::new_v4().to_string();
+        let has_preset_id = preset_execution_id.is_some();
+        let execution_id = preset_execution_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
         //
         // Build execution graph.
@@ -95,9 +100,10 @@ impl ChainExecutor {
         let is_implicit = is_implicit_chain(&chain.id);
 
         //
-        // Persist initial state to database (skip for implicit chains).
+        // Persist initial state to database (skip for implicit chains and
+        // pre-registered executions from fan-out which are already in the DB).
         //
-        if !is_implicit {
+        if !is_implicit && !has_preset_id {
             let record = {
                 let s = state_arc.read().unwrap();
                 ChainExecutionRecord {
@@ -160,6 +166,16 @@ impl ChainExecutor {
         // Spawn the execution task - runs entirely in background.
         //
         tokio::spawn(async move {
+            //
+            // Acquire per-node execution lock so no other op or chain runs
+            // concurrently on this node.
+            //
+            let _node_guard = if let Some(ref lock) = node_exec_lock {
+                Some(lock.get(&node_id).lock_owned().await)
+            } else {
+                None
+            };
+
             //
             // Mark as Running now that we're actually executing.
             //
@@ -311,6 +327,7 @@ impl ChainExecutor {
         response_tracker: Arc<ResponseTracker>,
         database: Arc<Database>,
         toolkit_manager: Option<Arc<ToolkitManager>>,
+        node_exec_lock: Option<crate::semantic_ops::NodeExecLock>,
     ) -> Vec<Result<String>> {
         use std::collections::HashMap;
 
@@ -336,6 +353,7 @@ impl ChainExecutor {
             let response_tracker = response_tracker.clone();
             let database = database.clone();
             let toolkit_manager = toolkit_manager.clone();
+            let node_exec_lock = node_exec_lock.clone();
 
             //
             // Each node gets its own spawn — targets within the node run
@@ -346,9 +364,75 @@ impl ChainExecutor {
                 cancel_handles,
             };
             let handle = tokio::spawn(async move {
+                //
+                // Pre-register all targets as Queued so the UI shows
+                // them immediately, then execute sequentially.
+                //
+                let mut queued_ids: Vec<(String, super::targeting::ResolvedTarget)> = Vec::new();
+                for target in &node_targets {
+                    let exec_id = Uuid::new_v4().to_string();
+                    let element_ids: Vec<String> = chain.elements.iter().map(|e| e.id().to_string()).collect();
+                    let state = ChainExecutionState::new(
+                        exec_id.clone(),
+                        chain.id.clone(),
+                        chain.name.clone(),
+                        target.node_id.clone(),
+                        target.agent_short_name.clone(),
+                        element_ids,
+                    );
+                    let state_arc = self_clone.registry.register(state);
+
+                    let record = {
+                        let s = state_arc.read().unwrap();
+                        ChainExecutionRecord {
+                            execution_id: s.execution_id.clone(),
+                            chain_id: s.chain_id.clone(),
+                            chain_name: s.chain_name.clone(),
+                            node_id: s.node_id.clone(),
+                            agent_short_name: s.agent_short_name.clone(),
+                            status: s.status.clone(),
+                            elements: s.elements.clone(),
+                            outputs: s.outputs.clone(),
+                            started_at: s.started_at,
+                            ended_at: s.ended_at,
+                            created_at: Utc::now(),
+                        }
+                    };
+                    let _ = database.insert_chain_execution(&record).await;
+
+                    let update = state_arc.read().unwrap().to_update();
+                    Self::broadcast_update(&broadcast_channel, ClientBroadcastMessage::ChainExecutionUpdate(update)).await;
+
+                    queued_ids.push((exec_id, target.clone()));
+                }
+
+                //
+                // Execute sequentially — each execute() will find the
+                // pre-registered state and update it.
+                //
                 let mut node_results = Vec::new();
-                for target in node_targets {
-                    let exec_id = self_clone
+                for (exec_id, target) in queued_ids {
+                    //
+                    // Skip if cancelled while queued. The cancel handler
+                    // removes from the registry, so if it's gone the
+                    // chain was cancelled.
+                    //
+                    let still_queued = self_clone.registry.list().iter().any(|e| e.execution_id == exec_id);
+                    if !still_queued {
+                        common::log_info!("Chain execution {} was cancelled while queued, skipping", &exec_id[..8]);
+                        node_results.push(Ok(exec_id));
+                        continue;
+                    }
+
+                    //
+                    // Remove the pre-registered Queued placeholder from
+                    // the registry so execute() can re-register with the
+                    // same ID. The DB record stays — execute() will
+                    // overwrite it.
+                    //
+                    self_clone.registry.remove(&exec_id);
+
+                    let result = self_clone
                         .execute(
                             chain.clone(),
                             target.node_id.clone(),
@@ -361,14 +445,16 @@ impl ChainExecutor {
                             response_tracker.clone(),
                             database.clone(),
                             toolkit_manager.clone(),
+                            Some(exec_id),
+                            node_exec_lock.clone(),
                         )
                         .await;
 
                     //
-                    // Wait for this execution to finish before starting the
-                    // next one on the same node, so sessions don't collide.
+                    // Wait for completion before starting the next one
+                    // on the same node, so sessions don't collide.
                     //
-                    if let Ok(ref id) = exec_id {
+                    if let Ok(ref id) = result {
                         let poll_interval = std::time::Duration::from_secs(2);
                         let max_polls = 1800;
                         for _ in 0..max_polls {
@@ -384,7 +470,7 @@ impl ChainExecutor {
                         }
                     }
 
-                    node_results.push(exec_id);
+                    node_results.push(result);
                 }
                 node_results
             });
@@ -1248,7 +1334,7 @@ impl ChainExecutor {
             let _ = close_session(node_id, rabbitmq_channel).await;
         }
 
-        result.map(|(_, result)| result)
+        result.map(|(summary, _result)| summary)
     }
 }
 
