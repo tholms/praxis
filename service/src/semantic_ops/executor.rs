@@ -299,9 +299,10 @@ pub async fn execute_one_shot(
                             let response_preview: String = response.chars().take(100).collect();
                             common::log_info!("SemanticResponseReceived: op={} len={} response={}", &operation_id[..8], response.len(), response_preview);
                             //
-                            // One-shot mode: summary is empty, result is the response.
+                            // One-shot mode: summary is the response content (used as
+                            // chain element output), result indicates success/failure.
                             //
-                            Ok((String::new(), response))
+                            Ok((response, "success".to_string()))
                         }
                         common::NodeCommandResult::Session(common::SessionCommandResult::TransactionCancelled { .. }) => {
                             let _ = database.append_output(operation_id, &fmt_error("Transaction cancelled")).await;

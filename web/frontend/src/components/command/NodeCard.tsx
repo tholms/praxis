@@ -68,7 +68,7 @@ function ActiveOpEntry({ op, onHoverChange }: { op: SemanticOpUpdate; onHoverCha
   }, [hovered, op.output]);
 
   const statusColor = isRunning
-    ? 'var(--accent-info)'
+    ? 'var(--accent-purple)'
     : op.status === 'Completed' ? 'var(--accent-success)'
     : op.status === 'Failed' ? 'var(--accent-error)'
     : 'var(--text-secondary)';
@@ -80,8 +80,8 @@ function ActiveOpEntry({ op, onHoverChange }: { op: SemanticOpUpdate; onHoverCha
       onMouseLeave={() => setHoverState(false)}
     >
       <div className="flex items-center gap-1.5 text-[10px]">
-        {isRunning && <Loader2 size={10} className="animate-spin flex-shrink-0" style={{ color: statusColor }} />}
-        <Zap size={10} className="flex-shrink-0" style={{ color: statusColor }} />
+        {isRunning && <Loader2 size={10} className="animate-spin flex-shrink-0 text-[var(--accent-purple)]" />}
+        <Zap size={10} className="flex-shrink-0 text-[var(--accent-purple)]" />
         <span className="text-highlight truncate">{op.spec.name}</span>
         <span className="text-muted">· {op.agent_short_name}</span>
         {!isRunning && (
@@ -99,8 +99,8 @@ function ActiveOpEntry({ op, onHoverChange }: { op: SemanticOpUpdate; onHoverCha
           <div className="px-2.5 py-1.5 border-b border-subtle bg-[var(--bg-tertiary)]">
             <div className="flex items-center gap-1.5 text-[10px]">
               {isRunning
-                ? <Loader2 size={10} className="animate-spin flex-shrink-0" style={{ color: statusColor }} />
-                : <Zap size={10} className="flex-shrink-0" style={{ color: statusColor }} />}
+                ? <Loader2 size={10} className="animate-spin flex-shrink-0 text-[var(--accent-purple)]" />
+                : <Zap size={10} className="flex-shrink-0 text-[var(--accent-purple)]" />}
               <span className="text-highlight font-medium">{op.spec.name}</span>
               <span className="text-muted">· {op.agent_short_name}</span>
               {!isRunning && (
