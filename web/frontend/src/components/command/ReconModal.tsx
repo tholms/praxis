@@ -102,7 +102,9 @@ export function ReconModal({ nodeId, agentShortName, onClose }: ReconModalProps)
           window.removeEventListener('ws-message', handleWsMessage);
         } else if (!reconTriggered) {
           reconTriggered = true;
-          sendCommand(nodeId, { Agent: 'Recon' }).catch(() => {});
+          sendCommand(nodeId, { Agent: { Select: { short_name: agentShortName } } })
+            .then(() => sendCommand(nodeId, { Agent: 'Recon' }))
+            .catch(() => {});
           pollInterval = setInterval(() => {
             if (!cancelled) requestRecon();
           }, 1000);
