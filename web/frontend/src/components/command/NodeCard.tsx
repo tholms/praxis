@@ -20,6 +20,7 @@ import {
   FolderOpen,
   X,
   MessageSquare,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { StatusBadge, getNodeStatus } from '../common/StatusBadge';
@@ -220,10 +221,12 @@ export function NodeCard({ node }: NodeCardProps) {
     disableIntercept,
     requestChainDefList,
     removeNode,
+    resetNode,
     send,
   } = useApp();
 
   const [agentsExpanded, setAgentsExpanded] = useState(node.discovered_agents.length <= 3);
+  const [collapsed, setCollapsed] = useState(false);
   const [creatingSessionFor, setCreatingSessionFor] = useState<string | null>(null);
   const [closingSessionFor, setClosingSessionFor] = useState<string | null>(null);
 
@@ -436,13 +439,51 @@ export function NodeCard({ node }: NodeCardProps) {
         // Card header — machine name, OS, status, delete.
         //
         */}
-        <div className="px-3 py-2 border-b border-subtle bg-[var(--bg-tertiary)] flex items-center justify-between group/header">
+        <div
+          className={`px-3 py-2 ${!collapsed ? 'border-b border-subtle' : ''} bg-[var(--bg-tertiary)] flex items-center justify-between group/header cursor-pointer`}
+          onClick={() => setCollapsed(!collapsed)}
+        >
           <div className="flex items-center gap-2 min-w-0">
+            {collapsed
+              ? <ChevronRight size={12} className="text-muted flex-shrink-0" />
+              : <ChevronDown size={12} className="text-muted flex-shrink-0" />}
             <Server size={14} className="text-muted flex-shrink-0" />
             <span className="font-medium text-highlight text-xs truncate">{node.machine_name || 'Unknown'}</span>
+            {collapsed && hasActiveWork && (() => {
+              const chain = activeChains[0];
+              const op = activeOps[0];
+              if (chain) return (
+                <span className="inline-flex items-center gap-1 text-[9px] text-[var(--accent-info)] min-w-0">
+                  <Loader2 size={9} className="animate-spin flex-shrink-0" />
+                  <GitBranch size={8} className="flex-shrink-0" />
+                  <span className="truncate">{chain.chain_name}</span>
+                </span>
+              );
+              if (op) return (
+                <span className="inline-flex items-center gap-1 text-[9px] text-[var(--accent-purple)] min-w-0">
+                  <Loader2 size={9} className="animate-spin flex-shrink-0" />
+                  <Zap size={8} className="flex-shrink-0" />
+                  <span className="truncate">{op.spec.name}</span>
+                </span>
+              );
+              return (
+                <span className="inline-flex items-center gap-1 text-[9px] text-[var(--accent-purple)] min-w-0">
+                  <Loader2 size={9} className="animate-spin flex-shrink-0" />
+                  <MessageSquare size={8} className="flex-shrink-0" />
+                  <span className="truncate">{node.selected_agent?.active_prompt_text?.slice(0, 30) || 'Prompt'}</span>
+                </span>
+              );
+            })()}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
             <StatusBadge status={status} />
+            <button
+              onClick={() => resetNode(node.node_id)}
+              className="p-0.5 text-muted/30 hover:text-[var(--accent-warning)] transition-colors opacity-0 group-hover/header:opacity-100"
+              title="Reset node"
+            >
+              <RotateCcw size={11} />
+            </button>
             <button
               onClick={() => removeNode(node.node_id)}
               className="p-0.5 text-muted/30 hover:text-[var(--accent-error)] transition-colors opacity-0 group-hover/header:opacity-100"
@@ -453,6 +494,7 @@ export function NodeCard({ node }: NodeCardProps) {
           </div>
         </div>
 
+        {!collapsed && (<>
         {/*
         //
         // Node info row.
@@ -647,6 +689,7 @@ export function NodeCard({ node }: NodeCardProps) {
             <TerminalIcon size={10} /> Term
           </button>
         </div>
+        </>)}
 
       </div>
 
