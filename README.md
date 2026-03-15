@@ -12,40 +12,7 @@ Built by [Origin](https://originhq.com) for security research and red team opera
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| **Agent Discovery** | Fingerprint and detect computer-use agents on endpoints |
-| **Reconnaissance** | Enumerate tools (MCP servers, skills), configurations, and session histories |
-| **Config Visibility** | View and edit agent configuration files directly |
-| **Traffic Interception** | MITM proxy for agent-to-LLM traffic |
-| **Agent Dialog** | Create interactive sessions with agents |
-| **Semantic Operations** | Define and chain natural language tasks for multi-step automation |
-| **Chain Automation** | Trigger chains automatically on schedules, intercept matches, or new node events |
-| **Toolkit** | Library of built-in offensive operations with chain integration |
-| **Terminal Access** | PTY terminal on remote nodes |
-| **Orchestrator** *(experimental)* | High-level assistant for coordinating tasks across agents |
-
-### Supported Agents
-
-- Claude Code CLI
-- Codex CLI (OpenAI)
-- Cursor Agent CLI
-- Gemini CLI
-- Microsoft 365 Copilot (Windows)
-
-Connectors are implemented as Lua agent scripts and can be updated through the web UI.
-
-## Early Release Notice
-
-This is an early release to showcase initial capabilities. It is **not yet ready** for full-scale red teaming or production use - although you can certainly experiment to your hearts content!
-
-The platform is under active development and:
-
-- Some features are incomplete or experimental
-- The codebase is evolving rapidly
-- **This is not designed to be stealthy** it installs root certificates, modifies system settings, and is generally quite noisy
-
-We're releasing early to get feedback and contributions from the community.
+**Discover** and fingerprint agents on endpoints. **Recon** their tools, configs, and session histories. **Intercept** agent-to-LLM traffic with a built-in MITM proxy. Open **interactive sessions** to dialog with agents, or define **semantic operations** that chain natural language tasks with automatic triggers. Includes a **toolkit** of built-in offensive operations, **terminal access** to remote nodes, and an experimental **orchestrator** for coordinating across agents.
 
 ## Quick Start
 
@@ -63,20 +30,6 @@ The CLI binary is built into the Docker image. Extract it with:
 docker cp praxis-praxis-1:/app/praxis_cli ./praxis_cli
 ```
 
-### Manual Docker
-
-```bash
-git clone https://github.com/originsec/praxis.git
-cd praxis
-docker compose up --build
-```
-
-To run without the web UI (headless — service + RabbitMQ only):
-
-```bash
-PRAXIS_HEADLESS=1 docker compose up --build
-```
-
 ### Native Install
 
 ```bash
@@ -86,7 +39,13 @@ curl -fsSL https://praxis.originhq.com/install.sh | bash
 
 This installs Rust if needed, builds from source, and sets up binaries in `~/.praxis/bin/` including `praxis_cli`.
 
-> For detailed installation instructions (cross-compilation, Windows, deployment patterns), see the [full documentation](https://originsec.github.io/praxis/).
+### Windows
+
+```powershell
+irm https://praxis.originhq.com/install.ps1 | iex
+```
+
+> For detailed installation instructions (cross-compilation, deployment patterns), see the [full documentation](https://originsec.github.io/praxis/).
 
 ### Deploy Nodes
 
@@ -104,9 +63,17 @@ Once the service is running, deploy nodes to target systems:
 PRAXIS_RABBITMQ_URL=amqp://user:pass@your-server:5672 ./praxis_node
 ```
 
+```powershell
+# Windows (localhost RabbitMQ URL for testing)
+.\praxis_node.exe
+
+# Or with custom RabbitMQ URL
+$env:PRAXIS_RABBITMQ_URL="amqp://user:pass@your-server:5672"; .\praxis_node.exe
+```
+
 Node binaries are also available from [GitHub Releases](https://github.com/originsec/praxis/releases).
 
-## Configuration
+## Initial Configuration
 
 After starting Praxis, configure at least one LLM provider in **Settings** → **LLM Providers**:
 
@@ -115,6 +82,7 @@ After starting Praxis, configure at least one LLM provider in **Settings** → *
    - **Semantic Operations** - for executing operations
    - **Semantic Parser** - for tool discovery during recon
    - **Traffic Parser** - for summarizing intercepted traffic
+   - **Orchestrator** - for the high-level task coordination assistant
 
 We recommend low-latency providers (for example **Groq** or **Cerebras**) for parser-heavy workflows.
 
@@ -157,6 +125,18 @@ Full documentation is available at **[originsec.github.io/praxis](https://origin
 - [CLI](https://originsec.github.io/praxis/usage/cli.html) - Interactive REPL, one-shot mode, MCP integration
 - [Interception](https://originsec.github.io/praxis/usage/interception.html) - Traffic capture setup and options
 - [Architecture](https://originsec.github.io/praxis/architecture/overview.html) - How it all fits together
+
+## Early Release Notice
+
+This is an early release to showcase initial capabilities. It is **not yet ready** for full-scale red teaming or production use - although you can certainly experiment to your hearts content!
+
+The platform is under active development and:
+
+- Some features are incomplete or experimental
+- The codebase is evolving rapidly
+- **This is not designed to be stealthy** it installs root certificates, modifies system settings, and is generally quite noisy
+
+We're releasing early to get feedback and contributions from the community.
 
 ## License
 
