@@ -441,7 +441,7 @@ function PaletteItem({ type, icon, label, disabled, onClick }: PaletteItemProps)
 
 interface ChainBuilderInnerProps {
   chain?: ChainDefinitionFull | null;
-  onSave: (definition: ChainDefinitionInput) => void;
+  onSave: (definition: ChainDefinitionInput, onResult?: (result: 'saved' | 'error') => void) => void;
   onDuplicate?: (definition: ChainDefinitionInput) => void;
   onExport?: (definition: ChainDefinitionInput) => void;
   onCancel: () => void;
@@ -1495,31 +1495,41 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
   //
   // Brief "Saved" flash when save succeeds.
   //
-  const [saveFlash, setSaveFlash] = useState<'saved' | 'error' | null>(null);
-
-  useEffect(() => {
-    if (saveStatus) {
-      setSaveFlash('saved');
-      const timer = window.setTimeout(() => setSaveFlash(null), 2000);
-      return () => window.clearTimeout(timer);
-    }
-  }, [saveStatus]);
-
-  useEffect(() => {
-    if (saveError) {
-      setSaveFlash('error');
-      const timer = window.setTimeout(() => setSaveFlash(null), 3000);
-      return () => window.clearTimeout(timer);
-    }
-  }, [saveError]);
+  const [saveFlash, setSaveFlash] = useState<'saving' | 'saved' | 'error' | null>(null);
+  const saveFlashTimer = useRef<number | null>(null);
 
   const canSave = name.trim().length > 0;
+  const [saveValidationError, setSaveValidationError] = useState<string | null>(null);
 
   const handleSave = () => {
-    if (!canSave) return;
+    if (!canSave || saveFlash === 'saving') return;
+    setSaveValidationError(null);
+
+    if (!hasTrigger || !hasTermination) {
+      const missing = [!hasTrigger && 'Trigger', !hasTermination && 'End Terminator'].filter(Boolean).join(' and ');
+      setSaveValidationError(`Chain requires a ${missing}`);
+      window.setTimeout(() => setSaveValidationError(null), 3000);
+      return;
+    }
+
+    setSaveFlash('saving');
+    if (saveFlashTimer.current) window.clearTimeout(saveFlashTimer.current);
     const definition = flowToChain(nodes, edges, name.trim(), description, category, timeout, extraData);
-    onSave(definition);
+    onSave(definition, (result) => {
+      setSaveFlash(result);
+      saveFlashTimer.current = window.setTimeout(() => setSaveFlash(null), result === 'error' ? 3000 : 2000);
+    });
   };
+
+  useEffect(() => {
+    if (saveFlash !== 'saving') return;
+    if (!saveStatus && !saveError) return;
+
+    const result: 'saved' | 'error' = saveError ? 'error' : 'saved';
+    setSaveFlash(result);
+    if (saveFlashTimer.current) window.clearTimeout(saveFlashTimer.current);
+    saveFlashTimer.current = window.setTimeout(() => setSaveFlash(null), result === 'error' ? 3000 : 2000);
+  }, [saveFlash, saveStatus, saveError]);
 
   //
   // Map React Flow node types back to ChainElement element_type for dagre.
@@ -1892,18 +1902,20 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
           )}
           <button
             onClick={handleSave}
-            disabled={!canSave}
+            disabled={!canSave || saveFlash === 'saving'}
             className={`inline-flex items-center gap-1.5 px-3 py-1 text-[10px] tracking-wider border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
               saveFlash === 'saved'
                 ? 'border-[var(--accent-success)] bg-[var(--accent-success)]/20 text-[var(--accent-success)]'
                 : saveFlash === 'error'
                 ? 'border-[var(--accent-error)] bg-[var(--accent-error)]/20 text-[var(--accent-error)]'
+                : saveFlash === 'saving'
+                ? 'border-[var(--accent-warning)] bg-[var(--accent-warning)]/20 text-[var(--accent-warning)]'
                 : 'border-dim bg-[var(--accent-info)]/20 text-[var(--accent-info)] hover:border-[var(--accent-info)] hover:bg-[var(--accent-info)]/30'
             }`}
             title={!canSave ? 'Chain name is required' : undefined}
           >
             {saveFlash === 'saved' ? <Check size={11} /> : saveFlash === 'error' ? <AlertTriangle size={11} /> : <Save size={11} />}
-            {saveFlash === 'saved' ? 'Saved' : saveFlash === 'error' ? 'Error' : 'Save'}
+            {saveFlash === 'saved' ? 'Saved' : saveFlash === 'error' ? 'Error' : saveFlash === 'saving' ? 'Saving...' : 'Save'}
           </button>
         </div>
       </div>
@@ -1913,7 +1925,12 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
       // Flow Canvas.
       //
       */}
-      <div className="flex-1 min-h-0" ref={reactFlowWrapper}>
+      <div className="flex-1 min-h-0 relative" ref={reactFlowWrapper}>
+        {saveValidationError && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 text-[10px] bg-[var(--accent-error)]/20 border border-[var(--accent-error)] text-[var(--accent-error)]">
+            {saveValidationError}
+          </div>
+        )}
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -2623,7 +2640,7 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
 
 interface ChainBuilderProps {
   chain?: ChainDefinitionFull | null;
-  onSave: (definition: ChainDefinitionInput) => void;
+  onSave: (definition: ChainDefinitionInput, onResult?: (result: 'saved' | 'error') => void) => void;
   onDuplicate?: (definition: ChainDefinitionInput) => void;
   onExport?: (definition: ChainDefinitionInput) => void;
   onCancel: () => void;
