@@ -2063,6 +2063,8 @@ pub enum ClientBroadcastMessage {
         tool_name: String,
         input: serde_json::Value,
         description: String,
+        #[serde(default)]
+        auto_approved: bool,
     },
     SdkNodeConnected {
         node_id: String,

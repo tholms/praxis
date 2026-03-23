@@ -44,7 +44,7 @@ pub enum SdkCommand {
 pub async fn execute(client: &mut CliClient, command: SdkCommand, _output: &OutputFormat) -> Result<()> {
     match command {
         SdkCommand::Prompt { node_id, text } => {
-            let result = client.send_sdk_prompt(&node_id, &text).await?;
+            let result = client.send_sdk_prompt_interactive(&node_id, &text).await?;
             if result.is_error {
                 eprintln!("Error: {}", result.result);
             } else {

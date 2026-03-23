@@ -44,6 +44,7 @@ impl SdkSession {
             session_id: String::new(),
             auto_approve: false,
             transaction_id: None,
+            pending_tool_inputs: HashMap::new(),
         };
 
         session.auto_approve = session.config.auto_approve;
@@ -98,6 +99,7 @@ struct SessionInner {
     session_id: String,
     auto_approve: bool,
     transaction_id: Option<String>,
+    pending_tool_inputs: HashMap<String, serde_json::Value>,
 }
 
 impl SessionInner {
@@ -298,6 +300,26 @@ impl SessionInner {
         let input = cr.request.get("input").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
         let description = cr.request.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
+        //
+        // Always broadcast the tool request so operators see what's happening.
+        // When auto_approve is on, the request is approved immediately and the
+        // broadcast is purely informational.
+        //
+
+        let _ = publish_json_exchange(
+            &self.broadcast_channel,
+            CLIENT_BROADCAST_EXCHANGE,
+            &ClientBroadcastMessage::SdkToolPermissionRequest {
+                node_id: self.node_id.clone(),
+                request_id: cr.request_id.clone(),
+                tool_name: tool_name.clone(),
+                input: input.clone(),
+                description,
+                auto_approved: self.auto_approve,
+            },
+        )
+        .await;
+
         if self.auto_approve {
             common::log_debug!("[sdk:{}] auto-approving tool: {}", self.short_id(), tool_name);
             let resp = sdk_protocol::make_control_response_allow(&cr.request_id, &input);
@@ -307,23 +329,7 @@ impl SessionInner {
                 "[sdk:{}] tool permission request: {} (request_id={})",
                 self.short_id(), tool_name, cr.request_id
             );
-
-            //
-            // Park the request and surface to operator.
-            //
-
-            let _ = publish_json_exchange(
-                &self.broadcast_channel,
-                CLIENT_BROADCAST_EXCHANGE,
-                &ClientBroadcastMessage::SdkToolPermissionRequest {
-                    node_id: self.node_id.clone(),
-                    request_id: cr.request_id.clone(),
-                    tool_name,
-                    input,
-                    description,
-                },
-            )
-            .await;
+            self.pending_tool_inputs.insert(cr.request_id.clone(), input);
         }
         Ok(())
     }
@@ -344,16 +350,12 @@ impl SessionInner {
                     "[sdk:{}] tool response: allow={} (request_id={})",
                     self.short_id(), allow, request_id
                 );
-                //
-                // For interactive approval, we need the original tool_input to echo
-                // back. For MVP, send empty object -- this works for most tools.
-                //
+
+                let stored_input = self.pending_tool_inputs.remove(&request_id)
+                    .unwrap_or(serde_json::json!({}));
 
                 let resp = if allow {
-                    sdk_protocol::make_control_response_allow(
-                        &request_id,
-                        &serde_json::json!({}),
-                    )
+                    sdk_protocol::make_control_response_allow(&request_id, &stored_input)
                 } else {
                     sdk_protocol::make_control_response_deny(&request_id, "Operator denied")
                 };

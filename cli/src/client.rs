@@ -37,6 +37,7 @@ struct ClientState {
     pending_config_response: Option<std::collections::HashMap<String, String>>,
     pending_config_saved: bool,
     pending_sdk_result: Option<SdkResultData>,
+    pending_sdk_tool_requests: Vec<SdkToolPermissionData>,
     pending_recon_get: Option<ReconGetResult>,
     cached_project_paths: Vec<String>,
     cached_config_paths: Vec<String>,
@@ -56,6 +57,15 @@ pub struct SdkResultData {
     pub duration_ms: u64,
     pub num_turns: u32,
     pub stop_reason: String,
+}
+
+pub struct SdkToolPermissionData {
+    pub node_id: String,
+    pub request_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub description: String,
+    pub auto_approved: bool,
 }
 
 struct ReconGetResult {
@@ -357,6 +367,18 @@ impl CliClient {
                     duration_ms,
                     num_turns,
                     stop_reason,
+                });
+            }
+            ClientBroadcastMessage::SdkToolPermissionRequest {
+                node_id, request_id, tool_name, input, description, auto_approved,
+            } => {
+                state.pending_sdk_tool_requests.push(SdkToolPermissionData {
+                    node_id,
+                    request_id,
+                    tool_name,
+                    input,
+                    description,
+                    auto_approved,
                 });
             }
             _ => {}
@@ -854,9 +876,29 @@ impl CliClient {
     }
 
     pub async fn send_sdk_prompt(&self, node_id: &str, text: &str) -> Result<SdkResultData> {
+        self.send_sdk_prompt_inner(node_id, text, false).await
+    }
+
+    //
+    // Interactive variant: surfaces tool permission requests on stdout and
+    // prompts for approval on stdin. Auto-approved requests are printed
+    // informationally without blocking.
+    //
+
+    pub async fn send_sdk_prompt_interactive(&self, node_id: &str, text: &str) -> Result<SdkResultData> {
+        self.send_sdk_prompt_inner(node_id, text, true).await
+    }
+
+    async fn send_sdk_prompt_inner(
+        &self,
+        node_id: &str,
+        text: &str,
+        interactive: bool,
+    ) -> Result<SdkResultData> {
         {
             let mut state = self.state.lock().await;
             state.pending_sdk_result = None;
+            state.pending_sdk_tool_requests.clear();
         }
 
         let message = ClientSignalMessage::SdkPrompt {
@@ -868,7 +910,8 @@ impl CliClient {
         self.publish_signal(message).await?;
 
         //
-        // Wait for the SdkResult broadcast.
+        // Wait for the SdkResult broadcast. While waiting, drain any tool
+        // permission requests that arrive and handle them inline.
         //
 
         let poll_interval = Duration::from_millis(200);
@@ -876,13 +919,123 @@ impl CliClient {
 
         for _ in 0..max_polls {
             tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-            if let Some(result) = state.pending_sdk_result.take() {
+
+            let pending_tools;
+            let maybe_result;
+            {
+                let mut state = self.state.lock().await;
+                pending_tools = std::mem::take(&mut state.pending_sdk_tool_requests);
+                maybe_result = state.pending_sdk_result.take();
+            }
+
+            //
+            // Handle tool permission requests outside the lock.
+            //
+
+            for req in pending_tools {
+                if interactive {
+                    self.handle_tool_permission_interactive(node_id, &req).await?;
+                }
+            }
+
+            if let Some(result) = maybe_result {
                 return Ok(result);
             }
         }
 
         Err(anyhow!("Timeout waiting for SDK prompt result"))
+    }
+
+    async fn handle_tool_permission_interactive(
+        &self,
+        node_id: &str,
+        req: &SdkToolPermissionData,
+    ) -> Result<()> {
+        let input_summary = Self::format_tool_input(&req.tool_name, &req.input);
+
+        if req.auto_approved {
+            eprintln!(
+                "  [auto-approved] {} {}",
+                req.tool_name, input_summary
+            );
+            return Ok(());
+        }
+
+        //
+        // Manual approval: show details and prompt on stdin.
+        //
+
+        eprintln!();
+        eprintln!("  Tool: {}", req.tool_name);
+        if !req.description.is_empty() {
+            eprintln!("  Desc: {}", req.description);
+        }
+        eprintln!("  Input: {}", input_summary);
+        eprint!("  Allow? [Y/n] ");
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+
+        let allow = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).ok();
+            let trimmed = line.trim().to_lowercase();
+            trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+        })
+        .await
+        .unwrap_or(true);
+
+        self.send_sdk_tool_response(node_id, &req.request_id, allow).await?;
+
+        if allow {
+            eprintln!("  -> Approved");
+        } else {
+            eprintln!("  -> Denied");
+        }
+
+        Ok(())
+    }
+
+    fn format_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
+        match tool_name {
+            "Bash" => {
+                input.get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| format!("`{}`", s))
+                    .unwrap_or_default()
+            }
+            "Read" => {
+                input.get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            }
+            "Write" | "Edit" => {
+                input.get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            }
+            "Glob" => {
+                input.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            }
+            "Grep" => {
+                input.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .map(|s| format!("`{}`", s))
+                    .unwrap_or_default()
+            }
+            _ => {
+                let s = serde_json::to_string(input).unwrap_or_default();
+                if s.len() > 120 {
+                    format!("{}...", &s[..120])
+                } else {
+                    s
+                }
+            }
+        }
     }
 
     pub async fn send_sdk_tool_response(
