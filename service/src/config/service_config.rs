@@ -31,6 +31,26 @@ pub const MCP_SERVER_PORT: &str = "mcp_server_port";
 /// Default MCP server port
 pub const MCP_SERVER_DEFAULT_PORT: u16 = 8585;
 
+//
+// SDK server configuration keys.
+//
+
+pub const SDK_SERVER_ENABLED: &str = "sdk_server_enabled";
+pub const SDK_SERVER_PORT: &str = "sdk_server_port";
+pub const SDK_SERVER_BIND: &str = "sdk_server_bind";
+pub const SDK_SERVER_TLS_CERT: &str = "sdk_server_tls_cert";
+pub const SDK_SERVER_TLS_KEY: &str = "sdk_server_tls_key";
+pub const SDK_SERVER_AUTH_TOKEN: &str = "sdk_server_auth_token";
+pub const SDK_SERVER_SYSTEM_PROMPT: &str = "sdk_server_system_prompt";
+pub const SDK_SERVER_PERMISSION_MODE: &str = "sdk_server_permission_mode";
+pub const SDK_SERVER_MAX_TURNS: &str = "sdk_server_max_turns";
+pub const SDK_SERVER_AUTO_APPROVE: &str = "sdk_server_auto_approve";
+
+pub const SDK_SERVER_DEFAULT_PORT: u16 = 8586;
+pub const SDK_SERVER_DEFAULT_BIND: &str = "0.0.0.0";
+pub const SDK_SERVER_DEFAULT_PERMISSION_MODE: &str = "default";
+pub const SDK_SERVER_DEFAULT_MAX_TURNS: u32 = 50;
+
 /// A model definition stored in config
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -151,4 +171,51 @@ impl ServiceConfig {
             .unwrap_or(MCP_SERVER_DEFAULT_PORT)
     }
 
+    pub fn is_sdk_server_enabled(&self) -> bool {
+        self.get_bool(SDK_SERVER_ENABLED, false)
+    }
+
+    pub fn get_sdk_server_port(&self) -> u16 {
+        self.get(SDK_SERVER_PORT)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SDK_SERVER_DEFAULT_PORT)
+    }
+
+    pub fn get_sdk_server_bind(&self) -> String {
+        self.get(SDK_SERVER_BIND)
+            .cloned()
+            .unwrap_or_else(|| SDK_SERVER_DEFAULT_BIND.to_string())
+    }
+
+    pub fn get_sdk_server_tls_cert(&self) -> String {
+        self.get(SDK_SERVER_TLS_CERT).cloned().unwrap_or_default()
+    }
+
+    pub fn get_sdk_server_tls_key(&self) -> String {
+        self.get(SDK_SERVER_TLS_KEY).cloned().unwrap_or_default()
+    }
+
+    pub fn get_sdk_server_auth_token(&self) -> String {
+        self.get(SDK_SERVER_AUTH_TOKEN).cloned().unwrap_or_default()
+    }
+
+    pub fn get_sdk_server_system_prompt(&self) -> String {
+        self.get(SDK_SERVER_SYSTEM_PROMPT).cloned().unwrap_or_default()
+    }
+
+    pub fn get_sdk_server_permission_mode(&self) -> String {
+        self.get(SDK_SERVER_PERMISSION_MODE)
+            .cloned()
+            .unwrap_or_else(|| SDK_SERVER_DEFAULT_PERMISSION_MODE.to_string())
+    }
+
+    pub fn get_sdk_server_max_turns(&self) -> u32 {
+        self.get(SDK_SERVER_MAX_TURNS)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SDK_SERVER_DEFAULT_MAX_TURNS)
+    }
+
+    pub fn is_sdk_server_auto_approve(&self) -> bool {
+        self.get_bool(SDK_SERVER_AUTO_APPROVE, true)
+    }
 }
