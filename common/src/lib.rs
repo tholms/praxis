@@ -3,6 +3,7 @@ pub mod ai;
 pub mod config;
 pub mod logging;
 pub mod mcp;
+pub mod sdk_protocol;
 
 pub use messaging::*;
 pub use logging::{init as init_logging, send_event, is_initialized as is_logging_initialized};
