@@ -1991,6 +1991,36 @@ pub enum ClientSignalMessage {
         client_id: String,
         session_id: Option<String>,
     },
+
+    //
+    // SDK-URL server: operator -> service.
+    //
+
+    SdkPrompt {
+        client_id: String,
+        node_id: String,
+        text: String,
+        transaction_id: TransactionId,
+    },
+    SdkToolResponse {
+        client_id: String,
+        node_id: String,
+        request_id: String,
+        allow: bool,
+    },
+    SdkSetAutoApprove {
+        client_id: String,
+        node_id: String,
+        auto_approve: bool,
+    },
+    SdkInterrupt {
+        client_id: String,
+        node_id: String,
+    },
+    SdkDisconnect {
+        client_id: String,
+        node_id: String,
+    },
 }
 
 /// Messages broadcast from server to all clients via CLIENT_BROADCAST_EXCHANGE
@@ -2008,6 +2038,39 @@ pub enum ClientBroadcastMessage {
     InterceptStatusUpdate(InterceptStatus),
     /// Enable/disable centralized event logging for clients
     EventLoggingSet { enabled: bool },
+
+    //
+    // SDK-URL server events: service -> all clients.
+    //
+
+    SdkAssistantMessage {
+        node_id: String,
+        content: serde_json::Value,
+        session_id: String,
+    },
+    SdkResult {
+        node_id: String,
+        transaction_id: TransactionId,
+        result: String,
+        is_error: bool,
+        duration_ms: u64,
+        num_turns: u32,
+        stop_reason: String,
+    },
+    SdkToolPermissionRequest {
+        node_id: String,
+        request_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+        description: String,
+    },
+    SdkNodeConnected {
+        node_id: String,
+        info: SdkNodeState,
+    },
+    SdkNodeDisconnected {
+        node_id: String,
+    },
 }
 
 /// Messages sent to a specific client queue
@@ -2691,9 +2754,29 @@ pub struct NodeState {
     pub privileged: bool,
 }
 
+
+//
+// State of an SDK-remote node (Claude Code connected via --sdk-url).
+//
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SdkNodeState {
+    pub node_id: String,
+    pub cwd: String,
+    pub model: String,
+    pub tools: Vec<String>,
+    pub claude_code_version: String,
+    pub permission_mode: String,
+    pub connected_at: chrono::DateTime<chrono::Utc>,
+    pub auto_approve: bool,
+    pub peer_address: String,
+}
+
 /// Complete system state broadcast to clients
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SystemState {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub nodes: Vec<NodeState>,
+    #[serde(default)]
+    pub sdk_nodes: Vec<SdkNodeState>,
 }
