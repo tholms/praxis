@@ -200,70 +200,37 @@ impl SessionInner {
     //
     // Main loop: multiplex WebSocket inbound and operator commands.
     //
-    // The borrow checker prevents borrowing both self.socket and self.cmd_rx
-    // mutably at the same time inside select!. We take cmd_rx out of self once
-    // before the loop and work with it locally for the duration of the loop.
-    //
 
     async fn main_loop(&mut self) -> anyhow::Result<()> {
-        use std::mem;
-
-        let (dummy_tx, mut dummy_rx) = mpsc::channel::<SdkCommand>(1);
-        let _ = dummy_tx;
-        let mut cmd_rx = mem::replace(&mut self.cmd_rx, dummy_rx);
-
-        enum Selected {
-            Ws(anyhow::Result<Option<Vec<SdkInboundMessage>>>),
-            Cmd(Option<SdkCommand>),
-        }
-
         loop {
-            let result = {
-                let recv_raw_fut = async {
-                    // Inline recv_raw logic to avoid &mut self borrow conflict.
-                    loop {
-                        match self.socket.next().await {
-                            Some(Ok(Message::Text(text))) => {
-                                let msgs = sdk_protocol::decode_frame(&text);
-                                if !msgs.is_empty() {
-                                    return Ok::<_, anyhow::Error>(Some(msgs));
-                                }
-                            }
-                            Some(Ok(Message::Binary(data))) => {
-                                if let Ok(text) = String::from_utf8(data.to_vec()) {
-                                    let msgs = sdk_protocol::decode_frame(&text);
-                                    if !msgs.is_empty() {
-                                        return Ok(Some(msgs));
-                                    }
-                                }
-                            }
-                            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                            Some(Ok(Message::Close(_))) | None => {
-                                return Ok(None);
-                            }
-                            Some(Err(e)) => {
-                                return Err(anyhow::anyhow!("WebSocket error: {}", e));
+            tokio::select! {
+                ws_msg = self.socket.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            let msgs = sdk_protocol::decode_frame(&text);
+                            for msg in msgs {
+                                self.handle_inbound(msg).await?;
                             }
                         }
-                    }
-                };
-
-                tokio::select! {
-                    ws = recv_raw_fut => Selected::Ws(ws),
-                    cmd = cmd_rx.recv() => Selected::Cmd(cmd),
-                }
-            };
-
-            match result {
-                Selected::Ws(Ok(Some(msgs))) => {
-                    for msg in msgs {
-                        self.handle_inbound(msg).await?;
+                        Some(Ok(Message::Binary(data))) => {
+                            if let Ok(text) = String::from_utf8(data.to_vec()) {
+                                let msgs = sdk_protocol::decode_frame(&text);
+                                for msg in msgs {
+                                    self.handle_inbound(msg).await?;
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
                     }
                 }
-                Selected::Ws(Ok(None)) => break,
-                Selected::Ws(Err(_)) => break,
-                Selected::Cmd(Some(cmd)) => self.handle_command(cmd).await?,
-                Selected::Cmd(None) => break,
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => self.handle_command(cmd).await?,
+                        None => break,
+                    }
+                }
             }
         }
         Ok(())
