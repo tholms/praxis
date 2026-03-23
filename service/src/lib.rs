@@ -583,6 +583,29 @@ async fn run_main_loop() -> Result<()> {
     }
 
     //
+    // Initialize and optionally start the SDK server.
+    //
+
+    let sdk_manager = Arc::new(sdk_server::SdkServerManager::new());
+    {
+        let config = service_config.read().await;
+        if config.is_sdk_server_enabled() {
+            let sdk_config = sdk_server::SdkServerConfig {
+                port: config.get_sdk_server_port(),
+                bind: config.get_sdk_server_bind(),
+                auth_token: config.get_sdk_server_auth_token(),
+                system_prompt: config.get_sdk_server_system_prompt(),
+                permission_mode: config.get_sdk_server_permission_mode(),
+                max_turns: config.get_sdk_server_max_turns(),
+                auto_approve: config.is_sdk_server_auto_approve(),
+            };
+            if let Err(e) = sdk_manager.start(sdk_config, broadcast_channel.clone()).await {
+                common::log_error!("Failed to start SDK server: {}", e);
+            }
+        }
+    }
+
+    //
     // Initialize and start the trigger engine.
     //
     let trigger_engine = Arc::new(trigger_engine::TriggerEngine::new(
@@ -618,6 +641,7 @@ async fn run_main_loop() -> Result<()> {
         orchestrator_manager,
         toolkit_manager,
         mcp_manager,
+        sdk_manager,
         trigger_engine: Some(trigger_engine.clone()),
         publish_channel,
         client_publish_channel,

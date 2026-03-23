@@ -8,7 +8,12 @@ use common::{
     CLIENT_BROADCAST_EXCHANGE, NODE_BROADCAST_EXCHANGE,
 };
 
-use crate::config::service_config::{APPLICATION_LOGS_ENABLED, MCP_SERVER_ENABLED, MCP_SERVER_PORT};
+use crate::config::service_config::{
+    APPLICATION_LOGS_ENABLED, MCP_SERVER_ENABLED, MCP_SERVER_PORT,
+    SDK_SERVER_ENABLED, SDK_SERVER_PORT, SDK_SERVER_BIND, SDK_SERVER_AUTH_TOKEN,
+    SDK_SERVER_SYSTEM_PROMPT, SDK_SERVER_PERMISSION_MODE, SDK_SERVER_MAX_TURNS,
+    SDK_SERVER_AUTO_APPROVE,
+};
 use crate::conversions::{to_common as convert_chain_element, to_database as convert_msg_chain_element};
 use crate::database::{self, OperationDefinition};
 use crate::messaging::{broadcast_state_to_clients, send_to_client, send_to_node};
@@ -265,15 +270,40 @@ pub async fn handle(ctx: &ServiceContext, message: ClientSignalMessage) -> Resul
             handle_agent_chat_get_state(ctx, client_id, session_id).await,
 
         //
-        // SDK-URL server commands — dispatched in Chunk 6 (Task 11).
+        // SDK-URL server: operator -> service.
         //
 
-        ClientSignalMessage::SdkPrompt { .. }
-        | ClientSignalMessage::SdkToolResponse { .. }
-        | ClientSignalMessage::SdkSetAutoApprove { .. }
-        | ClientSignalMessage::SdkInterrupt { .. }
-        | ClientSignalMessage::SdkDisconnect { .. } => {
-            common::log_warn!("SDK command received but SDK server not yet wired");
+        ClientSignalMessage::SdkPrompt { client_id: _, node_id, text, transaction_id } => {
+            let cmd = crate::sdk_server::SdkCommand::Prompt { text, transaction_id };
+            if let Err(e) = crate::sdk_server::handler::send_to_session(
+                ctx.sdk_manager.sessions(), &node_id, cmd,
+            ).await {
+                common::log_warn!("SDK prompt dispatch failed: {}", e);
+            }
+        }
+        ClientSignalMessage::SdkToolResponse { client_id: _, node_id, request_id, allow } => {
+            let cmd = crate::sdk_server::SdkCommand::ToolResponse { request_id, allow };
+            let _ = crate::sdk_server::handler::send_to_session(
+                ctx.sdk_manager.sessions(), &node_id, cmd,
+            ).await;
+        }
+        ClientSignalMessage::SdkSetAutoApprove { client_id: _, node_id, auto_approve } => {
+            let cmd = crate::sdk_server::SdkCommand::SetAutoApprove { auto_approve };
+            let _ = crate::sdk_server::handler::send_to_session(
+                ctx.sdk_manager.sessions(), &node_id, cmd,
+            ).await;
+        }
+        ClientSignalMessage::SdkInterrupt { client_id: _, node_id } => {
+            let cmd = crate::sdk_server::SdkCommand::Interrupt;
+            let _ = crate::sdk_server::handler::send_to_session(
+                ctx.sdk_manager.sessions(), &node_id, cmd,
+            ).await;
+        }
+        ClientSignalMessage::SdkDisconnect { client_id: _, node_id } => {
+            let cmd = crate::sdk_server::SdkCommand::Disconnect;
+            let _ = crate::sdk_server::handler::send_to_session(
+                ctx.sdk_manager.sessions(), &node_id, cmd,
+            ).await;
         }
     }
 
@@ -706,6 +736,7 @@ async fn handle_config_set(
         let mut save_error = None;
         let mut event_logging_enabled: Option<bool> = None;
         let mut mcp_server_changed = false;
+        let mut sdk_server_changed = false;
         for (key, value) in values {
             if key == APPLICATION_LOGS_ENABLED {
                 let normalized = value.to_lowercase();
@@ -714,6 +745,13 @@ async fn handle_config_set(
             }
             if key == MCP_SERVER_ENABLED || key == MCP_SERVER_PORT {
                 mcp_server_changed = true;
+            }
+            if key == SDK_SERVER_ENABLED || key == SDK_SERVER_PORT || key == SDK_SERVER_BIND
+                || key == SDK_SERVER_AUTH_TOKEN || key == SDK_SERVER_SYSTEM_PROMPT
+                || key == SDK_SERVER_PERMISSION_MODE || key == SDK_SERVER_MAX_TURNS
+                || key == SDK_SERVER_AUTO_APPROVE
+            {
+                sdk_server_changed = true;
             }
             if let Err(e) = config.set(key, value).await {
                 save_error = Some(e);
@@ -756,6 +794,31 @@ async fn handle_config_set(
                 } else {
                     common::log_info!("MCP server config changed, stopping server");
                     ctx.mcp_manager.stop().await;
+                }
+            }
+
+            //
+            // Handle SDK server start/stop if config changed.
+            //
+
+            if sdk_server_changed {
+                if config.is_sdk_server_enabled() {
+                    let sdk_config = crate::sdk_server::SdkServerConfig {
+                        port: config.get_sdk_server_port(),
+                        bind: config.get_sdk_server_bind(),
+                        auth_token: config.get_sdk_server_auth_token(),
+                        system_prompt: config.get_sdk_server_system_prompt(),
+                        permission_mode: config.get_sdk_server_permission_mode(),
+                        max_turns: config.get_sdk_server_max_turns(),
+                        auto_approve: config.is_sdk_server_auto_approve(),
+                    };
+                    common::log_info!("SDK server config changed, restarting");
+                    if let Err(e) = ctx.sdk_manager.start(sdk_config, ctx.broadcast_channel.clone()).await {
+                        common::log_error!("Failed to start SDK server: {}", e);
+                    }
+                } else {
+                    common::log_info!("SDK server config changed, stopping server");
+                    ctx.sdk_manager.stop().await;
                 }
             }
         }
