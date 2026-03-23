@@ -97,6 +97,23 @@ PRAXIS_MCP_PORT=9090 docker compose up --build
 
 Then update the port in **Settings** > **MCP Server** to match. The SSE endpoint is `http://localhost:{port}/sse`.
 
+### SDK Server Settings
+
+Access via **Settings** > **SDK Server** in the web UI.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `sdk_server_enabled` | `false` | Enable the SDK WebSocket server for Claude Code connections |
+| `sdk_server_port` | `8586` | Port to listen on |
+| `sdk_server_bind` | `0.0.0.0` | Bind address (0.0.0.0 for all interfaces, 127.0.0.1 for localhost only) |
+| `sdk_server_auth_token` | (empty) | Optional Bearer token for authentication |
+| `sdk_server_system_prompt` | (empty) | System prompt sent to connected Claude Code instances |
+| `sdk_server_permission_mode` | `default` | Permission mode: `default`, `yolo`, or `restricted` |
+| `sdk_server_max_turns` | `50` | Maximum conversation turns per session |
+| `sdk_server_auto_approve` | `true` | Automatically approve tool requests from Claude Code |
+
+The SDK server allows Claude Code instances to connect directly to Praxis as remote nodes via WebSocket. This enables seamless integration of Claude Code as an agent in your Praxis network.
+
 ### Supported Providers
 
 | Provider ID | Name | API Key Variable |

@@ -452,6 +452,46 @@ The MCP server exposes the following tools:
 **Traffic:**
 - `traffic_search` - Search intercepted traffic
 
+**SDK Remote Nodes:**
+- `sdk_prompt` - Send a prompt to an SDK-remote node
+- `sdk_approve_tool` - Approve or deny a pending tool request
+- `sdk_disconnect` - Disconnect an SDK-remote node
+- `sdk_set_auto_approve` - Set auto-approve mode
+- `sdk_interrupt` - Interrupt an SDK-remote node
+
+## SDK Remote Nodes
+
+SDK-remote nodes are Claude Code instances connected directly to the service via `--sdk-url`. The service acts as a WebSocket server that orchestrates these connections.
+
+### Configuration
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `sdk_server_enabled` | `false` | Enable the SDK WebSocket server |
+| `sdk_server_port` | `8586` | Port to listen on |
+| `sdk_server_bind` | `0.0.0.0` | Bind address |
+| `sdk_server_auth_token` | (empty) | Bearer token for authentication |
+| `sdk_server_system_prompt` | (empty) | System prompt sent to Claude Code |
+| `sdk_server_permission_mode` | `default` | Permission mode for connections |
+| `sdk_server_max_turns` | `50` | Maximum conversation turns |
+| `sdk_server_auto_approve` | `true` | Auto-approve tool requests |
+
+### Connecting Claude Code
+
+```
+claude --sdk-url ws://127.0.0.1:8586/sdk --output-format stream-json --input-format stream-json
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `sdk prompt <node_id> <text>` | Send a prompt to an SDK-remote node |
+| `sdk approve <node_id> <request_id>` | Approve a pending tool request |
+| `sdk deny <node_id> <request_id>` | Deny a pending tool request |
+| `sdk disconnect <node_id>` | Disconnect an SDK-remote node |
+| `sdk set-auto-approve <node_id> <on/off>` | Toggle auto-approve mode |
+
 ## AI Agent Integration
 
 There are two ways to integrate Praxis with AI coding agents:

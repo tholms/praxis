@@ -5,27 +5,22 @@ Praxis has a distributed architecture designed for monitoring and controlling AI
 ## The Big Picture
 
 ```diagram
-                              ┌─────────────────┐
-                              │   Web Browser   │
-                              │  (React SPA)    │
-                              └────────┬────────┘
-                                       │ HTTP/WebSocket
-                              ┌────────▼────────┐
-                              │      Web        │
-                              │ (HTTP Server)   │
-                              └────────┬────────┘
-                                       │ Internal
-                              ┌────────▼────────┐
-                              │    Service      │
-                              │  (Backend)      │
-                              └────────┬────────┘
-                                       │ RabbitMQ (AMQP)
-              ┌────────────────────────┼────────────────────────┐
-              │                        │                        │
-       ┌──────▼──────┐          ┌──────▼──────┐          ┌──────▼──────┐
-       │    Node     │          │    Node     │          │    Node     │
-       │ (Target A)  │          │ (Target B)  │          │ (Target C)  │
-       └─────────────┘          └─────────────┘          └─────────────┘
+    ┌─────────────────┐                ┌─────────────────┐
+    │   Web Browser   │                │   Claude Code   │
+    │  (React SPA)    │                │  (SDK Client)   │
+    └────────┬────────┘                └────────┬────────┘
+             │ HTTP/WebSocket                   │ WebSocket (SDK)
+    ┌────────▼─────────────────────────────────▼────────┐
+    │                    Service                        │
+    │              (Backend + SDK Server)               │
+    └────────┬──────────────────────────────────────────┘
+             │ RabbitMQ (AMQP)
+    ┌────────▼──────────────────────────────────────────┐
+    │               Connected Nodes                     │
+    │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
+    │  │ Node A   │  │ Node B   │  │ Node C   │  ...    │
+    │  └──────────┘  └──────────┘  └──────────┘         │
+    └───────────────────────────────────────────────────┘
 ```
 
 ## Components
@@ -83,6 +78,24 @@ The web component serves the frontend and provides the API.
 - Builds into the binary (embedded assets)
 
 See [Web Architecture](./web.md) for details.
+
+### SDK Server
+
+The service also runs an optional SDK WebSocket server that allows Claude Code instances to connect directly as remote nodes.
+
+**What it does:**
+- Accepts WebSocket connections from Claude Code instances
+- Manages SDK remote node sessions and state
+- Routes tool requests and approvals between Claude Code and the service
+- Applies permission modes and auto-approval policies
+
+**Key characteristics:**
+- Configurable via service settings (disabled by default)
+- Runs on a separate port (8586 by default)
+- Optional Bearer token authentication
+- System prompt injection for connected instances
+
+See [CLI Documentation](../usage/cli.md#sdk-remote-nodes) for usage details.
 
 ## Communication
 
