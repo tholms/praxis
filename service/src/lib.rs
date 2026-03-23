@@ -8,6 +8,7 @@ mod dispatch;
 mod handlers;
 mod hunting;
 mod mcp;
+mod sdk_server;
 mod messaging;
 mod agent_chat;
 mod orchestrator;
