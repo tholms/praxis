@@ -3,5 +3,6 @@ pub mod node;
 pub mod op;
 pub mod orchestrate;
 pub mod recon;
+pub mod sdk;
 pub mod session;
 pub mod traffic;

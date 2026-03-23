@@ -15,6 +15,7 @@ use commands::{
     node::NodeCommand,
     op::OpCommand,
     recon::ReconCommand,
+    sdk::SdkCommand,
     session::SessionCommand,
     traffic::TrafficCommand,
 };
@@ -102,6 +103,12 @@ pub(crate) enum Commands {
 
     /// Interactive LLM orchestrator session
     Orchestrate,
+
+    /// SDK-remote node management
+    Sdk {
+        #[command(subcommand)]
+        command: SdkCommand,
+    },
 }
 
 impl Commands {
@@ -122,6 +129,7 @@ impl Commands {
             }
             Commands::Op { command } => commands::op::execute(client, command, output).await,
             Commands::Orchestrate => commands::orchestrate::execute(client).await,
+            Commands::Sdk { command } => commands::sdk::execute(client, command, output).await,
         }
     }
 }
@@ -140,7 +148,7 @@ fn print_fullhelp() {
     println!();
     println!();
 
-    let subcommands = ["node", "agent", "recon", "session", "traffic", "op", "orchestrate"];
+    let subcommands = ["node", "agent", "recon", "session", "traffic", "op", "orchestrate", "sdk"];
 
     for sub_name in subcommands {
         println!("================================================================================");
