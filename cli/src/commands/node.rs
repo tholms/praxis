@@ -34,9 +34,9 @@ pub async fn execute(client: &mut CliClient, command: NodeCommand, output: &Outp
 async fn list_nodes(client: &CliClient, output: &OutputFormat) -> Result<()> {
     let state = client.get_state().await.ok_or_else(|| anyhow!("No state available"))?;
 
-    if state.nodes.is_empty() {
+    if state.nodes.is_empty() && state.sdk_nodes.is_empty() {
         match output {
-            OutputFormat::Json => print_json(&json!({"nodes": [], "count": 0})),
+            OutputFormat::Json => print_json(&json!({"nodes": [], "sdk_nodes": [], "count": 0})),
             OutputFormat::Text => print_error("No nodes connected"),
         }
         return Ok(());
@@ -60,34 +60,67 @@ async fn list_nodes(client: &CliClient, output: &OutputFormat) -> Result<()> {
                     "last_seen_seconds": age_seconds
                 })
             }).collect();
-            print_json(&json!({"nodes": nodes, "count": nodes.len()}));
+            let sdk: Vec<_> = state.sdk_nodes.iter().map(|n| {
+                json!({
+                    "node_id": n.node_id,
+                    "node_id_short": format_short_id(&n.node_id),
+                    "model": n.model,
+                    "cwd": n.cwd,
+                    "peer_address": n.peer_address,
+                    "permission_mode": n.permission_mode,
+                    "auto_approve": n.auto_approve,
+                    "tools": n.tools,
+                    "type": "sdk"
+                })
+            }).collect();
+            print_json(&json!({"nodes": nodes, "sdk_nodes": sdk, "count": nodes.len() + sdk.len()}));
         }
         OutputFormat::Text => {
-            print_header("Connected Nodes");
-            println!();
-            for node in &state.nodes {
-                let age_seconds = (now - node.last_update).num_seconds();
-                let status = if age_seconds < 60 {
-                    format_status("active")
-                } else if age_seconds < 120 {
-                    format_status("warning")
-                } else {
-                    format_status("inactive")
-                };
+            if !state.nodes.is_empty() {
+                print_header("Connected Nodes");
+                println!();
+                for node in &state.nodes {
+                    let age_seconds = (now - node.last_update).num_seconds();
+                    let status = if age_seconds < 60 {
+                        format_status("active")
+                    } else if age_seconds < 120 {
+                        format_status("warning")
+                    } else {
+                        format_status("inactive")
+                    };
 
-                let priv_tag = if node.privileged { " [privileged]" } else { "" };
-                println!(
-                    "  {} {} ({}) - {} agents [{}]{}",
-                    format_short_id(&node.node_id),
-                    node.machine_name,
-                    node.os_details,
-                    node.discovered_agents.len(),
-                    status,
-                    priv_tag
-                );
+                    let priv_tag = if node.privileged { " [privileged]" } else { "" };
+                    println!(
+                        "  {} {} ({}) - {} agents [{}]{}",
+                        format_short_id(&node.node_id),
+                        node.machine_name,
+                        node.os_details,
+                        node.discovered_agents.len(),
+                        status,
+                        priv_tag
+                    );
+                }
+                println!();
             }
-            println!();
-            print_success(&format!("{} node(s) connected", state.nodes.len()));
+
+            if !state.sdk_nodes.is_empty() {
+                print_header("SDK Nodes");
+                println!();
+                for node in &state.sdk_nodes {
+                    let approve_tag = if node.auto_approve { "auto-approve" } else { "manual" };
+                    println!(
+                        "  {} [sdk] {} ({}) [{}]",
+                        format_short_id(&node.node_id),
+                        node.model,
+                        node.peer_address,
+                        approve_tag,
+                    );
+                }
+                println!();
+            }
+
+            let total = state.nodes.len() + state.sdk_nodes.len();
+            print_success(&format!("{} node(s) connected", total));
         }
     }
 

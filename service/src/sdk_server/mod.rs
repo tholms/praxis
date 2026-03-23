@@ -85,6 +85,14 @@ impl SdkServerManager {
         }
     }
 
+    pub fn with_shared_nodes(sdk_nodes: Arc<RwLock<Vec<SdkNodeState>>>) -> Self {
+        Self {
+            shutdown_tx: RwLock::new(None),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sdk_nodes,
+        }
+    }
+
     pub fn sdk_nodes(&self) -> &Arc<RwLock<Vec<SdkNodeState>>> {
         &self.sdk_nodes
     }
@@ -115,7 +123,7 @@ impl SdkServerManager {
         });
 
         let app = Router::new()
-            .route("/sdk", get(ws_upgrade_handler))
+            .route("/", get(ws_upgrade_handler))
             .with_state(state);
 
         common::log_info!("SDK server starting on {}", addr);

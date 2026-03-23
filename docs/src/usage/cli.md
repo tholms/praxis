@@ -161,6 +161,19 @@ The RabbitMQ URL can also be set via the `PRAXIS_RABBITMQ_URL` environment varia
 
 ## Commands
 
+### Service Configuration
+
+```bash
+# Get a configuration value
+config get sdk_server_enabled
+
+# Set a configuration value
+config set sdk_server_enabled true
+
+# List all configuration values
+config list
+```
+
 ### Node Management
 
 ```bash

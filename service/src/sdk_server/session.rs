@@ -236,9 +236,14 @@ impl SessionInner {
         Ok(())
     }
 
+    fn short_id(&self) -> &str {
+        self.node_id.get(..8).unwrap_or(&self.node_id)
+    }
+
     async fn handle_inbound(&mut self, msg: SdkInboundMessage) -> anyhow::Result<()> {
         match msg {
             SdkInboundMessage::Assistant(assistant) => {
+                common::log_debug!("[sdk:{}] assistant message received", self.short_id());
                 let _ = publish_json_exchange(
                     &self.broadcast_channel,
                     CLIENT_BROADCAST_EXCHANGE,
@@ -251,6 +256,10 @@ impl SessionInner {
                 .await;
             }
             SdkInboundMessage::Result(result) => {
+                common::log_info!(
+                    "[sdk:{}] result received (error={}, turns={}, stop={})",
+                    self.short_id(), result.is_error, result.num_turns, result.stop_reason
+                );
                 let _ = publish_json_exchange(
                     &self.broadcast_channel,
                     CLIENT_BROADCAST_EXCHANGE,
@@ -268,6 +277,7 @@ impl SessionInner {
             }
             SdkInboundMessage::ControlRequest(cr) => {
                 let subtype = cr.request.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+                common::log_debug!("[sdk:{}] control_request subtype={}", self.short_id(), subtype);
                 if subtype == "can_use_tool" {
                     self.handle_tool_request(&cr).await?;
                 }
@@ -276,7 +286,9 @@ impl SessionInner {
                 let ka = sdk_protocol::make_keep_alive();
                 self.send(&ka).await?;
             }
-            _ => {}
+            other => {
+                common::log_debug!("[sdk:{}] unhandled inbound: {:?}", self.short_id(), other);
+            }
         }
         Ok(())
     }
@@ -287,9 +299,15 @@ impl SessionInner {
         let description = cr.request.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         if self.auto_approve {
+            common::log_debug!("[sdk:{}] auto-approving tool: {}", self.short_id(), tool_name);
             let resp = sdk_protocol::make_control_response_allow(&cr.request_id, &input);
             self.send(&resp).await?;
         } else {
+            common::log_info!(
+                "[sdk:{}] tool permission request: {} (request_id={})",
+                self.short_id(), tool_name, cr.request_id
+            );
+
             //
             // Park the request and surface to operator.
             //
@@ -313,11 +331,19 @@ impl SessionInner {
     async fn handle_command(&mut self, cmd: SdkCommand) -> anyhow::Result<()> {
         match cmd {
             SdkCommand::Prompt { text, transaction_id } => {
+                common::log_info!(
+                    "[sdk:{}] sending prompt (tx={}, len={})",
+                    self.short_id(), &transaction_id[..8], text.len()
+                );
                 self.transaction_id = Some(transaction_id);
                 let msg = sdk_protocol::make_user_message(&text, &self.session_id);
                 self.send(&msg).await?;
             }
             SdkCommand::ToolResponse { request_id, allow } => {
+                common::log_info!(
+                    "[sdk:{}] tool response: allow={} (request_id={})",
+                    self.short_id(), allow, request_id
+                );
                 //
                 // For interactive approval, we need the original tool_input to echo
                 // back. For MVP, send empty object -- this works for most tools.
@@ -334,6 +360,7 @@ impl SessionInner {
                 self.send(&resp).await?;
             }
             SdkCommand::SetAutoApprove { auto_approve } => {
+                common::log_info!("[sdk:{}] auto_approve set to {}", self.short_id(), auto_approve);
                 self.auto_approve = auto_approve;
 
                 //
@@ -346,10 +373,12 @@ impl SessionInner {
                 }
             }
             SdkCommand::Interrupt => {
+                common::log_info!("[sdk:{}] sending interrupt", self.short_id());
                 let msg = sdk_protocol::make_interrupt();
                 self.send(&msg).await?;
             }
             SdkCommand::Disconnect => {
+                common::log_info!("[sdk:{}] disconnecting (operator request)", self.short_id());
                 let msg = sdk_protocol::make_end_session("operator_disconnect");
                 self.send(&msg).await?;
                 let _ = self.socket.close().await;

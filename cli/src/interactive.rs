@@ -514,6 +514,10 @@ fn print_help() {
     println!("\n{}\n", "Commands".bold().underline());
 
     let cmds = [
+        ("config get <key>", "Get a configuration value"),
+        ("config set <key> <value>", "Set a configuration value"),
+        ("config list", "List all configuration values"),
+        ("", ""),
         ("node list", "List connected nodes"),
         ("node select <node>", "Select a node"),
         ("node reset <node>", "Reset a node (cancel ops, re-register)"),

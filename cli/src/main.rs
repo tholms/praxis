@@ -12,6 +12,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use commands::{
     agent::AgentCommand,
+    config::ConfigCommand,
     node::NodeCommand,
     op::OpCommand,
     recon::ReconCommand,
@@ -65,6 +66,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    /// Service configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+
     /// Node management commands
     Node {
         #[command(subcommand)]
@@ -118,6 +125,7 @@ impl Commands {
         output: &OutputFormat,
     ) -> Result<()> {
         match self {
+            Commands::Config { command } => commands::config::execute(client, command, output).await,
             Commands::Node { command } => commands::node::execute(client, command, output).await,
             Commands::Agent { command } => commands::agent::execute(client, command, output).await,
             Commands::Recon { command } => commands::recon::execute(client, command, output).await,
@@ -148,7 +156,7 @@ fn print_fullhelp() {
     println!();
     println!();
 
-    let subcommands = ["node", "agent", "recon", "session", "traffic", "op", "orchestrate", "sdk"];
+    let subcommands = ["config", "node", "agent", "recon", "session", "traffic", "op", "orchestrate", "sdk"];
 
     for sub_name in subcommands {
         println!("================================================================================");

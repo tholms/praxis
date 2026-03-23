@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
-use common::{NodeInformationUpdate, NodeRegistration, NodeState, SystemState};
+use common::{NodeInformationUpdate, NodeRegistration, NodeState, SdkNodeState, SystemState};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// A registered node in the system
@@ -24,12 +25,14 @@ pub struct RegisteredNode {
 /// Registry of connected nodes
 pub struct NodeRegistry {
     agents: RwLock<HashMap<String, RegisteredNode>>,
+    sdk_nodes: Arc<RwLock<Vec<SdkNodeState>>>,
 }
 
 impl NodeRegistry {
-    pub fn new() -> Self {
+    pub fn new(sdk_nodes: Arc<RwLock<Vec<SdkNodeState>>>) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
+            sdk_nodes,
         }
     }
 
@@ -132,10 +135,12 @@ impl NodeRegistry {
             }
         }).collect();
 
+        let sdk_nodes = self.sdk_nodes.read().await.clone();
+
         SystemState {
             timestamp: Utc::now(),
             nodes,
-            sdk_nodes: Vec::new(),
+            sdk_nodes,
         }
     }
 }

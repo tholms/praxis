@@ -275,10 +275,12 @@ pub async fn handle(ctx: &ServiceContext, message: ClientSignalMessage) -> Resul
 
         ClientSignalMessage::SdkPrompt { client_id: _, node_id, text, transaction_id } => {
             let cmd = crate::sdk_server::SdkCommand::Prompt { text, transaction_id };
-            if let Err(e) = crate::sdk_server::handler::send_to_session(
+            match crate::sdk_server::handler::send_to_session(
                 ctx.sdk_manager.sessions(), &node_id, cmd,
             ).await {
-                common::log_warn!("SDK prompt dispatch failed: {}", e);
+                Ok(false) => common::log_warn!("SDK prompt: no session found for node_id={}", node_id),
+                Err(e) => common::log_warn!("SDK prompt dispatch failed: {}", e),
+                _ => {}
             }
         }
         ClientSignalMessage::SdkToolResponse { client_id: _, node_id, request_id, allow } => {
@@ -699,17 +701,22 @@ async fn handle_config_get(ctx: &ServiceContext, client_id: String, keys: Vec<St
     );
 
     //
-    // Read from in-memory config.
+    // Read from in-memory config. Empty keys list returns all values.
     //
-    let mut values = std::collections::HashMap::new();
-    {
+    let values = {
         let config = ctx.service_config.read().await;
-        for key in keys {
-            if let Some(value) = config.get(&key) {
-                values.insert(key, value.clone());
+        if keys.is_empty() {
+            config.to_hashmap()
+        } else {
+            let mut values = std::collections::HashMap::new();
+            for key in keys {
+                if let Some(value) = config.get(&key) {
+                    values.insert(key, value.clone());
+                }
             }
+            values
         }
-    }
+    };
 
     let message = ClientDirectMessage::ServiceConfigResponse { values };
     if let Err(e) = send_to_client(&ctx.client_publish_channel, &client_id, message).await {

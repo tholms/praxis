@@ -167,7 +167,8 @@ async fn run_main_loop() -> Result<()> {
     // Initialise service components.
     //
 
-    let node_registry = Arc::new(NodeRegistry::new());
+    let shared_sdk_nodes = Arc::new(tokio::sync::RwLock::new(Vec::<common::SdkNodeState>::new()));
+    let node_registry = Arc::new(NodeRegistry::new(Arc::clone(&shared_sdk_nodes)));
     let client_registry = Arc::new(ClientRegistry::new());
     let pending_commands = Arc::new(PendingCommands::new());
     let node_handler = Arc::new(NodeMessageHandler::new(publish_channel.clone(), broadcast_channel.clone(), node_registry.clone()));
@@ -586,7 +587,7 @@ async fn run_main_loop() -> Result<()> {
     // Initialize and optionally start the SDK server.
     //
 
-    let sdk_manager = Arc::new(sdk_server::SdkServerManager::new());
+    let sdk_manager = Arc::new(sdk_server::SdkServerManager::with_shared_nodes(Arc::clone(&shared_sdk_nodes)));
     {
         let config = service_config.read().await;
         if config.is_sdk_server_enabled() {

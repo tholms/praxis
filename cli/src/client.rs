@@ -34,6 +34,9 @@ struct ClientState {
     pending_commands: std::collections::HashMap<String, Option<NodeCommandResult>>,
     pending_semantic_ops: std::collections::HashMap<String, Option<String>>,
     pending_traffic_search: Option<(Vec<InterceptedTrafficEntry>, usize)>,
+    pending_config_response: Option<std::collections::HashMap<String, String>>,
+    pending_config_saved: bool,
+    pending_sdk_result: Option<SdkResultData>,
     pending_recon_get: Option<ReconGetResult>,
     cached_project_paths: Vec<String>,
     cached_config_paths: Vec<String>,
@@ -45,6 +48,14 @@ struct ClientState {
     chain_executions: Vec<ChainExecutionUpdate>,
     chain_triggers: Vec<common::ChainTriggerInfo>,
     orchestrator_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientDirectMessage>>,
+}
+
+pub struct SdkResultData {
+    pub result: String,
+    pub is_error: bool,
+    pub duration_ms: u64,
+    pub num_turns: u32,
+    pub stop_reason: String,
 }
 
 struct ReconGetResult {
@@ -291,6 +302,13 @@ impl CliClient {
                 });
             }
 
+            ClientDirectMessage::ServiceConfigResponse { values } => {
+                state.pending_config_response = Some(values);
+            }
+            ClientDirectMessage::ServiceConfigSaved => {
+                state.pending_config_saved = true;
+            }
+
             //
             // Forward orchestrator events to subscriber if present.
             //
@@ -329,6 +347,17 @@ impl CliClient {
                 } else {
                     state.chain_executions.push(execution);
                 }
+            }
+            ClientBroadcastMessage::SdkResult {
+                result, is_error, duration_ms, num_turns, stop_reason, ..
+            } => {
+                state.pending_sdk_result = Some(SdkResultData {
+                    result,
+                    is_error,
+                    duration_ms,
+                    num_turns,
+                    stop_reason,
+                });
             }
             _ => {}
         }
@@ -766,14 +795,94 @@ impl CliClient {
         self.publish_signal(message).await
     }
 
-    pub async fn send_sdk_prompt(&self, node_id: &str, text: &str) -> Result<()> {
+    //
+    // Service config methods.
+    //
+
+    pub async fn get_config(&self, keys: Vec<String>) -> Result<std::collections::HashMap<String, String>> {
+        {
+            let mut state = self.state.lock().await;
+            state.pending_config_response = None;
+        }
+
+        let message = ClientSignalMessage::ServiceConfigGet {
+            client_id: self.client_id.clone(),
+            keys,
+        };
+
+        self.publish_signal(message).await?;
+
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 100;
+
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(response) = state.pending_config_response.take() {
+                return Ok(response);
+            }
+        }
+
+        Err(anyhow!("Timeout waiting for config response"))
+    }
+
+    pub async fn set_config(&self, values: std::collections::HashMap<String, String>) -> Result<()> {
+        {
+            let mut state = self.state.lock().await;
+            state.pending_config_saved = false;
+        }
+
+        let message = ClientSignalMessage::ServiceConfigSet {
+            client_id: self.client_id.clone(),
+            values,
+        };
+
+        self.publish_signal(message).await?;
+
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 100;
+
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let state = self.state.lock().await;
+            if state.pending_config_saved {
+                return Ok(());
+            }
+        }
+
+        Err(anyhow!("Timeout waiting for config save confirmation"))
+    }
+
+    pub async fn send_sdk_prompt(&self, node_id: &str, text: &str) -> Result<SdkResultData> {
+        {
+            let mut state = self.state.lock().await;
+            state.pending_sdk_result = None;
+        }
+
         let message = ClientSignalMessage::SdkPrompt {
             client_id: self.client_id.clone(),
             node_id: node_id.to_string(),
             text: text.to_string(),
             transaction_id: uuid::Uuid::new_v4().to_string(),
         };
-        self.publish_signal(message).await
+        self.publish_signal(message).await?;
+
+        //
+        // Wait for the SdkResult broadcast.
+        //
+
+        let poll_interval = Duration::from_millis(200);
+        let max_polls = (self.timeout.as_millis() / 200) as usize;
+
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(result) = state.pending_sdk_result.take() {
+                return Ok(result);
+            }
+        }
+
+        Err(anyhow!("Timeout waiting for SDK prompt result"))
     }
 
     pub async fn send_sdk_tool_response(
@@ -951,7 +1060,8 @@ impl McpClient for CliClient {
     }
 
     async fn sdk_prompt(&self, node_id: &str, text: &str) -> Result<()> {
-        self.send_sdk_prompt(node_id, text).await
+        self.send_sdk_prompt(node_id, text).await?;
+        Ok(())
     }
 
     async fn sdk_tool_response(&self, node_id: &str, request_id: &str, allow: bool) -> Result<()> {
