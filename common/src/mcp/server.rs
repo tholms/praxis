@@ -901,6 +901,80 @@ impl<C: McpClient + Clone + 'static> PraxisServer<C> {
             "operation_count": ops.len(), "chain_count": chains.len()
         }))
     }
+
+    // ── SDK Remote ──────────────────────────────────────────────────────
+
+    #[tool(description = "Send a prompt to an SDK-remote node (Claude Code connected via --sdk-url)")]
+    async fn sdk_prompt(
+        &self,
+        Parameters(params): Parameters<SdkPromptParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+
+        client.sdk_prompt(&params.node_id, &params.text).await
+            .map_err(|e| mcp_err(&e.to_string()))?;
+
+        Ok(CallToolResult::success(vec![Content::text("Prompt sent.")]))
+    }
+
+    #[tool(description = "Approve or deny a pending tool request on an SDK-remote node")]
+    async fn sdk_approve_tool(
+        &self,
+        Parameters(params): Parameters<SdkToolResponseParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+
+        client.sdk_tool_response(&params.node_id, &params.request_id, params.allow).await
+            .map_err(|e| mcp_err(&e.to_string()))?;
+
+        let action = if params.allow { "approved" } else { "denied" };
+        Ok(CallToolResult::success(vec![Content::text(format!("Tool {}.", action))]))
+    }
+
+    #[tool(description = "Disconnect an SDK-remote node")]
+    async fn sdk_disconnect(
+        &self,
+        Parameters(params): Parameters<SdkNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+
+        client.sdk_disconnect(&params.node_id).await
+            .map_err(|e| mcp_err(&e.to_string()))?;
+
+        Ok(CallToolResult::success(vec![Content::text("Disconnect sent.")]))
+    }
+
+    #[tool(description = "Set auto-approve mode on an SDK-remote node")]
+    async fn sdk_set_auto_approve(
+        &self,
+        Parameters(params): Parameters<SdkAutoApproveParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+
+        client.sdk_set_auto_approve(&params.node_id, params.auto_approve).await
+            .map_err(|e| mcp_err(&e.to_string()))?;
+
+        let mode = if params.auto_approve { "enabled" } else { "disabled" };
+        Ok(CallToolResult::success(vec![Content::text(format!("Auto-approve {}.", mode))]))
+    }
+
+    #[tool(description = "Interrupt an SDK-remote node")]
+    async fn sdk_interrupt(
+        &self,
+        Parameters(params): Parameters<SdkNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+
+        client.sdk_interrupt(&params.node_id).await
+            .map_err(|e| mcp_err(&e.to_string()))?;
+
+        Ok(CallToolResult::success(vec![Content::text("Interrupt sent.")]))
+    }
 }
 
 #[tool_handler]

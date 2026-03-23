@@ -641,6 +641,51 @@ impl McpClient for ServiceMcpClient {
         };
         self.publish_signal(message).await
     }
+
+    async fn sdk_prompt(&self, node_id: &str, text: &str) -> Result<()> {
+        let message = ClientSignalMessage::SdkPrompt {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+            text: text.to_string(),
+            transaction_id: Uuid::new_v4().to_string(),
+        };
+        self.publish_signal(message).await
+    }
+
+    async fn sdk_tool_response(&self, node_id: &str, request_id: &str, allow: bool) -> Result<()> {
+        let message = ClientSignalMessage::SdkToolResponse {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+            request_id: request_id.to_string(),
+            allow,
+        };
+        self.publish_signal(message).await
+    }
+
+    async fn sdk_disconnect(&self, node_id: &str) -> Result<()> {
+        let message = ClientSignalMessage::SdkDisconnect {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+        };
+        self.publish_signal(message).await
+    }
+
+    async fn sdk_set_auto_approve(&self, node_id: &str, auto_approve: bool) -> Result<()> {
+        let message = ClientSignalMessage::SdkSetAutoApprove {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+            auto_approve,
+        };
+        self.publish_signal(message).await
+    }
+
+    async fn sdk_interrupt(&self, node_id: &str) -> Result<()> {
+        let message = ClientSignalMessage::SdkInterrupt {
+            client_id: self.client_id.clone(),
+            node_id: node_id.to_string(),
+        };
+        self.publish_signal(message).await
+    }
 }
 
 //

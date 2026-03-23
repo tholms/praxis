@@ -110,4 +110,19 @@ pub trait McpClient: Send + Sync {
 
     /// Reset a node (cancel all operations, tear down state, re-register).
     async fn reset_node(&self, node_id: &str) -> Result<()>;
+
+    /// Send a prompt to an SDK-remote node.
+    async fn sdk_prompt(&self, node_id: &str, text: &str) -> Result<()>;
+
+    /// Approve or deny a tool request on an SDK-remote node.
+    async fn sdk_tool_response(&self, node_id: &str, request_id: &str, allow: bool) -> Result<()>;
+
+    /// Disconnect an SDK-remote node.
+    async fn sdk_disconnect(&self, node_id: &str) -> Result<()>;
+
+    /// Set auto-approve on an SDK-remote node.
+    async fn sdk_set_auto_approve(&self, node_id: &str, auto_approve: bool) -> Result<()>;
+
+    /// Interrupt an SDK-remote node.
+    async fn sdk_interrupt(&self, node_id: &str) -> Result<()>;
 }

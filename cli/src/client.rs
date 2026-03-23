@@ -949,4 +949,24 @@ impl McpClient for CliClient {
     async fn reset_node(&self, node_id: &str) -> Result<()> {
         CliClient::reset_node(self, node_id).await
     }
+
+    async fn sdk_prompt(&self, node_id: &str, text: &str) -> Result<()> {
+        self.send_sdk_prompt(node_id, text).await
+    }
+
+    async fn sdk_tool_response(&self, node_id: &str, request_id: &str, allow: bool) -> Result<()> {
+        self.send_sdk_tool_response(node_id, request_id, allow).await
+    }
+
+    async fn sdk_disconnect(&self, node_id: &str) -> Result<()> {
+        self.send_sdk_disconnect(node_id).await
+    }
+
+    async fn sdk_set_auto_approve(&self, node_id: &str, auto_approve: bool) -> Result<()> {
+        self.send_sdk_set_auto_approve(node_id, auto_approve).await
+    }
+
+    async fn sdk_interrupt(&self, node_id: &str) -> Result<()> {
+        self.send_sdk_interrupt(node_id).await
+    }
 }

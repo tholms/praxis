@@ -129,3 +129,35 @@ pub struct NameParams {
     #[schemars(description = "Operation name (e.g. recon::system_info) or chain name")]
     pub name: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SdkPromptParams {
+    #[schemars(description = "Node ID of the SDK-remote connection")]
+    pub node_id: String,
+    #[schemars(description = "Prompt text to send")]
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SdkToolResponseParams {
+    #[schemars(description = "Node ID of the SDK-remote connection")]
+    pub node_id: String,
+    #[schemars(description = "Request ID from the tool permission event")]
+    pub request_id: String,
+    #[schemars(description = "Whether to allow (true) or deny (false) the tool")]
+    pub allow: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SdkNodeParams {
+    #[schemars(description = "Node ID of the SDK-remote connection")]
+    pub node_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SdkAutoApproveParams {
+    #[schemars(description = "Node ID of the SDK-remote connection")]
+    pub node_id: String,
+    #[schemars(description = "Enable auto-approve (true/false)")]
+    pub auto_approve: bool,
+}
