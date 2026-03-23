@@ -27,6 +27,11 @@ pub enum SdkCommand {
         /// Request ID from the tool permission event
         request_id: String,
     },
+    /// Interrupt an SDK-remote node's current turn
+    Interrupt {
+        /// Node ID (or prefix)
+        node_id: String,
+    },
     /// Disconnect an SDK-remote node
     Disconnect {
         /// Node ID (or prefix)
@@ -58,6 +63,10 @@ pub async fn execute(client: &mut CliClient, command: SdkCommand, _output: &Outp
         SdkCommand::Deny { node_id, request_id } => {
             client.send_sdk_tool_response(&node_id, &request_id, false).await?;
             println!("Tool denied.");
+        }
+        SdkCommand::Interrupt { node_id } => {
+            client.send_sdk_interrupt(&node_id).await?;
+            println!("Interrupt sent.");
         }
         SdkCommand::Disconnect { node_id } => {
             client.send_sdk_disconnect(&node_id).await?;

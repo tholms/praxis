@@ -99,7 +99,7 @@ Then update the port in **Settings** > **MCP Server** to match. The SSE endpoint
 
 ### SDK Server Settings
 
-Access via **Settings** > **SDK Server** in the web UI.
+Configure via `config set <key> <value>` in the CLI.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -108,7 +108,7 @@ Access via **Settings** > **SDK Server** in the web UI.
 | `sdk_server_bind` | `0.0.0.0` | Bind address (0.0.0.0 for all interfaces, 127.0.0.1 for localhost only) |
 | `sdk_server_auth_token` | (empty) | Optional Bearer token for authentication |
 | `sdk_server_system_prompt` | (empty) | System prompt sent to connected Claude Code instances |
-| `sdk_server_permission_mode` | `default` | Permission mode: `default`, `yolo`, or `restricted` |
+| `sdk_server_permission_mode` | `default` | Permission mode: `default`, `acceptEdits`, `bypassPermissions`, or `plan` |
 | `sdk_server_max_turns` | `50` | Maximum conversation turns per session |
 | `sdk_server_auto_approve` | `true` | Automatically approve tool requests from Claude Code |
 

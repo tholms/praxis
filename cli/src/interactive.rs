@@ -547,6 +547,7 @@ fn print_help() {
         ("sdk prompt <node> <text>", "Send a prompt to an SDK node"),
         ("sdk approve <node> <req_id>", "Approve a pending tool request"),
         ("sdk deny <node> <req_id>", "Deny a pending tool request"),
+        ("sdk interrupt <node>", "Interrupt an SDK node's current turn"),
         ("sdk disconnect <node>", "Disconnect an SDK node"),
         ("sdk set-auto-approve <node> <on/off>", "Toggle auto-approve"),
         ("", ""),

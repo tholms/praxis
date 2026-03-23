@@ -45,6 +45,7 @@ impl SdkSession {
             auto_approve: false,
             transaction_id: None,
             pending_tool_inputs: HashMap::new(),
+            recv_buffer: Vec::new(),
         };
 
         session.auto_approve = session.config.auto_approve;
@@ -100,6 +101,7 @@ struct SessionInner {
     auto_approve: bool,
     transaction_id: Option<String>,
     pending_tool_inputs: HashMap<String, serde_json::Value>,
+    recv_buffer: Vec<SdkInboundMessage>,
 }
 
 impl SessionInner {
@@ -339,7 +341,7 @@ impl SessionInner {
             SdkCommand::Prompt { text, transaction_id } => {
                 common::log_info!(
                     "[sdk:{}] sending prompt (tx={}, len={})",
-                    self.short_id(), &transaction_id[..8], text.len()
+                    self.short_id(), transaction_id.get(..8).unwrap_or(&transaction_id), text.len()
                 );
                 self.transaction_id = Some(transaction_id);
                 let msg = sdk_protocol::make_user_message(&text, &self.session_id);
@@ -402,10 +404,16 @@ impl SessionInner {
     }
 
     async fn recv(&mut self) -> anyhow::Result<SdkInboundMessage> {
+        if let Some(msg) = self.recv_buffer.pop() {
+            return Ok(msg);
+        }
         loop {
-            let msgs = self.recv_raw().await?;
-            if let Some(msg) = msgs.into_iter().next() {
-                return Ok(msg);
+            let mut msgs = self.recv_raw().await?;
+            if !msgs.is_empty() {
+                msgs.reverse();
+                let first = msgs.pop().unwrap();
+                self.recv_buffer = msgs;
+                return Ok(first);
             }
         }
     }

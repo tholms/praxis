@@ -48,6 +48,8 @@ pub enum SdkCommand {
 // Configuration snapshot passed to the manager on start.
 //
 
+const MAX_SDK_CONNECTIONS: usize = 32;
+
 #[derive(Debug, Clone)]
 pub struct SdkServerConfig {
     pub port: u16,
@@ -148,9 +150,7 @@ impl SdkServerManager {
                         common::log_error!("SDK server error: {}", e);
                     }
                 }
-                _ = async {
-                    let _ = shutdown_rx.await;
-                } => {
+                _ = shutdown_rx => {
                     common::log_info!("SDK server stopped");
                 }
             }
@@ -211,7 +211,20 @@ async fn ws_upgrade_handler(
         }
     }
 
-    common::log_info!("SDK connection from {}", peer);
+    //
+    // Reject if at max connections.
+    //
+
+    let session_count = state.sessions.read().await.len();
+    if session_count >= MAX_SDK_CONNECTIONS {
+        common::log_warn!(
+            "SDK connection from {} rejected: at max connections ({})",
+            peer, MAX_SDK_CONNECTIONS
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    common::log_info!("SDK connection from {} ({}/{})", peer, session_count + 1, MAX_SDK_CONNECTIONS);
 
     ws.on_upgrade(move |socket| {
         SdkSession::run(

@@ -51,7 +51,7 @@ struct ClientState {
     orchestrator_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ClientDirectMessage>>,
 }
 
-pub struct SdkResultData {
+pub(crate) struct SdkResultData {
     pub result: String,
     pub is_error: bool,
     pub duration_ms: u64,
@@ -59,7 +59,7 @@ pub struct SdkResultData {
     pub stop_reason: String,
 }
 
-pub struct SdkToolPermissionData {
+pub(crate) struct SdkToolPermissionData {
     pub node_id: String,
     pub request_id: String,
     pub tool_name: String,
@@ -933,8 +933,18 @@ impl CliClient {
             //
 
             for req in pending_tools {
-                if interactive {
+                if req.auto_approved {
+                    if interactive {
+                        eprintln!(
+                            "  [auto-approved] {} {}",
+                            req.tool_name,
+                            Self::format_tool_input(&req.tool_name, &req.input)
+                        );
+                    }
+                } else if interactive {
                     self.handle_tool_permission_interactive(node_id, &req).await?;
+                } else {
+                    self.send_sdk_tool_response(node_id, &req.request_id, true).await?;
                 }
             }
 
@@ -952,18 +962,6 @@ impl CliClient {
         req: &SdkToolPermissionData,
     ) -> Result<()> {
         let input_summary = Self::format_tool_input(&req.tool_name, &req.input);
-
-        if req.auto_approved {
-            eprintln!(
-                "  [auto-approved] {} {}",
-                req.tool_name, input_summary
-            );
-            return Ok(());
-        }
-
-        //
-        // Manual approval: show details and prompt on stdin.
-        //
 
         eprintln!();
         eprintln!("  Tool: {}", req.tool_name);

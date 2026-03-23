@@ -485,14 +485,14 @@ SDK-remote nodes are Claude Code instances connected directly to the service via
 | `sdk_server_bind` | `0.0.0.0` | Bind address |
 | `sdk_server_auth_token` | (empty) | Bearer token for authentication |
 | `sdk_server_system_prompt` | (empty) | System prompt sent to Claude Code |
-| `sdk_server_permission_mode` | `default` | Permission mode for connections |
+| `sdk_server_permission_mode` | `default` | Permission mode: `default`, `acceptEdits`, `bypassPermissions`, or `plan` |
 | `sdk_server_max_turns` | `50` | Maximum conversation turns |
 | `sdk_server_auto_approve` | `true` | Auto-approve tool requests |
 
 ### Connecting Claude Code
 
 ```
-claude --sdk-url ws://127.0.0.1:8586/sdk --output-format stream-json --input-format stream-json
+claude --sdk-url ws://127.0.0.1:8586/ --output-format stream-json --input-format stream-json
 ```
 
 ### Commands
@@ -502,6 +502,7 @@ claude --sdk-url ws://127.0.0.1:8586/sdk --output-format stream-json --input-for
 | `sdk prompt <node_id> <text>` | Send a prompt to an SDK-remote node |
 | `sdk approve <node_id> <request_id>` | Approve a pending tool request |
 | `sdk deny <node_id> <request_id>` | Deny a pending tool request |
+| `sdk interrupt <node_id>` | Interrupt an SDK-remote node's current turn |
 | `sdk disconnect <node_id>` | Disconnect an SDK-remote node |
 | `sdk set-auto-approve <node_id> <on/off>` | Toggle auto-approve mode |
 
