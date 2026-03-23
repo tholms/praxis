@@ -135,6 +135,7 @@ impl NodeRegistry {
         SystemState {
             timestamp: Utc::now(),
             nodes,
+            sdk_nodes: Vec::new(),
         }
     }
 }

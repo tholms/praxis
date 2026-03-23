@@ -1392,6 +1392,16 @@ impl RabbitMqClient {
                 common::logging::set_event_log_enabled(enabled);
                 common::log_info!("Event logging {}", if enabled { "enabled" } else { "disabled" });
             }
+
+            //
+            // SDK-URL server events — forwarded to web clients later.
+            //
+
+            ClientBroadcastMessage::SdkAssistantMessage { .. }
+            | ClientBroadcastMessage::SdkResult { .. }
+            | ClientBroadcastMessage::SdkToolPermissionRequest { .. }
+            | ClientBroadcastMessage::SdkNodeConnected { .. }
+            | ClientBroadcastMessage::SdkNodeDisconnected { .. } => {}
         }
 
         Ok(())

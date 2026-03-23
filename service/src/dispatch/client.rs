@@ -263,6 +263,18 @@ pub async fn handle(ctx: &ServiceContext, message: ClientSignalMessage) -> Resul
             handle_agent_chat_get_history(ctx, client_id, session_id, channel_id, limit).await,
         ClientSignalMessage::AgentChatGetState { client_id, session_id } =>
             handle_agent_chat_get_state(ctx, client_id, session_id).await,
+
+        //
+        // SDK-URL server commands — dispatched in Chunk 6 (Task 11).
+        //
+
+        ClientSignalMessage::SdkPrompt { .. }
+        | ClientSignalMessage::SdkToolResponse { .. }
+        | ClientSignalMessage::SdkSetAutoApprove { .. }
+        | ClientSignalMessage::SdkInterrupt { .. }
+        | ClientSignalMessage::SdkDisconnect { .. } => {
+            common::log_warn!("SDK command received but SDK server not yet wired");
+        }
     }
 
     Ok(())
