@@ -38,7 +38,6 @@ pub const MCP_SERVER_DEFAULT_PORT: u16 = 8585;
 pub const SDK_SERVER_ENABLED: &str = "sdk_server_enabled";
 pub const SDK_SERVER_PORT: &str = "sdk_server_port";
 pub const SDK_SERVER_BIND: &str = "sdk_server_bind";
-pub const SDK_SERVER_AUTH_TOKEN: &str = "sdk_server_auth_token";
 pub const SDK_SERVER_SYSTEM_PROMPT: &str = "sdk_server_system_prompt";
 pub const SDK_SERVER_PERMISSION_MODE: &str = "sdk_server_permission_mode";
 pub const SDK_SERVER_MAX_TURNS: &str = "sdk_server_max_turns";
@@ -183,10 +182,6 @@ impl ServiceConfig {
         self.get(SDK_SERVER_BIND)
             .cloned()
             .unwrap_or_else(|| SDK_SERVER_DEFAULT_BIND.to_string())
-    }
-
-    pub fn get_sdk_server_auth_token(&self) -> String {
-        self.get(SDK_SERVER_AUTH_TOKEN).cloned().unwrap_or_default()
     }
 
     pub fn get_sdk_server_system_prompt(&self) -> String {

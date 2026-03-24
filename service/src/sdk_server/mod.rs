@@ -10,7 +10,7 @@ use axum::{
         ws::{WebSocket, WebSocketUpgrade},
         ConnectInfo, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -54,7 +54,6 @@ const MAX_SDK_CONNECTIONS: usize = 32;
 pub struct SdkServerConfig {
     pub port: u16,
     pub bind: String,
-    pub auth_token: String,
     pub system_prompt: String,
     pub permission_mode: String,
     pub max_turns: u32,
@@ -188,28 +187,7 @@ async fn ws_upgrade_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<SdkServerState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
 ) -> Response {
-    //
-    // Validate auth token if configured.
-    //
-
-    if !state.config.auth_token.is_empty() {
-        let authorized = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| {
-                v.strip_prefix("Bearer ")
-                    .unwrap_or(v)
-                    .trim()
-                    == state.config.auth_token
-            })
-            .unwrap_or(false);
-
-        if !authorized {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-    }
 
     //
     // Reject if at max connections.

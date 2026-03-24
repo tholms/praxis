@@ -594,7 +594,6 @@ async fn run_main_loop() -> Result<()> {
             let sdk_config = sdk_server::SdkServerConfig {
                 port: config.get_sdk_server_port(),
                 bind: config.get_sdk_server_bind(),
-                auth_token: config.get_sdk_server_auth_token(),
                 system_prompt: config.get_sdk_server_system_prompt(),
                 permission_mode: config.get_sdk_server_permission_mode(),
                 max_turns: config.get_sdk_server_max_turns(),

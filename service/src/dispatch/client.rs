@@ -10,7 +10,7 @@ use common::{
 
 use crate::config::service_config::{
     APPLICATION_LOGS_ENABLED, MCP_SERVER_ENABLED, MCP_SERVER_PORT,
-    SDK_SERVER_ENABLED, SDK_SERVER_PORT, SDK_SERVER_BIND, SDK_SERVER_AUTH_TOKEN,
+    SDK_SERVER_ENABLED, SDK_SERVER_PORT, SDK_SERVER_BIND,
     SDK_SERVER_SYSTEM_PROMPT, SDK_SERVER_PERMISSION_MODE, SDK_SERVER_MAX_TURNS,
     SDK_SERVER_AUTO_APPROVE,
 };
@@ -754,7 +754,7 @@ async fn handle_config_set(
                 mcp_server_changed = true;
             }
             if key == SDK_SERVER_ENABLED || key == SDK_SERVER_PORT || key == SDK_SERVER_BIND
-                || key == SDK_SERVER_AUTH_TOKEN || key == SDK_SERVER_SYSTEM_PROMPT
+                || key == SDK_SERVER_SYSTEM_PROMPT
                 || key == SDK_SERVER_PERMISSION_MODE || key == SDK_SERVER_MAX_TURNS
                 || key == SDK_SERVER_AUTO_APPROVE
             {
@@ -813,7 +813,6 @@ async fn handle_config_set(
                     let sdk_config = crate::sdk_server::SdkServerConfig {
                         port: config.get_sdk_server_port(),
                         bind: config.get_sdk_server_bind(),
-                        auth_token: config.get_sdk_server_auth_token(),
                         system_prompt: config.get_sdk_server_system_prompt(),
                         permission_mode: config.get_sdk_server_permission_mode(),
                         max_turns: config.get_sdk_server_max_turns(),

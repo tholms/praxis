@@ -106,7 +106,6 @@ Configure via `config set <key> <value>` in the CLI.
 | `sdk_server_enabled` | `false` | Enable the SDK WebSocket server for Claude Code connections |
 | `sdk_server_port` | `8586` | Port to listen on |
 | `sdk_server_bind` | `0.0.0.0` | Bind address (0.0.0.0 for all interfaces, 127.0.0.1 for localhost only) |
-| `sdk_server_auth_token` | (empty) | Optional Bearer token for authentication |
 | `sdk_server_system_prompt` | (empty) | System prompt sent to connected Claude Code instances |
 | `sdk_server_permission_mode` | `default` | Permission mode: `default`, `acceptEdits`, `bypassPermissions`, or `plan` |
 | `sdk_server_max_turns` | `50` | Maximum conversation turns per session |
