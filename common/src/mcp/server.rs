@@ -955,6 +955,39 @@ impl<C: McpClient + Clone + 'static> PraxisServer<C> {
             "operation_count": ops.len(), "chain_count": chains.len()
         }))
     }
+
+    // ── Service Config ────────────────────────────────────────────────────
+
+    #[tool(description = "Get a service configuration value by key")]
+    async fn config_get(
+        &self,
+        Parameters(params): Parameters<ConfigGetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+        let value = super::ops::config_get(client, &params.key).await.map_err(mcp_err)?;
+        let v = value.map(|s| json!(s)).unwrap_or(json!(null));
+        json_result(json!({ "key": params.key, "value": v }))
+    }
+
+    #[tool(description = "Set a service configuration value")]
+    async fn config_set(
+        &self,
+        Parameters(params): Parameters<ConfigSetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+        super::ops::config_set(client, &params.key, &params.value).await.map_err(mcp_err)?;
+        json_result(json!({ "saved": true }))
+    }
+
+    #[tool(description = "List all service configuration key-value pairs")]
+    async fn config_list(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let guard = acquire_client!(self);
+        let client = guard.as_ref().ok_or_else(|| mcp_err("No client"))?;
+        let values = super::ops::config_list(client).await.map_err(mcp_err)?;
+        json_result(json!({ "config": values }))
+    }
 }
 
 #[tool_handler]

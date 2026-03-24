@@ -116,4 +116,13 @@ pub trait McpClient: Send + Sync {
 
     /// Reset a node (cancel all operations, tear down state, re-register).
     async fn reset_node(&self, node_id: &str) -> Result<()>;
+
+    /// Get a single config value by key.
+    async fn get_config(&self, key: &str) -> Result<Option<String>>;
+
+    /// Set a config key to a value.
+    async fn set_config(&self, key: &str, value: &str) -> Result<()>;
+
+    /// Get all config key-value pairs.
+    async fn get_all_config(&self) -> Result<std::collections::HashMap<String, String>>;
 }

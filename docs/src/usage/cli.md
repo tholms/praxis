@@ -130,6 +130,13 @@ session prompt --node <prefix> <text>
 session close --node <prefix>
 ```
 
+**Service Configuration:**
+```bash
+config get <key>                   # Get a config value by key
+config set <key> <value>           # Set a config value
+config list                        # List all config keys and values
+```
+
 ## Global Options
 
 | Option | Description | Default |

@@ -55,6 +55,8 @@ pub async fn handle(ctx: &ServiceContext, message: ClientSignalMessage) -> Resul
             handle_config_get(ctx, client_id, keys).await,
         ClientSignalMessage::ServiceConfigSet { client_id, values } =>
             handle_config_set(ctx, client_id, values).await,
+        ClientSignalMessage::ServiceConfigGetAll { client_id } =>
+            handle_config_get_all(ctx, client_id).await,
 
         //
         // Operation definitions.
@@ -779,6 +781,21 @@ async fn handle_config_set(
                 }
             }
         }
+    }
+}
+
+async fn handle_config_get_all(ctx: &ServiceContext, client_id: String) {
+    common::log_info!(
+        "Received ServiceConfigGetAll from client {}",
+        &client_id[..8.min(client_id.len())]
+    );
+    let values = {
+        let config = ctx.service_config.read().await;
+        config.to_hashmap()
+    };
+    let message = ClientDirectMessage::ServiceConfigResponse { values };
+    if let Err(e) = send_to_client(&ctx.client_publish_channel, &client_id, message).await {
+        common::log_error!("Failed to send all config to client {}: {}", client_id, e);
     }
 }
 

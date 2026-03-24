@@ -451,6 +451,29 @@ impl Client {
         self.publish_signal(message).await
     }
 
+    pub async fn get_all_config(&self) -> Result<HashMap<String, String>> {
+        {
+            let mut state = self.state.lock().await;
+            state.pending_config = None;
+        }
+
+        let message = ClientSignalMessage::ServiceConfigGetAll {
+            client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await?;
+
+        let poll_interval = Duration::from_millis(100);
+        for _ in 0..50 {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(values) = state.pending_config.take() {
+                return Ok(values);
+            }
+        }
+
+        Err(anyhow!("Timeout waiting for config response"))
+    }
+
     //
     // Operation methods.
     //

@@ -701,3 +701,28 @@ pub async fn trigger_toggle(
     client.toggle_chain_trigger(id.clone(), enabled).await?;
     Ok((id, enabled))
 }
+
+//
+// Get a single service config value by key. Returns None if the key is not set.
+//
+
+pub async fn config_get(client: &(impl McpClient + Sync), key: &str) -> Result<Option<String>> {
+    client.get_config(key).await
+}
+
+//
+// Set a service config key to a value.
+//
+
+pub async fn config_set(client: &(impl McpClient + Sync), key: &str, value: &str) -> Result<String> {
+    client.set_config(key, value).await?;
+    Ok("Saved.".to_string())
+}
+
+//
+// Get all service config key-value pairs.
+//
+
+pub async fn config_list(client: &(impl McpClient + Sync)) -> Result<std::collections::HashMap<String, String>> {
+    client.get_all_config().await
+}

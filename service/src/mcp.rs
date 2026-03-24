@@ -47,6 +47,8 @@ struct ClientState {
     pending_recon_get: Option<Option<ReconResult>>,
     pending_op_def_add: Option<Result<String, String>>,
     pending_op_def_delete: Option<Result<String, String>>,
+    pending_config: Option<HashMap<String, String>>,
+    pending_config_saved: bool,
     operations: Vec<SemanticOpUpdate>,
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
@@ -263,6 +265,12 @@ impl ServiceMcpClient {
             }
             ClientDirectMessage::ReconGetResponse { recon_result, .. } => {
                 state.pending_recon_get = Some(recon_result);
+            }
+            ClientDirectMessage::ServiceConfigResponse { values } => {
+                state.pending_config = Some(values);
+            }
+            ClientDirectMessage::ServiceConfigSaved => {
+                state.pending_config_saved = true;
             }
             ClientDirectMessage::ChainTriggerListResponse { triggers } => {
                 state.chain_triggers = triggers;
@@ -736,6 +744,65 @@ impl McpClient for ServiceMcpClient {
             node_id: node_id.to_string(),
         };
         self.publish_signal(message).await
+    }
+
+    async fn get_config(&self, key: &str) -> Result<Option<String>> {
+        { let mut state = self.state.lock().await; state.pending_config = None; }
+        let message = ClientSignalMessage::ServiceConfigGet {
+            client_id: self.client_id.clone(),
+            keys: vec![key.to_string()],
+        };
+        self.publish_signal(message).await?;
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 50;
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(values) = state.pending_config.take() {
+                return Ok(values.get(key).cloned());
+            }
+        }
+        Err(anyhow!("Timeout waiting for config response"))
+    }
+
+    async fn set_config(&self, key: &str, value: &str) -> Result<()> {
+        { let mut state = self.state.lock().await; state.pending_config_saved = false; }
+        let mut values = HashMap::new();
+        values.insert(key.to_string(), value.to_string());
+        let message = ClientSignalMessage::ServiceConfigSet {
+            client_id: self.client_id.clone(),
+            values,
+        };
+        self.publish_signal(message).await?;
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 50;
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if state.pending_config_saved {
+                state.pending_config_saved = false;
+                return Ok(());
+            }
+        }
+        Err(anyhow!("Timeout waiting for config save confirmation"))
+    }
+
+    async fn get_all_config(&self) -> Result<HashMap<String, String>> {
+        { let mut state = self.state.lock().await; state.pending_config = None; }
+        let message = ClientSignalMessage::ServiceConfigGetAll {
+            client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await?;
+        let poll_interval = Duration::from_millis(100);
+        let max_polls = 50;
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(values) = state.pending_config.take() {
+                return Ok(values);
+            }
+        }
+        Err(anyhow!("Timeout waiting for config response"))
     }
 }
 

@@ -185,3 +185,17 @@ pub struct OpDeleteParams {
     #[schemars(description = "Full name (category::short_name), short_name, or display name of the operation to delete")]
     pub name: String,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigGetParams {
+    #[schemars(description = "Configuration key to retrieve")]
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfigSetParams {
+    #[schemars(description = "Configuration key")]
+    pub key: String,
+    #[schemars(description = "Value to set")]
+    pub value: String,
+}

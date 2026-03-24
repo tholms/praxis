@@ -138,7 +138,6 @@ impl ServiceConfig {
     }
 
     /// Convert to a HashMap (for backwards compatibility with existing code)
-    #[allow(dead_code)]
     pub fn to_hashmap(&self) -> HashMap<String, String> {
         self.cache.clone()
     }

@@ -1633,6 +1633,10 @@ pub enum ClientSignalMessage {
         client_id: String,
         values: HashMap<String, String>,
     },
+    /// Request all service configuration key-value pairs
+    ServiceConfigGetAll {
+        client_id: String,
+    },
 
     //
     // Operation definitions (stored in service database).

@@ -72,6 +72,12 @@ enum Commands {
         #[command(subcommand)]
         command: commands::session::SessionCommand,
     },
+
+    /// Service configuration commands
+    Config {
+        #[command(subcommand)]
+        command: commands::config::ConfigCommand,
+    },
 }
 
 impl Commands {
@@ -80,6 +86,7 @@ impl Commands {
             Commands::Node { command } => commands::node::execute(client, command).await,
             Commands::Agent { command } => commands::agent::execute(client, command).await,
             Commands::Session { command } => commands::session::execute(client, command).await,
+            Commands::Config { command } => commands::config::execute(client, command).await,
         }
     }
 }
