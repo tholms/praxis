@@ -1,7 +1,7 @@
 use crate::agent_connectors::{Agent, AgentFactory, AgentRegistry};
 use crate::app::{NodeState, registration::publish_registration};
 use crate::handlers::{
-    handle_agent_command, handle_agent_discovery_command, handle_agent_registry_list,
+    handle_agent_command, handle_agent_registry_list,
     handle_agent_registry_update, handle_config_command, handle_intercept_command,
     handle_session_command, handle_terminal_command, TransactionManager,
 };
@@ -9,7 +9,7 @@ use crate::terminal::TerminalOutputEvent;
 use crate::utils::semantic_parser::{self, SemanticParserTracker};
 use chrono::Utc;
 use common::{
-    publish_json, CommandRequest, CommandResponse, DiscoveredAgent, DiscoveredLlmEndpoint,
+    publish_json, CommandRequest, CommandResponse, DiscoveredAgent,
     InterceptedTrafficEntry, NODE_BROADCAST_EXCHANGE, NODE_EVENT_LOG_QUEUE, NODE_SIGNAL_QUEUE,
     NodeBroadcastMessage, NodeCommand, NodeCommandResult, NodeDirectMessage, NodeInformationUpdate,
     NodeSignalMessage, SelectedAgent, SessionCommandResult, TerminalCommand, TerminalOutput,
@@ -112,12 +112,6 @@ async fn listen_to_queues(
     let (traffic_tx, mut traffic_rx) = mpsc::unbounded_channel::<InterceptedTrafficEntry>();
 
     //
-    // Create discovery channel for forwarding discovered LLM endpoints to the
-    // service.
-    //
-    let (discovery_tx, discovery_rx) = mpsc::unbounded_channel::<DiscoveredLlmEndpoint>();
-
-    //
     // Create event log channel for forwarding log entries to the service.
     //
     let (event_log_tx, mut event_log_rx) = mpsc::unbounded_channel::<common::ApplicationLogEntry>();
@@ -134,7 +128,6 @@ async fn listen_to_queues(
         node_id.clone(),
         terminal_output_tx,
         traffic_tx,
-        discovery_tx,
     )));
 
     //
@@ -437,13 +430,6 @@ async fn listen_to_queues(
     });
 
     //
-    // LLM endpoint discovery is currently disabled.
-    // The channel and infrastructure remain in place but no forwarder task is
-    // spawned, so discoveries are not sent to the service.
-    //
-    let _ = discovery_rx;
-
-    //
     // Set up periodic information updates using tokio interval.
     //
 
@@ -531,23 +517,28 @@ async fn listen_to_queues(
     {
         let registry = registry.clone();
         let cache = fingerprint_cache.clone();
-        let shutdown = shutdown_token.clone();
+        let stop = reset_token.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             interval.tick().await; // consume immediate first tick
             loop {
                 tokio::select! {
-                    _ = shutdown.cancelled() => break,
+                    _ = stop.cancelled() => break,
                     _ = interval.tick() => {}
                 }
                 let agents = registry.read().await.get_all();
                 let mut new_cache = std::collections::HashMap::new();
                 for agent in &agents {
+                    if stop.is_cancelled() {
+                        break;
+                    }
                     let available = agent.do_fingerprint().await;
                     new_cache.insert(agent.short_name().to_string(), available);
                 }
-                *cache.write().await = new_cache;
+                if !stop.is_cancelled() {
+                    *cache.write().await = new_cache;
+                }
             }
         });
     }
@@ -1062,9 +1053,6 @@ async fn handle_command(
                 handle_agent_registry_list(registry).await
             }
         },
-        NodeCommand::AgentDiscovery(cmd) => {
-            handle_agent_discovery_command(cmd, node_state).await
-        }
     };
 
     //
@@ -1200,14 +1188,12 @@ async fn send_node_information_update(
     //
     // Check intercept status (now node-level, not per-agent).
     //
-    let (intercept_enabled, intercept_method, agent_discovery_enabled, discovered_endpoints_count, active_terminal_id) = {
+    let (intercept_enabled, intercept_method, active_terminal_id) = {
         let state = node_state.read().await;
         let enabled = state.intercept_manager.is_enabled();
         let method = state.intercept_manager.method();
-        let discovery_enabled = state.intercept_manager.is_agent_discovery_enabled().await;
-        let endpoints_count = state.intercept_manager.discovered_endpoints_count().await;
         let terminal_id = state.terminal_manager.get_active_terminal_id();
-        (enabled, method, discovery_enabled, endpoints_count, terminal_id)
+        (enabled, method, terminal_id)
     };
 
     //
@@ -1245,8 +1231,6 @@ async fn send_node_information_update(
         intercept_supported,
         intercept_enabled,
         intercept_method,
-        agent_discovery_enabled,
-        discovered_endpoints_count,
         active_terminal_id,
         privileged: crate::utils::is_privileged(),
     };

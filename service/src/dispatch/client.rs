@@ -4,7 +4,7 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use common::{
     publish_json_exchange, ClientBroadcastMessage, ClientDirectMessage, ClientSignalMessage,
-    CommandRequest, CommandResponse, NodeBroadcastMessage, NodeDirectMessage,
+    CommandRequest, CommandResponse, NodeBroadcastMessage, NodeCapability, NodeDirectMessage,
     CLIENT_BROADCAST_EXCHANGE, NODE_BROADCAST_EXCHANGE,
 };
 
@@ -107,17 +107,6 @@ pub async fn handle(ctx: &ServiceContext, message: ClientSignalMessage) -> Resul
             handle_intercept_enable(ctx, client_id, node_id, method).await,
         ClientSignalMessage::InterceptDisable { client_id, node_id } =>
             handle_intercept_disable(ctx, client_id, node_id).await,
-
-        //
-        // Agent discovery.
-        //
-
-        ClientSignalMessage::AgentDiscoveryEnable { client_id, node_id } =>
-            handle_agent_discovery_enable(ctx, client_id, node_id).await,
-        ClientSignalMessage::AgentDiscoveryDisable { client_id, node_id } =>
-            handle_agent_discovery_disable(ctx, client_id, node_id).await,
-        ClientSignalMessage::DiscoveredEndpointsList { client_id, node_id } =>
-            handle_discovered_endpoints_list(ctx, client_id, node_id).await,
 
         //
         // Application logging.
@@ -319,13 +308,43 @@ async fn handle_registration(ctx: &ServiceContext, registration: common::ClientR
     let _ = publish_json_exchange(&ctx.broadcast_channel, CLIENT_BROADCAST_EXCHANGE, &client_message).await;
 }
 
+//
+// Send a capability error response to a client.
+//
+async fn send_capability_error(
+    ctx: &ServiceContext,
+    client_id: &str,
+    node_id: &str,
+    command_id: &str,
+    capability: &NodeCapability,
+) {
+    let response = CommandResponse {
+        command_id: command_id.to_string(),
+        node_id: node_id.to_string(),
+        result: common::NodeCommandResult::Error {
+            message: format!(
+                "Node '{}' does not support capability: {:?}",
+                node_id, capability
+            ),
+        },
+    };
+    let _ = send_to_client(
+        &ctx.client_publish_channel,
+        client_id,
+        ClientDirectMessage::CommandResponse(response),
+    )
+    .await;
+}
+
 async fn handle_command(ctx: &ServiceContext, request: CommandRequest) {
     common::log_info!(
         "Received command from client {}: {:?}",
         request.client_id, request.command
     );
 
-    if ctx.node_registry.get(&request.node_id).await.is_none() {
+    let node = ctx.node_registry.get(&request.node_id).await;
+
+    if node.is_none() {
         common::log_warn!("Command targets unknown node: {}", request.node_id);
         let response = CommandResponse {
             command_id: request.command_id.clone(),
@@ -340,25 +359,38 @@ async fn handle_command(ctx: &ServiceContext, request: CommandRequest) {
             ClientDirectMessage::CommandResponse(response),
         )
         .await;
-    } else {
-        ctx.pending_commands
-            .add(request.command_id.clone(), request.client_id.clone())
-            .await;
+        return;
+    }
 
-        let node_message = NodeDirectMessage::Command(request.clone());
-        if let Err(e) = send_to_node(&ctx.publish_channel, &request.node_id, node_message).await
-        {
-            common::log_error!(
-                "Failed to forward command to node {}: {}",
-                request.node_id, e
-            );
-            ctx.pending_commands.remove(&request.command_id).await;
-        } else {
-            common::log_info!(
-                "Forwarded command {} to node {}",
-                request.command_id, request.node_id
-            );
+    let node = node.unwrap();
+
+    if let Some(ref capability) = request.command.required_capability() {
+        if !node.has_capability(capability) {
+            send_capability_error(
+                ctx, &request.client_id, &request.node_id,
+                &request.command_id, capability,
+            ).await;
+            return;
         }
+    }
+
+    ctx.pending_commands
+        .add(request.command_id.clone(), request.client_id.clone())
+        .await;
+
+    let node_message = NodeDirectMessage::Command(request.clone());
+    if let Err(e) = send_to_node(&ctx.publish_channel, &request.node_id, node_message).await
+    {
+        common::log_error!(
+            "Failed to forward command to node {}: {}",
+            request.node_id, e
+        );
+        ctx.pending_commands.remove(&request.command_id).await;
+    } else {
+        common::log_info!(
+            "Forwarded command {} to node {}",
+            request.command_id, request.node_id
+        );
     }
 }
 
@@ -1256,29 +1288,38 @@ async fn handle_intercept_enable(
         }),
     };
 
-    if ctx.node_registry.get(&node_id).await.is_some() {
-        ctx.pending_commands
-            .add(command_id.clone(), client_id.clone())
-            .await;
-        let node_message = NodeDirectMessage::Command(request);
-        if let Err(e) = send_to_node(&ctx.publish_channel, &node_id, node_message).await {
-            common::log_error!("Failed to send InterceptEnable to node {}: {}", node_id, e);
-            ctx.pending_commands.remove(&command_id).await;
+    match ctx.node_registry.get(&node_id).await {
+        Some(node) => {
+            if !node.has_capability(&NodeCapability::Interception) {
+                send_capability_error(
+                    ctx, &client_id, &node_id, &command_id, &NodeCapability::Interception,
+                ).await;
+                return;
+            }
+            ctx.pending_commands
+                .add(command_id.clone(), client_id.clone())
+                .await;
+            let node_message = NodeDirectMessage::Command(request);
+            if let Err(e) = send_to_node(&ctx.publish_channel, &node_id, node_message).await {
+                common::log_error!("Failed to send InterceptEnable to node {}: {}", node_id, e);
+                ctx.pending_commands.remove(&command_id).await;
+            }
         }
-    } else {
-        let response = CommandResponse {
-            command_id,
-            node_id: node_id.clone(),
-            result: common::NodeCommandResult::Error {
-                message: format!("Node '{}' not found", node_id),
-            },
-        };
-        let _ = send_to_client(
-            &ctx.client_publish_channel,
-            &client_id,
-            ClientDirectMessage::CommandResponse(response),
-        )
-        .await;
+        None => {
+            let response = CommandResponse {
+                command_id,
+                node_id: node_id.clone(),
+                result: common::NodeCommandResult::Error {
+                    message: format!("Node '{}' not found", node_id),
+                },
+            };
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::CommandResponse(response),
+            )
+            .await;
+        }
     }
 }
 
@@ -1300,147 +1341,42 @@ async fn handle_intercept_disable(ctx: &ServiceContext, client_id: String, node_
         command: common::NodeCommand::Intercept(common::InterceptCommand::Disable),
     };
 
-    if ctx.node_registry.get(&node_id).await.is_some() {
-        ctx.pending_commands
-            .add(command_id.clone(), client_id.clone())
-            .await;
-        let node_message = NodeDirectMessage::Command(request);
-        if let Err(e) = send_to_node(&ctx.publish_channel, &node_id, node_message).await {
-            common::log_error!(
-                "Failed to send InterceptDisable to node {}: {}",
-                node_id, e
-            );
-            ctx.pending_commands.remove(&command_id).await;
+    match ctx.node_registry.get(&node_id).await {
+        Some(node) => {
+            if !node.has_capability(&NodeCapability::Interception) {
+                send_capability_error(
+                    ctx, &client_id, &node_id, &command_id, &NodeCapability::Interception,
+                ).await;
+                return;
+            }
+            ctx.pending_commands
+                .add(command_id.clone(), client_id.clone())
+                .await;
+            let node_message = NodeDirectMessage::Command(request);
+            if let Err(e) = send_to_node(&ctx.publish_channel, &node_id, node_message).await {
+                common::log_error!(
+                    "Failed to send InterceptDisable to node {}: {}",
+                    node_id, e
+                );
+                ctx.pending_commands.remove(&command_id).await;
+            }
         }
-    } else {
-        let response = CommandResponse {
-            command_id,
-            node_id: node_id.clone(),
-            result: common::NodeCommandResult::Error {
-                message: format!("Node '{}' not found", node_id),
-            },
-        };
-        let _ = send_to_client(
-            &ctx.client_publish_channel,
-            &client_id,
-            ClientDirectMessage::CommandResponse(response),
-        )
-        .await;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Agent discovery
-// ---------------------------------------------------------------------------
-
-async fn handle_agent_discovery_enable(ctx: &ServiceContext, client_id: String, node_id: String) {
-    common::log_info!(
-        "Received AgentDiscoveryEnable from client {} for node {}",
-        &client_id[..8.min(client_id.len())],
-        &node_id[..8.min(node_id.len())]
-    );
-
-    let command_id = uuid::Uuid::new_v4().to_string();
-    let request = CommandRequest {
-        command_id: command_id.clone(),
-        client_id: client_id.clone(),
-        node_id: node_id.clone(),
-        command: common::NodeCommand::AgentDiscovery(common::AgentDiscoveryCommand::Enable),
-    };
-
-    if ctx.node_registry.get(&node_id).await.is_some() {
-        ctx.pending_commands
-            .add(command_id.clone(), client_id.clone())
+        None => {
+            let response = CommandResponse {
+                command_id,
+                node_id: node_id.clone(),
+                result: common::NodeCommandResult::Error {
+                    message: format!("Node '{}' not found", node_id),
+                },
+            };
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::CommandResponse(response),
+            )
             .await;
-        let node_message = NodeDirectMessage::Command(request);
-        if let Err(e) = send_to_node(&ctx.publish_channel, &node_id, node_message).await {
-            common::log_error!(
-                "Failed to send AgentDiscoveryEnable to node {}: {}",
-                node_id, e
-            );
-            ctx.pending_commands.remove(&command_id).await;
         }
-    } else {
-        let _ = send_to_client(
-            &ctx.client_publish_channel,
-            &client_id,
-            ClientDirectMessage::AgentDiscoveryError {
-                message: format!("Node '{}' not found", node_id),
-            },
-        )
-        .await;
     }
-}
-
-async fn handle_agent_discovery_disable(ctx: &ServiceContext, client_id: String, node_id: String) {
-    common::log_info!(
-        "Received AgentDiscoveryDisable from client {} for node {}",
-        &client_id[..8.min(client_id.len())],
-        &node_id[..8.min(node_id.len())]
-    );
-
-    let command_id = uuid::Uuid::new_v4().to_string();
-    let request = CommandRequest {
-        command_id: command_id.clone(),
-        client_id: client_id.clone(),
-        node_id: node_id.clone(),
-        command: common::NodeCommand::AgentDiscovery(
-            common::AgentDiscoveryCommand::Disable,
-        ),
-    };
-
-    if ctx.node_registry.get(&node_id).await.is_some() {
-        ctx.pending_commands
-            .add(command_id.clone(), client_id.clone())
-            .await;
-        let node_message = NodeDirectMessage::Command(request);
-        if let Err(e) = send_to_node(&ctx.publish_channel, &node_id, node_message).await {
-            common::log_error!(
-                "Failed to send AgentDiscoveryDisable to node {}: {}",
-                node_id, e
-            );
-            ctx.pending_commands.remove(&command_id).await;
-        }
-    } else {
-        let _ = send_to_client(
-            &ctx.client_publish_channel,
-            &client_id,
-            ClientDirectMessage::AgentDiscoveryError {
-                message: format!("Node '{}' not found", node_id),
-            },
-        )
-        .await;
-    }
-}
-
-async fn handle_discovered_endpoints_list(
-    ctx: &ServiceContext,
-    client_id: String,
-    node_id: Option<String>,
-) {
-    common::log_info!(
-        "Received DiscoveredEndpointsList from client {}",
-        &client_id[..8.min(client_id.len())]
-    );
-
-    let endpoints = if let Some(node_id) = node_id {
-        ctx.database
-            .get_discovered_endpoints(&node_id)
-            .await
-            .unwrap_or_default()
-    } else {
-        ctx.database
-            .get_all_discovered_endpoints()
-            .await
-            .unwrap_or_default()
-    };
-
-    let _ = send_to_client(
-        &ctx.client_publish_channel,
-        &client_id,
-        ClientDirectMessage::DiscoveredEndpointsListResponse { endpoints },
-    )
-    .await;
 }
 
 // ---------------------------------------------------------------------------

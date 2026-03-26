@@ -4,12 +4,7 @@ import { Modal } from '../common/Modal';
 import { useApp } from '../../context/AppContext';
 import type { ToolkitToolInfo } from '../../api/types';
 
-//
-// Lazy-import the tool-specific modals from the ToolkitPage. They are
-// self-contained and already use Modal internally.
-//
-
-import { SessionHistoryPoisoningModal, MessageEncoderModal } from '../../pages/ToolkitPage';
+import { SessionHistoryPoisoningModal, MessageEncoderModal } from './ToolkitToolModals';
 
 function toolIcon(toolName: string) {
   if (toolName === 'session_history_poisoning') return ShieldAlert;
@@ -36,7 +31,7 @@ export function ToolkitModal({ onClose }: ToolkitModalProps) {
 
   return (
     <>
-      <Modal isOpen={true} onClose={onClose} title="Toolkit" size="lg">
+      <Modal isOpen={true} onClose={onClose} title="Toolkit" size="lg" resizable storageKey="cmd-toolkit" defaultWidth={672} defaultHeight={Math.round(window.innerHeight * 0.45)}>
         <div className="space-y-4">
           <p className="text-[10px] text-muted">Specialized offensive tools</p>
 

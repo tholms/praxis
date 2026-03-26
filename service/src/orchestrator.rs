@@ -6,8 +6,10 @@ use lapin::Channel;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, RwLock};
 
+use futures_util::StreamExt;
+
 use common::ai::{
-    ChatCompletionRequest, Message, Tool, Provider,
+    ChatCompletionRequest, Message, Tool, Provider, Usage,
     parse_manual_tool_call, get_system_prompt_with_tools, create_ai_client,
 };
 use common::{ClientDirectMessage, OrchestratorPlan, PlanStep, PlanStepStatus};
@@ -290,36 +292,115 @@ impl OrchestratorManager {
                         let request = ChatCompletionRequest::new(model.clone(), conversation_history.clone())
                             .with_max_tokens(max_tokens);
 
-                        let (full_response, usage) = match client.chat_completion(request).await {
-                            Ok(response) => {
-                                let text = response.text().unwrap_or_default().to_string();
-                                let usage = response.usage.clone();
-                                (text, usage)
-                            },
-                            Err(e) => {
-                                let err_msg = format!("AI request failed: {}", e);
-                                common::log_error!("{}", err_msg);
-                                let _ = send_to_client(
-                                    &publish_channel_clone,
-                                    &client_id_owned,
-                                    ClientDirectMessage::OrchestratorError { prompt_id: prompt_id.clone(), message: err_msg },
-                                ).await;
-                                conversation_history.pop();
+                        //
+                        // Stream the response via SSE. Forward content to the
+                        // frontend incrementally, but hold back text once we
+                        // detect a possible tool call ({"tool" or ```).
+                        // Track how many bytes were sent so we don't duplicate
+                        // after tool call parsing.
+                        //
+                        let mut stream = client.chat_completion_stream(request);
+                        let mut full_response = String::new();
+                        let mut stream_usage: Option<Usage> = None;
+                        let mut stream_error = false;
+                        let mut send_buffer = String::new();
+                        let mut held_back = false;
+                        let mut bytes_sent: usize = 0;
+
+                        while let Some(result) = stream.next().await {
+                            if stop_flag_clone.load(Ordering::SeqCst) ||
+                               cancel_flag_clone.load(Ordering::SeqCst) {
                                 break;
                             }
-                        };
 
-                        if let Some(usage) = usage {
+                            match result {
+                                Ok(delta) => {
+                                    if !delta.content.is_empty() {
+                                        full_response.push_str(&delta.content);
+
+                                        if !held_back {
+                                            send_buffer.push_str(&delta.content);
+
+                                            let tool_marker = send_buffer.find("{\"tool\"")
+                                                .or_else(|| send_buffer.find("```"));
+
+                                            if let Some(marker_pos) = tool_marker {
+                                                //
+                                                // Flush text before the tool marker so it
+                                                // arrives at the client before tool events.
+                                                //
+                                                if marker_pos > 0 {
+                                                    let pre_tool = send_buffer[..marker_pos].to_string();
+                                                    if !pre_tool.trim().is_empty() {
+                                                        bytes_sent += pre_tool.len();
+                                                        let _ = send_to_client(
+                                                            &publish_channel_clone,
+                                                            &client_id_owned,
+                                                            ClientDirectMessage::OrchestratorContent {
+                                                                prompt_id: prompt_id.clone(),
+                                                                content: pre_tool,
+                                                            },
+                                                        ).await;
+                                                    }
+                                                }
+                                                held_back = true;
+                                                send_buffer.clear();
+                                            } else if send_buffer.len() >= 50 || delta.content.contains('\n') {
+                                                bytes_sent += send_buffer.len();
+                                                let _ = send_to_client(
+                                                    &publish_channel_clone,
+                                                    &client_id_owned,
+                                                    ClientDirectMessage::OrchestratorContent {
+                                                        prompt_id: prompt_id.clone(),
+                                                        content: send_buffer.clone(),
+                                                    },
+                                                ).await;
+                                                send_buffer.clear();
+                                            }
+                                        }
+                                    }
+                                    if let Some(u) = delta.usage {
+                                        stream_usage = Some(u);
+                                    }
+                                }
+                                Err(e) => {
+                                    let err_msg = format!("AI request failed: {}", e);
+                                    common::log_error!("{}", err_msg);
+                                    let _ = send_to_client(
+                                        &publish_channel_clone,
+                                        &client_id_owned,
+                                        ClientDirectMessage::OrchestratorError {
+                                            prompt_id: prompt_id.clone(),
+                                            message: err_msg,
+                                        },
+                                    ).await;
+                                    stream_error = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if stream_error {
+                            conversation_history.pop();
+                            break;
+                        }
+
+                        //
+                        // Flush any remaining send buffer before tool parsing
+                        // so text preceding tool calls is delivered to the
+                        // client before ToolExecuting events.
+                        //
+                        if !send_buffer.is_empty() && !held_back {
+                            bytes_sent += send_buffer.len();
                             let _ = send_to_client(
                                 &publish_channel_clone,
                                 &client_id_owned,
-                                ClientDirectMessage::OrchestratorTokenUsage {
+                                ClientDirectMessage::OrchestratorContent {
                                     prompt_id: prompt_id.clone(),
-                                    prompt_tokens: usage.prompt_tokens,
-                                    completion_tokens: usage.completion_tokens,
-                                    total_tokens: usage.total_tokens,
+                                    content: send_buffer.clone(),
                                 },
                             ).await;
+                            send_buffer.clear();
                         }
 
                         let mut response_text = full_response.clone();
@@ -330,6 +411,7 @@ impl OrchestratorManager {
                                cancel_flag_clone.load(Ordering::SeqCst) {
                                 break;
                             }
+
 
                             common::log_info!("Orchestrator executing tool: {}", tool_name);
 
@@ -391,12 +473,23 @@ impl OrchestratorManager {
                         }
 
                         if !tool_results.is_empty() {
-                            let remaining = response_text.trim();
-                            if !remaining.is_empty() {
+                            //
+                            // No content to send here — all pre-tool text was
+                            // already flushed during streaming. The next loop
+                            // iteration will stream the model's response to
+                            // tool results as fresh content.
+                            //
+
+                            if let Some(usage) = &stream_usage {
                                 let _ = send_to_client(
                                     &publish_channel_clone,
                                     &client_id_owned,
-                                    ClientDirectMessage::OrchestratorContent { prompt_id: prompt_id.clone(), content: remaining.to_string() },
+                                    ClientDirectMessage::OrchestratorTokenUsage {
+                                        prompt_id: prompt_id.clone(),
+                                        prompt_tokens: usage.prompt_tokens,
+                                        completion_tokens: usage.completion_tokens,
+                                        total_tokens: usage.total_tokens,
+                                    },
                                 ).await;
                             }
 
@@ -411,11 +504,34 @@ impl OrchestratorManager {
                             continue;
                         }
 
-                        if !full_response.is_empty() {
+                        //
+                        // No tool calls — send only what wasn't already
+                        // streamed to the client.
+                        //
+                        if full_response.len() > bytes_sent {
+                            let unsent = &full_response[bytes_sent..];
+                            if !unsent.is_empty() {
+                                let _ = send_to_client(
+                                    &publish_channel_clone,
+                                    &client_id_owned,
+                                    ClientDirectMessage::OrchestratorContent {
+                                        prompt_id: prompt_id.clone(),
+                                        content: unsent.to_string(),
+                                    },
+                                ).await;
+                            }
+                        }
+
+                        if let Some(usage) = &stream_usage {
                             let _ = send_to_client(
                                 &publish_channel_clone,
                                 &client_id_owned,
-                                ClientDirectMessage::OrchestratorContent { prompt_id: prompt_id.clone(), content: full_response.clone() },
+                                ClientDirectMessage::OrchestratorTokenUsage {
+                                    prompt_id: prompt_id.clone(),
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                    total_tokens: usage.total_tokens,
+                                },
                             ).await;
                         }
 

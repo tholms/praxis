@@ -15,9 +15,10 @@ import {
 } from '@xyflow/react';
 import type { Node, Edge, Connection, OnSelectionChangeParams } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Play, X, Save, Copy, Download, Cpu, Maximize2, GitMerge, Sparkles, MessageSquare, Users, Database, RefreshCw, LayoutGrid, Square, Settings, Check, AlertTriangle, Wrench, FileText } from 'lucide-react';
+import { Play, X, Save, Copy, Download, Cpu, Maximize2, GitMerge, Sparkles, MessageSquare, Users, Database, RefreshCw, LayoutGrid, Square, Settings, Check, AlertTriangle, Wrench, FileText, Plus } from 'lucide-react';
 import { ConfigModal } from '../common/ConfigModal';
 import { Modal } from '../common/Modal';
+import { EditOpForm } from '../common/EditOpForm';
 import { ChainTriggerPanel } from './ChainTriggerPanel';
 import type {
   BlockConfig,
@@ -35,9 +36,6 @@ import type {
 import { computeLayout } from '../../utils/dagreLayout';
 import { getNextSessionColor, getUsedColors } from '../../utils/sessionColors';
 
-//
-// Model definition type (matches SettingsPage).
-//
 interface ModelDefinition {
   //
   // provider::model format.
@@ -453,9 +451,12 @@ interface ChainBuilderInnerProps {
   send: (msg: BrowserMessage) => void;
   saveStatus?: string | null;
   saveError?: string | null;
+  opDefSuccess?: string | null;
+  opDefError?: string | null;
+  clearOpDefStatus?: () => void;
 }
 
-function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, operationDefs, modelDefs, nodes: _systemNodes, toolkitTools, payloads, send, saveStatus, saveError }: ChainBuilderInnerProps) {
+function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, operationDefs, modelDefs, nodes: _systemNodes, toolkitTools, payloads, send, saveStatus, saveError, opDefSuccess, opDefError, clearOpDefStatus }: ChainBuilderInnerProps) {
   const [name, setName] = useState(chain?.name || '');
   const [description, setDescription] = useState(chain?.description || '');
   const [timeout, setChainTimeout] = useState(chain?.timeout || 1800);
@@ -513,6 +514,13 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
   const [showOperationModal, setShowOperationModal] = useState(false);
   const [pendingPosition, setPendingPosition] = useState<{ x: number; y: number } | null>(null);
   const [selectedOperation, setSelectedOperation] = useState<string>('');
+
+  //
+  // Modal state for creating a new operation from the chain builder.
+  //
+  const [showNewOpModal, setShowNewOpModal] = useState(false);
+  const [newOpDef, setNewOpDef] = useState<OperationDefinitionInfo | null>(null);
+  const [isSavingNewOp, setIsSavingNewOp] = useState(false);
 
   //
   // Modal state for transform configuration.
@@ -632,6 +640,69 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
     setBlockWorkingDir(existing?.working_dir || '');
     setBlockRequireAllInputs(existing?.require_all_inputs !== false);
   };
+
+  //
+  // New operation helpers — for creating an op inline from the chain builder.
+  //
+
+  const blankOpDef: OperationDefinitionInfo = {
+    full_name: '',
+    category: '',
+    short_name: '',
+    name: '',
+    description: '',
+    agent_info: '',
+    timeout: 60,
+    operation_prompt: '',
+    mode: 'one-shot',
+    agent_iterations: 5,
+    operation_chain: [],
+    disabled: false,
+    yolo_mode: false,
+  };
+
+  const handleOpenNewOp = () => {
+    setNewOpDef({ ...blankOpDef });
+    setShowNewOpModal(true);
+    clearOpDefStatus?.();
+  };
+
+  const handleSaveNewOp = () => {
+    if (!newOpDef) return;
+    const opData = {
+      item_type: 'operation',
+      name: newOpDef.name,
+      short_name: newOpDef.short_name,
+      category: newOpDef.category,
+      description: newOpDef.description,
+      agent_info: newOpDef.agent_info,
+      timeout: newOpDef.timeout,
+      operation_prompt: newOpDef.operation_prompt,
+      mode: newOpDef.mode,
+      agent_iterations: newOpDef.agent_iterations,
+      disabled: false,
+      yolo_mode: newOpDef.yolo_mode,
+    };
+    clearOpDefStatus?.();
+    setIsSavingNewOp(true);
+    send({ type: 'op_def_add', content: JSON.stringify(opData) });
+  };
+
+  const updateNewOpDef = (field: keyof OperationDefinitionInfo, value: string | number | boolean | string[]) => {
+    if (!newOpDef) return;
+    setNewOpDef({ ...newOpDef, [field]: value });
+  };
+
+  useEffect(() => {
+    if (opDefSuccess && isSavingNewOp) {
+      setIsSavingNewOp(false);
+      setShowNewOpModal(false);
+      setNewOpDef(null);
+      setSelectedOperation(opDefSuccess);
+      clearOpDefStatus?.();
+      send({ type: 'op_def_list' });
+    }
+  }, [opDefSuccess, isSavingNewOp, clearOpDefStatus, send]);
 
   //
   // Build a BlockConfig from current state and save it to extraData for the
@@ -2198,7 +2269,58 @@ function ChainBuilderInner({ chain, onSave, onDuplicate, onExport, onCancel, ope
         submitIcon={<Cpu size={14} />}
         submitVariant="info"
         submitDisabled={!selectedOperation}
+        footerLeft={
+          !editingNodeId && (
+            <button
+              type="button"
+              onClick={handleOpenNewOp}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs tracking-wider text-muted border border-dim hover:border-[var(--accent-purple)] hover:text-[var(--accent-purple)] hover:bg-[var(--accent-purple)]/10 transition-colors"
+            >
+              <Plus size={14} />
+              New
+            </button>
+          )
+        }
       />
+
+      {/*
+      //
+      // New Operation Modal (opened from operation selection).
+      //
+      */}
+      <Modal
+        isOpen={showNewOpModal}
+        onClose={() => {
+          setShowNewOpModal(false);
+          setNewOpDef(null);
+          setIsSavingNewOp(false);
+          clearOpDefStatus?.();
+        }}
+        title="New Operation"
+        size="lg"
+        noPadding
+        resizable
+        storageKey="cmd-new-op"
+        defaultWidth={672}
+        defaultHeight={Math.round(window.innerHeight * 0.75)}
+      >
+        {newOpDef && (
+          <EditOpForm
+            editDef={newOpDef}
+            isNewOp={true}
+            isSaving={isSavingNewOp}
+            error={opDefError ?? null}
+            onUpdate={updateNewOpDef}
+            onSave={handleSaveNewOp}
+            onCancel={() => {
+              setShowNewOpModal(false);
+              setNewOpDef(null);
+              setIsSavingNewOp(false);
+              clearOpDefStatus?.();
+            }}
+          />
+        )}
+      </Modal>
 
       {/*
       //
@@ -2652,13 +2774,16 @@ interface ChainBuilderProps {
   send?: (msg: BrowserMessage) => void;
   saveStatus?: string | null;
   saveError?: string | null;
+  opDefSuccess?: string | null;
+  opDefError?: string | null;
+  clearOpDefStatus?: () => void;
 }
 
 const noopSend = () => {};
-export function ChainBuilder({ modelDefs = [], nodes = [], toolkitTools = [], payloads = [], send = noopSend, saveStatus, saveError, ...props }: ChainBuilderProps) {
+export function ChainBuilder({ modelDefs = [], nodes = [], toolkitTools = [], payloads = [], send = noopSend, saveStatus, saveError, opDefSuccess, opDefError, clearOpDefStatus, ...props }: ChainBuilderProps) {
   return (
     <ReactFlowProvider>
-      <ChainBuilderInner {...props} modelDefs={modelDefs} nodes={nodes} toolkitTools={toolkitTools} payloads={payloads} send={send} saveStatus={saveStatus} saveError={saveError} />
+      <ChainBuilderInner {...props} modelDefs={modelDefs} nodes={nodes} toolkitTools={toolkitTools} payloads={payloads} send={send} saveStatus={saveStatus} saveError={saveError} opDefSuccess={opDefSuccess} opDefError={opDefError} clearOpDefStatus={clearOpDefStatus} />
     </ReactFlowProvider>
   );
 }

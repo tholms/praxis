@@ -52,20 +52,30 @@
   - `docs/src/usage/hunting.md` — documentation
 - All table lists must be in **alphabetical order** by table name.
 
-## CLI / MCP Parity
+## CLI
 
-- Capabilities of the CLI REPL and non-interactive CLI must always match. Any command available in the REPL must also work in one-shot mode (`-C`) and as a direct subcommand.
-- Help text must be updated to match for both in-REPL help and non-interactive `--fullhelp`.
-- The MCP server must always have at least the capabilities available in the CLI (MCP can have more). Common code in `common/src/mcp/ops.rs` is used by both CLI and MCP.
+- The CLI (`cli/`) provides both an interactive terminal UI (default mode) and non-interactive subcommands.
+- Non-interactive commands (via `-C` or direct subcommands) must be kept in sync with the interactive UI capabilities where applicable.
+- The MCP SSE server (exposed by the service) provides tool access for AI agents. Common code in `common/src/mcp/ops.rs` is used by both the CLI and MCP.
 
 ## Documentation
 
 - Documentation lives in `docs/` and is built with mdBook.
 - Documentation must always be kept up to date to reflect any code changes. When adding, removing, or modifying features, update the corresponding documentation in `docs/src/`.
 - Key documentation files:
-  - `docs/src/usage/cli.md` - CLI commands, REPL, MCP server tools
+  - `docs/src/usage/cli.md` - CLI terminal UI and non-interactive commands
   - `docs/src/usage/recon.md` - Reconnaissance features
   - `docs/src/architecture/` - Node architecture
   - `docs/src/connectors/` - Agent connector documentation
 - But look through entire docs/src to locate any areas that may need updates
 - Don't make changes to CLAUDE.md unless specifically instructed to
+
+## Release Process
+
+- **Do not initiate any release steps unless explicitly asked to.**
+
+1. **Version bump**: Ensure the version is updated on the `prerelease` branch. It should be a minor bump over the current `main` version (unless otherwise specified).
+2. **Create PR**: Create a PR from `prerelease` into `main` with a clear, well-written description summarizing all changes since the last release.
+3. **Squash merge**: Squash-merge the PR into `main`.
+4. **GitHub release**: Create a GitHub release on `main` with an excellent changelog covering all notable changes, new features, fixes, and breaking changes.
+5. **Tag and push**: Create a version tag matching the version number set on the `prerelease` branch (e.g., `v0.10.0`), push the tag, and push the release.
