@@ -3,8 +3,3 @@ target/
 .cargo/
 .praxis*
 op_runner/
-pkg/aur/src/
-pkg/aur/pkg/
-pkg/aur/*.tar.gz
-pkg/aur/*.tar
-pkg/aur/*.pkg.tar.*
