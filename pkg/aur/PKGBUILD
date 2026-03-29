@@ -2,7 +2,7 @@
 pkgname=praxis
 pkgver=0.9.12
 pkgrel=1
-pkgdesc='Offensive security platform with node-based reconnaissance and hunting'
+pkgdesc='Praxis - Semantic Command & Control Framework for Agents'
 arch=('x86_64')
 url='https://github.com/originsec/praxis'
 license=('Apache-2.0')
