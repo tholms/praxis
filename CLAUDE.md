@@ -88,3 +88,4 @@
 3. **Squash merge**: Squash-merge the PR into `main`.
 4. **GitHub release**: Create a GitHub release on `main` with an excellent changelog covering all notable changes, new features, fixes, and breaking changes.
 5. **Tag and push**: Create a version tag matching the version number set on the `prerelease` branch (e.g., `v0.10.0`), push the tag, and push the release.
+6. **AUR package**: Handled automatically — a GitHub Action updates the `originsec/praxis-aur` repo on each release.
