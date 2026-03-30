@@ -65,7 +65,7 @@ jobs:
           git config --global user.email "davkaplan@gmail.com"
           git config --global --add safe.directory "$PWD"
 
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+          export GIT_SSH_COMMAND="ssh -vvv -i ~/.ssh/aur -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
 
           git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
           cp pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO /tmp/aur-push/
