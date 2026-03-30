@@ -111,20 +111,23 @@ jobs:
             git push
           fi
 
-      - name: Push to AUR
+      - name: Configure SSH for AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
         run: |
-          mkdir -p /root/.ssh/
-          echo 'Host *' > /root/.ssh/config
-          echo '  IdentityFile /root/.ssh/aur' >> /root/.ssh/config
-          echo '  StrictHostKeyChecking no' >> /root/.ssh/config
-          echo '  UserKnownHostsFile /dev/null' >> /root/.ssh/config
-          printf '%s\n' "${AUR_SSH_KEY}" > /root/.ssh/aur
-          chmod 0700 /root/.ssh/aur
+          mkdir -p ~/.ssh
+          printf '%s\n' "${AUR_SSH_KEY}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
+      - name: Push to AUR
+        run: |
           git config --global user.name "David Kaplan"
           git config --global user.email "davkaplan@gmail.com"
+          git config --global --add safe.directory "$PWD"
+
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
 
           git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
           cp pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO /tmp/aur-push/
@@ -134,9 +137,13 @@ jobs:
           git add -A
           if git diff --cached --quiet; then
             echo "AUR already up to date"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-            git commit -m "Update to v${VERSION}"
-            git push
-            echo "Pushed to AUR"
+            exit 0
           fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          git commit -m "Update to v${VERSION}"
+          for i in 1 2 3 4 5; do
+            git push && echo "Pushed to AUR" && exit 0
+            echo "AUR push failed, retry $i"
+            sleep $((i * 15))
+          done
+          exit 1
