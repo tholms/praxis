@@ -70,31 +70,67 @@ jobs:
   update-aur:
     needs: release
     runs-on: ubuntu-latest
+    container:
+      image: archlinux
+      options: --privileged
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout AUR repo
-        uses: actions/checkout@v4
-        with:
-          repository: originsec/praxis-aur
-          token: ${{ secrets.AUR_REPO_TOKEN }}
+      - name: Install dependencies
+        run: pacman -Sy --noconfirm git curl openssh
 
-      - name: Update version
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Update AUR files and commit
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           SHA256=$(curl -sL "https://github.com/originsec/praxis/archive/${GITHUB_REF_NAME}.tar.gz" | sha256sum | cut -d' ' -f1)
 
+          cd aur/praxis
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
           sed -i "0,/^    '[a-f0-9]\{64\}'/{s/^    '[a-f0-9]\{64\}'/    '${SHA256}'/}" PKGBUILD
-
           sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
           sed -i "s|source = praxis-.*\.tar\.gz::.*|source = praxis-${VERSION}.tar.gz::https://github.com/originsec/praxis/archive/v${VERSION}.tar.gz|" .SRCINFO
           sed -i "0,/sha256sums = [a-f0-9]\{64\}/{s/sha256sums = [a-f0-9]\{64\}/sha256sums = ${SHA256}/}" .SRCINFO
+          cd ../..
 
-      - name: Commit and push
+          git config --global --add safe.directory "$PWD"
+          git config user.name "David Kaplan"
+          git config user.email "davkaplan@gmail.com"
+          git add aur/praxis/PKGBUILD aur/praxis/.SRCINFO
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update AUR package to v${VERSION}"
+            git push
+          fi
+
+      - name: Push to AUR
+        env:
+          aur_key: ${{ secrets.AUR_SSH_KEY }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          git commit -m "Update to v${VERSION}"
-          git push
+
+          mkdir -p /root/.ssh/
+          printf 'Host *\n  IdentityFile /root/.ssh/aur\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n' > /root/.ssh/config
+          printf '%s\n' "${aur_key}" > /root/.ssh/aur
+          chmod 0700 /root/.ssh/aur
+
+          git config --global user.name "David Kaplan"
+          git config --global user.email "davkaplan@gmail.com"
+
+          git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
+          cp aur/praxis/PKGBUILD aur/praxis/.SRCINFO /tmp/aur-push/
+          cd /tmp/aur-push
+          git add -A
+          if git diff --cached --quiet; then
+            echo "AUR already up to date"
+          else
+            git commit -m "Update to v${VERSION}"
+            git push
+            echo "Pushed to AUR"
+          fi
