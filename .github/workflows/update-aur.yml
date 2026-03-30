@@ -55,3 +55,4 @@ jobs:
           commit_username: depletionmo-de
           commit_email: davkaplan@gmail.com
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+          ssh_keyscan_types: rsa,ecdsa,ed25519
