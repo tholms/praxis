@@ -50,18 +50,16 @@ jobs:
             git push
           fi
 
-      - name: Configure SSH for AUR
+      - name: Push to AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "${AUR_SSH_KEY}" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Push to AUR
-        run: |
           git config --global user.name "David Kaplan"
           git config --global user.email "davkaplan@gmail.com"
           git config --global --add safe.directory "$PWD"
