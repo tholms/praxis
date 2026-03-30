@@ -117,11 +117,27 @@ jobs:
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "${AUR_SSH_KEY}" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+          mkdir -p /github/home/.ssh /root/.ssh
+          printf '%s\n' "${AUR_SSH_KEY}" > /github/home/.ssh/aur
+          chmod 600 /github/home/.ssh/aur
+          ssh-keyscan -t ed25519,rsa aur.archlinux.org > /github/home/.ssh/known_hosts 2>/dev/null
+          chmod 600 /github/home/.ssh/known_hosts
+          cat > /github/home/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            User aur
+            IdentityFile /github/home/.ssh/aur
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile /github/home/.ssh/known_hosts
+            GlobalKnownHostsFile /dev/null
+            ConnectTimeout 20
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+          EOF
+          chmod 600 /github/home/.ssh/config
+          cp /github/home/.ssh/known_hosts /root/.ssh/known_hosts
+          cp /github/home/.ssh/config /root/.ssh/config
+          chmod 600 /root/.ssh/known_hosts /root/.ssh/config
 
       - name: Push to AUR
         run: |
@@ -129,7 +145,7 @@ jobs:
           git config --global user.email "davkaplan@gmail.com"
           git config --global --add safe.directory "$PWD"
 
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+          export GIT_SSH_COMMAND="ssh -F /github/home/.ssh/config -vvv"
 
           git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
           cp pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO /tmp/aur-push/
