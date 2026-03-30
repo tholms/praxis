@@ -69,6 +69,8 @@ jobs:
 
   update-aur:
     needs: release
+    if: always() && needs.release.result == 'success'
+    continue-on-error: true
     runs-on: ubuntu-latest
     container:
       image: archlinux
