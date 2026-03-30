@@ -54,25 +54,19 @@ jobs:
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
         run: |
-          mkdir -p ~/.ssh
+          mkdir -p ~/.ssh /root/.ssh
           printf '%s\n' "${AUR_SSH_KEY}" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
           ssh-keyscan -t ed25519,rsa aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-          chmod 600 ~/.ssh/known_hosts
+          cp ~/.ssh/known_hosts /root/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts /root/.ssh/known_hosts
 
           git config --global user.name "David Kaplan"
           git config --global user.email "davkaplan@gmail.com"
           git config --global --add safe.directory "$PWD"
 
-          export GIT_SSH_COMMAND="ssh -vvv -i ~/.ssh/aur -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
 
-          echo "=== SSH key fingerprint ==="
-          ssh-keygen -lf ~/.ssh/aur
-          echo "=== known_hosts ==="
-          cat ~/.ssh/known_hosts
-          echo "=== Testing SSH connection ==="
-          ssh -vvv -i ~/.ssh/aur -o IdentitiesOnly=yes aur@aur.archlinux.org help 2>&1 || true
-          echo "=== Cloning ==="
           git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
           cp pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO /tmp/aur-push/
           cp pkg/aur/praxis/*.service pkg/aur/praxis/*.conf /tmp/aur-push/
