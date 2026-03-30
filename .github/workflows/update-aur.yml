@@ -21,7 +21,7 @@ jobs:
           echo "Version: ${VERSION}"
           echo "SHA256: ${SHA256}"
 
-          cd aur/praxis
+          cd pkg/aur/praxis
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
           sed -i "0,/^    '[a-f0-9]\{64\}'/{s/^    '[a-f0-9]\{64\}'/    '${SHA256}'/}" PKGBUILD
           sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
@@ -33,7 +33,7 @@ jobs:
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           git config user.name "David Kaplan"
           git config user.email "davkaplan@gmail.com"
-          git add aur/praxis/PKGBUILD aur/praxis/.SRCINFO
+          git add pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
@@ -45,13 +45,13 @@ jobs:
         uses: ulises-jeremias/github-actions-aur-publish@v1
         with:
           pkgname: praxis
-          pkgbuild: ./aur/praxis/PKGBUILD
+          pkgbuild: ./pkg/aur/praxis/PKGBUILD
           assets: |
-            ./aur/praxis/.SRCINFO
-            ./aur/praxis/*.service
-            ./aur/praxis/*.conf
-            ./aur/praxis/*.env
-            ./aur/praxis/*.install
+            ./pkg/aur/praxis/.SRCINFO
+            ./pkg/aur/praxis/*.service
+            ./pkg/aur/praxis/*.conf
+            ./pkg/aur/praxis/*.env
+            ./pkg/aur/praxis/*.install
           commit_username: depletionmo-de
           commit_email: davkaplan@gmail.com
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
