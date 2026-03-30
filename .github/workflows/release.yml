@@ -70,22 +70,15 @@ jobs:
   update-aur:
     needs: release
     runs-on: ubuntu-latest
-    container:
-      image: archlinux
-      options: --privileged
     permissions:
       contents: write
 
     steps:
-      - name: Install dependencies
-        run: pacman -Sy --noconfirm git curl openssh
-
       - uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
 
-      - name: Update AUR files and commit
+      - name: Update AUR files
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           SHA256=$(curl -sL "https://github.com/originsec/praxis/archive/${GITHUB_REF_NAME}.tar.gz" | sha256sum | cut -d' ' -f1)
@@ -96,9 +89,10 @@ jobs:
           sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
           sed -i "s|source = praxis-.*\.tar\.gz::.*|source = praxis-${VERSION}.tar.gz::https://github.com/originsec/praxis/archive/v${VERSION}.tar.gz|" .SRCINFO
           sed -i "0,/sha256sums = [a-f0-9]\{64\}/{s/sha256sums = [a-f0-9]\{64\}/sha256sums = ${SHA256}/}" .SRCINFO
-          cd ../..
 
-          git config --global --add safe.directory "$PWD"
+      - name: Commit to praxis repo
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
           git config user.name "David Kaplan"
           git config user.email "davkaplan@gmail.com"
           git add aur/praxis/PKGBUILD aur/praxis/.SRCINFO
@@ -109,28 +103,17 @@ jobs:
             git push
           fi
 
-      - name: Push to AUR
-        env:
-          aur_key: ${{ secrets.AUR_SSH_KEY }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-
-          mkdir -p /root/.ssh/
-          printf 'Host *\n  IdentityFile /root/.ssh/aur\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n' > /root/.ssh/config
-          printf '%s\n' "${aur_key}" > /root/.ssh/aur
-          chmod 0700 /root/.ssh/aur
-
-          git config --global user.name "David Kaplan"
-          git config --global user.email "davkaplan@gmail.com"
-
-          git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
-          cp aur/praxis/PKGBUILD aur/praxis/.SRCINFO /tmp/aur-push/
-          cd /tmp/aur-push
-          git add -A
-          if git diff --cached --quiet; then
-            echo "AUR already up to date"
-          else
-            git commit -m "Update to v${VERSION}"
-            git push
-            echo "Pushed to AUR"
-          fi
+      - name: Publish to AUR
+        uses: ulises-jeremias/github-actions-aur-publish@v1
+        with:
+          pkgname: praxis
+          pkgbuild: ./aur/praxis/PKGBUILD
+          assets: |
+            ./aur/praxis/.SRCINFO
+            ./aur/praxis/*.service
+            ./aur/praxis/*.conf
+            ./aur/praxis/*.env
+            ./aur/praxis/*.install
+          commit_username: depletionmo-de
+          commit_email: davkaplan@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}

@@ -9,17 +9,9 @@ permissions:
 jobs:
   update-aur:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux
-      options: --privileged
 
     steps:
-      - name: Install dependencies
-        run: pacman -Sy --noconfirm git curl openssh
-
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Update AUR files
         run: |
@@ -39,7 +31,6 @@ jobs:
       - name: Commit to praxis repo
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          git config --global --add safe.directory "$PWD"
           git config user.name "David Kaplan"
           git config user.email "davkaplan@gmail.com"
           git add aur/praxis/PKGBUILD aur/praxis/.SRCINFO
@@ -50,32 +41,17 @@ jobs:
             git push
           fi
 
-      - name: Push to AUR
-        env:
-          aur_key: ${{ secrets.AUR_SSH_KEY }}
-          aur_folder: ./aur
-          tag_name: manual
-          username: depletionmo-de
-          email: davkaplan@gmail.com
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-
-          mkdir -p /root/.ssh/
-          printf 'Host *\n  IdentityFile /root/.ssh/aur\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n' > /root/.ssh/config
-          printf '%s\n' "${aur_key}" > /root/.ssh/aur
-          chmod 0700 /root/.ssh/aur
-
-          git config --global user.name "David Kaplan"
-          git config --global user.email "davkaplan@gmail.com"
-
-          git clone ssh://aur@aur.archlinux.org/praxis.git /tmp/aur-push
-          cp aur/praxis/PKGBUILD aur/praxis/.SRCINFO /tmp/aur-push/
-          cd /tmp/aur-push
-          git add -A
-          if git diff --cached --quiet; then
-            echo "AUR already up to date"
-          else
-            git commit -m "Update to v${VERSION}"
-            git push
-          fi
-          echo "Pushed to AUR"
+      - name: Publish to AUR
+        uses: ulises-jeremias/github-actions-aur-publish@v1
+        with:
+          pkgname: praxis
+          pkgbuild: ./aur/praxis/PKGBUILD
+          assets: |
+            ./aur/praxis/.SRCINFO
+            ./aur/praxis/*.service
+            ./aur/praxis/*.conf
+            ./aur/praxis/*.env
+            ./aur/praxis/*.install
+          commit_username: depletionmo-de
+          commit_email: davkaplan@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
