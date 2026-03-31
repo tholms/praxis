@@ -32,6 +32,33 @@ sudo systemctl start rabbitmq-server
 brew services start rabbitmq
 ```
 
+### Arch Linux (AUR)
+
+```bash
+yay -S praxis
+```
+
+Or with `makepkg`:
+
+```bash
+git clone https://aur.archlinux.org/praxis.git
+cd praxis
+makepkg -si
+```
+
+This installs:
+- `/usr/bin/praxis_service`, `/usr/bin/praxis_web`, `/usr/bin/praxis_cli` - binaries
+- `/usr/share/praxis/nodes/praxis_node_linux` - node agent for deployment to targets
+- Systemd system services (runs as dedicated `praxis` user)
+- `/etc/praxis/env` - configuration
+
+After installing:
+
+```bash
+sudo systemctl enable --now rabbitmq
+sudo systemctl enable --now praxis
+```
+
 ### Native Install (Linux/macOS)
 
 ```bash
