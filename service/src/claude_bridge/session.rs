@@ -449,6 +449,29 @@ impl BridgeSession {
                     }
 
                     NodeCommand::Session(SessionCommand::Close) => {
+                        let is_cleanup = req.client_id.is_empty() || req.client_id == "service";
+
+                        if is_cleanup {
+
+                            //
+                            // Operation/chain executor cleanup -- ACK but keep
+                            // the session alive. Bridge lifecycle is owned by the
+                            // transport connection, not by individual operations.
+                            //
+
+                            let response = NodeSignalMessage::CommandResponse(CommandResponse {
+                                command_id: req.command_id,
+                                node_id: self.node_id.clone(),
+                                result: NodeCommandResult::Session(SessionCommandResult::Closed),
+                            });
+                            publish_json(pub_channel, NODE_SIGNAL_QUEUE, &response).await?;
+                            return Ok(true);
+                        }
+
+                        //
+                        // Deliberate user-initiated close -- tear down the node.
+                        //
+
                         let end = json!({
                             "type": "control_request",
                             "request_id": Uuid::new_v4().to_string(),
@@ -463,9 +486,6 @@ impl BridgeSession {
                         });
                         publish_json(pub_channel, NODE_SIGNAL_QUEUE, &response).await?;
 
-                        //
-                        // One session per connection -- tear down the node.
-                        //
                         return Ok(false);
                     }
 
