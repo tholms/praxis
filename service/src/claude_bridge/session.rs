@@ -20,6 +20,8 @@ pub struct BridgeSession {
     node_id: String,
     node_type: String,
     session_id: Option<String>,
+    peer_ip: Option<String>,
+    account_email: Option<String>,
     cwd: Option<String>,
     model: Option<String>,
     claude_version: Option<String>,
@@ -30,11 +32,13 @@ pub struct BridgeSession {
 }
 
 impl BridgeSession {
-    pub fn new(node_type: &str, node_registry: Arc<NodeRegistry>) -> Self {
+    pub fn new(node_type: &str, node_registry: Arc<NodeRegistry>, peer_ip: Option<String>) -> Self {
         Self {
             node_id: Uuid::new_v4().to_string(),
             node_type: node_type.to_string(),
             session_id: Some(Uuid::new_v4().to_string()),
+            peer_ip,
+            account_email: None,
             cwd: None,
             model: None,
             claude_version: None,
@@ -56,7 +60,7 @@ impl BridgeSession {
     }
 
     async fn handshake(
-        &self,
+        &mut self,
         transport: &mut impl Transport,
     ) -> Result<Option<Value>> {
         //
@@ -95,6 +99,7 @@ impl BridgeSession {
                     let v = msg?.ok_or_else(|| anyhow::anyhow!("Transport closed during handshake"))?;
                     match v.get("type").and_then(|t| t.as_str()) {
                         Some("control_response") => {
+                            self.apply_control_response(&v);
                             break;
                         }
                         Some("system") if v.get("subtype").and_then(|s| s.as_str()) == Some("init") => {
@@ -184,7 +189,7 @@ impl BridgeSession {
         let registration = NodeSignalMessage::Registration(NodeRegistration {
             node_id: self.node_id.clone(),
             node_type: self.node_type.clone(),
-            machine_name: self.node_type.clone(),
+            machine_name: self.machine_name(),
             os_details: String::new(),
             capabilities: vec![NodeCapability::Session],
         });
@@ -556,6 +561,24 @@ impl BridgeSession {
         });
         publish_json(pub_channel, NODE_SIGNAL_QUEUE, &update).await?;
         Ok(())
+    }
+
+    fn apply_control_response(&mut self, resp: &Value) {
+        if let Some(email) = resp
+            .pointer("/response/response/account/email")
+            .and_then(|v| v.as_str())
+        {
+            self.account_email = Some(email.to_string());
+        }
+    }
+
+    fn machine_name(&self) -> String {
+        match (&self.peer_ip, &self.account_email) {
+            (Some(ip), Some(email)) => format!("{} ({})", ip, email),
+            (Some(ip), None) => ip.clone(),
+            (None, Some(email)) => email.clone(),
+            (None, None) => self.node_type.clone(),
+        }
     }
 
     fn apply_system_init(&mut self, init: &Value) {

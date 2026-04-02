@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
@@ -112,6 +112,7 @@ struct AppState {
     worker_connected_flag: AtomicBool,
     sse_connected_flag: AtomicBool,
     accepting: AtomicBool,
+    peer_ip: std::sync::Mutex<Option<String>>,
 }
 
 fn now_secs() -> u64 {
@@ -176,7 +177,12 @@ impl AppState {
         self.worker_connected_flag.store(false, Ordering::SeqCst);
         self.sse_connected_flag.store(false, Ordering::SeqCst);
         self.last_activity.store(0, Ordering::Relaxed);
+        *self.peer_ip.lock().unwrap() = None;
         new_rx
+    }
+
+    fn take_peer_ip(&self) -> Option<String> {
+        self.peer_ip.lock().unwrap().take()
     }
 }
 
@@ -223,9 +229,11 @@ async fn handle_get_worker() -> Json<Value> {
 //
 
 async fn handle_put_worker(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Json<Value> {
+    *state.peer_ip.lock().unwrap() = Some(addr.ip().to_string());
     state.touch_activity();
 
     let epoch = body
@@ -477,6 +485,7 @@ async fn run_ccrv2_server(
         worker_connected_flag: AtomicBool::new(false),
         sse_connected_flag: AtomicBool::new(false),
         accepting: AtomicBool::new(true),
+        peer_ip: std::sync::Mutex::new(None),
     });
 
     let app = Router::new()
@@ -504,11 +513,14 @@ async fn run_ccrv2_server(
 
     let cancel_serve = cancel.clone();
     let server_handle = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                cancel_serve.cancelled().await;
-            })
-            .await
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            cancel_serve.cancelled().await;
+        })
+        .await
     });
 
     //
@@ -530,7 +542,8 @@ async fn run_ccrv2_server(
         }
 
         let mut transport = HttpTransport::new(outbound_tx.clone(), inbound_rx, last_activity.clone());
-        let session = BridgeSession::new("claude-ccrv2", node_registry.clone());
+        let peer_ip = state.take_peer_ip();
+        let session = BridgeSession::new("claude-ccrv2", node_registry.clone(), peer_ip);
 
         if let Err(e) = session.run(&mut transport, rabbitmq_url, cancel.clone()).await {
             common::log_error!("CCRv2 bridge session error: {}", e);

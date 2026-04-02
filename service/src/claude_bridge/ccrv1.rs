@@ -109,11 +109,12 @@ impl CcrV1Manager {
                         match result {
                             Ok((stream, peer_addr)) => {
                                 common::log_info!("Claude CCRv1 connection from {}", peer_addr);
+                                let peer_ip = peer_addr.ip().to_string();
                                 let url = rabbitmq_url.clone();
                                 let registry = node_registry.clone();
                                 let cancel_child = cancel.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = handle_ccrv1_connection(stream, &url, registry, cancel_child).await {
+                                    if let Err(e) = handle_ccrv1_connection(stream, peer_ip, &url, registry, cancel_child).await {
                                         common::log_error!("CCRv1 session error: {}", e);
                                     }
                                 });
@@ -145,6 +146,7 @@ impl Default for CcrV1Manager {
 
 async fn handle_ccrv1_connection(
     stream: tokio::net::TcpStream,
+    peer_ip: String,
     rabbitmq_url: &str,
     node_registry: Arc<NodeRegistry>,
     cancel: CancellationToken,
@@ -152,6 +154,6 @@ async fn handle_ccrv1_connection(
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
     let (ws_tx, ws_rx) = ws_stream.split();
     let mut transport = WsTransport::new(ws_tx, ws_rx);
-    let session = BridgeSession::new("claude-ccrv1", node_registry);
+    let session = BridgeSession::new("claude-ccrv1", node_registry, Some(peer_ip));
     session.run(&mut transport, rabbitmq_url, cancel).await
 }
