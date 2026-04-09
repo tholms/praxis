@@ -72,29 +72,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout AUR repo
-        uses: actions/checkout@v4
+      - name: Trigger AUR update
+        uses: actions/github-script@v7
         with:
-          repository: originsec/praxis-aur
-          token: ${{ secrets.AUR_REPO_TOKEN }}
-
-      - name: Update version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          SHA256=$(curl -sL "https://github.com/originsec/praxis/archive/${GITHUB_REF_NAME}.tar.gz" | sha256sum | cut -d' ' -f1)
-
-          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
-          sed -i "0,/^    '[a-f0-9]\{64\}'/{s/^    '[a-f0-9]\{64\}'/    '${SHA256}'/}" PKGBUILD
-
-          sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
-          sed -i "s|source = praxis-.*\.tar\.gz::.*|source = praxis-${VERSION}.tar.gz::https://github.com/originsec/praxis/archive/v${VERSION}.tar.gz|" .SRCINFO
-          sed -i "0,/sha256sums = [a-f0-9]\{64\}/{s/sha256sums = [a-f0-9]\{64\}/sha256sums = ${SHA256}/}" .SRCINFO
-
-      - name: Commit and push
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PKGBUILD .SRCINFO
-          git commit -m "Update to v${VERSION}"
-          git push
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'update-aur.yml',
+              ref: 'main',
+            });
