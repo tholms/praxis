@@ -1,14 +1,10 @@
 use crate::app::{App, Window};
+use crate::ui::theme::{ACCENT, BG, DIM, MUTED, STATUS_DONE, STATUS_FAIL};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-
-const ACCENT: Color = Color::Rgb(100, 180, 100);
-const DIM: Color = Color::Rgb(80, 80, 80);
-const MUTED: Color = Color::Rgb(120, 120, 120);
-const BAR_BG: Color = Color::Rgb(25, 25, 30);
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let sep = Span::styled(" \u{00b7} ", Style::default().fg(DIM));
@@ -41,18 +37,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         active_label("^s settings", app.active_window == Window::Settings),
         sep.clone(),
         Span::styled("^q quit", Style::default().fg(DIM)),
-        if app.active_window == Window::Orchestrator {
-            Span::styled("  ^w save", Style::default().fg(DIM))
-        } else {
-            Span::raw("")
-        },
     ]);
 
     let right = Line::from(vec![
         if app.connected {
-            Span::styled("connected", Style::default().fg(Color::Rgb(80, 160, 80)))
+            Span::styled("connected", Style::default().fg(STATUS_DONE))
         } else {
-            Span::styled("disconnected", Style::default().fg(Color::Rgb(160, 60, 60)))
+            Span::styled("disconnected", Style::default().fg(STATUS_FAIL))
         },
         Span::raw(" "),
     ]);
@@ -60,8 +51,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(right.width() as u16)])
         .split(area);
 
-    let left_bar = Paragraph::new(left).style(Style::default().bg(BAR_BG));
-    let right_bar = Paragraph::new(right).style(Style::default().bg(BAR_BG));
+    let left_bar = Paragraph::new(left).style(Style::default().bg(BG));
+    let right_bar = Paragraph::new(right).style(Style::default().bg(BG));
 
     f.render_widget(left_bar, chunks[0]);
     f.render_widget(right_bar, chunks[1]);

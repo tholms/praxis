@@ -67,6 +67,7 @@ const initialOrchestratorState: OrchestratorState = {
   currentPlan: null,
   isLoading: false,
   streamingContent: '',
+  hadToolCall: false,
   currentToolExecutions: [],
   tokenUsage: null,
   currentPromptId: null,
@@ -211,6 +212,17 @@ interface AppState {
   //
   agentSessionMessages: Record<string, AgentSessionMessage[]>;
   //
+  // Session streaming state for ACP agents.
+  //
+  agentSessionStreaming: Record<string, {
+    content: string;
+    transactionId: string;
+    toolCalls: Array<{ toolName: string; toolId: string; input: string; output?: string; isError?: boolean }>;
+    pendingPermission: { permissionId: string; toolName: string; toolInput: string } | null;
+    agentStatus: string | null;
+    hadToolCall: boolean;
+  }>;
+  //
   // Recently accessed node IDs (most recent first).
   //
   recentlyAccessedNodeIds: string[];
@@ -241,6 +253,7 @@ function createInitialState(): AppState {
     luaAgentScripts: [],
     payloads: [],
     agentSessionMessages: {},
+    agentSessionStreaming: {},
     recentlyAccessedNodeIds: loadRecentNodes(MAX_RECENT_NODES),
   };
 }
@@ -296,6 +309,9 @@ type Action =
   //
   | { type: 'AGENT_SESSION_ADD_MESSAGE'; sessionId: string; message: AgentSessionMessage }
   | { type: 'AGENT_SESSION_CLEAR_MESSAGES'; sessionId: string }
+  | { type: 'AGENT_SESSION_STREAMING_UPDATE'; nodeId: string; transactionId: string; update: import('../api/types').SessionUpdateKind }
+  | { type: 'AGENT_SESSION_STREAMING_COMPLETE'; nodeId: string; transactionId: string }
+  | { type: 'AGENT_SESSION_STREAMING_CLEAR'; nodeId: string }
   //
   // Chain actions.
   //
@@ -457,16 +473,22 @@ function reduceOrchestrator(state: AppState, action: Action): AppState | null {
           }],
           isLoading: true,
           streamingContent: '',
+          hadToolCall: false,
           currentToolExecutions: [],
           currentPromptId: action.promptId,
         },
       };
     case 'ORCHESTRATOR_ADD_CONTENT': {
+      const orch = state.orchestrator;
+      const needsSep = orch.hadToolCall && orch.streamingContent.length > 0
+        && !orch.streamingContent.endsWith('\n\n');
+      const prefix = needsSep ? '\n\n' : '';
       return {
         ...state,
         orchestrator: {
-          ...state.orchestrator,
-          streamingContent: state.orchestrator.streamingContent + action.content,
+          ...orch,
+          streamingContent: orch.streamingContent + prefix + action.content,
+          hadToolCall: false,
         },
       };
     }
@@ -475,6 +497,7 @@ function reduceOrchestrator(state: AppState, action: Action): AppState | null {
         ...state,
         orchestrator: {
           ...state.orchestrator,
+          hadToolCall: true,
           currentToolExecutions: [...state.orchestrator.currentToolExecutions, {
             name: action.name,
             display: 'Executing...',
@@ -735,6 +758,89 @@ function reduceAgentSessions(state: AppState, action: Action): AppState | null {
         ...state,
         agentSessionMessages: rest,
       };
+    }
+    case 'AGENT_SESSION_STREAMING_UPDATE': {
+      const key = action.nodeId;
+      const existing = state.agentSessionStreaming[key] || {
+        content: '',
+        transactionId: action.transactionId,
+        toolCalls: [],
+        pendingPermission: null,
+        agentStatus: null,
+        hadToolCall: false,
+      };
+      const update = action.update;
+
+      if ('TextChunk' in update) {
+        const needsSeparator = existing.hadToolCall
+          && existing.content.length > 0
+          && !existing.content.endsWith('\n\n');
+        const prefix = needsSeparator ? '\n\n' : '';
+        return {
+          ...state,
+          agentSessionStreaming: {
+            ...state.agentSessionStreaming,
+            [key]: { ...existing, content: existing.content + prefix + update.TextChunk.text, hadToolCall: false },
+          },
+        };
+      } else if ('ToolCall' in update) {
+        return {
+          ...state,
+          agentSessionStreaming: {
+            ...state.agentSessionStreaming,
+            [key]: {
+              ...existing,
+              hadToolCall: true,
+              toolCalls: [...existing.toolCalls, {
+                toolName: update.ToolCall.tool_name,
+                toolId: update.ToolCall.tool_id,
+                input: update.ToolCall.input,
+              }],
+            },
+          },
+        };
+      } else if ('ToolResult' in update) {
+        const updatedCalls = existing.toolCalls.map(tc =>
+          tc.toolId === update.ToolResult.tool_id
+            ? { ...tc, output: update.ToolResult.output, isError: update.ToolResult.is_error }
+            : tc
+        );
+        return {
+          ...state,
+          agentSessionStreaming: {
+            ...state.agentSessionStreaming,
+            [key]: { ...existing, toolCalls: updatedCalls },
+          },
+        };
+      } else if ('PermissionRequest' in update) {
+        return {
+          ...state,
+          agentSessionStreaming: {
+            ...state.agentSessionStreaming,
+            [key]: {
+              ...existing,
+              pendingPermission: {
+                permissionId: update.PermissionRequest.permission_id,
+                toolName: update.PermissionRequest.tool_name,
+                toolInput: update.PermissionRequest.tool_input,
+              },
+            },
+          },
+        };
+      } else if ('AgentStatus' in update) {
+        return {
+          ...state,
+          agentSessionStreaming: {
+            ...state.agentSessionStreaming,
+            [key]: { ...existing, agentStatus: update.AgentStatus.status },
+          },
+        };
+      }
+      return state;
+    }
+    case 'AGENT_SESSION_STREAMING_CLEAR': {
+      const { [action.nodeId]: _, ...rest } = state.agentSessionStreaming;
+      return { ...state, agentSessionStreaming: rest };
     }
     default:
       return null;
@@ -1150,6 +1256,7 @@ interface AppContextValue {
   //
   addAgentSessionMessage: (sessionId: string, message: AgentSessionMessage) => void;
   clearAgentSessionMessages: (sessionId: string) => void;
+  clearAgentSessionStreaming: (nodeId: string) => void;
   //
   // Chain operations.
   //
@@ -1536,6 +1643,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
         case 'agent_chat_error':
           dispatch({ type: 'AGENT_CHAT_ERROR', message: message.message });
           break;
+
+        //
+        // Session streaming updates (ACP agent sessions).
+        //
+        case 'session_update':
+          dispatch({
+            type: 'AGENT_SESSION_STREAMING_UPDATE',
+            nodeId: message.update.node_id,
+            transactionId: message.update.transaction_id,
+            update: message.update.update,
+          });
+          break;
       }
     };
 
@@ -1791,6 +1910,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const clearAgentSessionMessages = useCallback((sessionId: string) => {
     dispatch({ type: 'AGENT_SESSION_CLEAR_MESSAGES', sessionId });
+  }, []);
+
+  const clearAgentSessionStreaming = useCallback((nodeId: string) => {
+    dispatch({ type: 'AGENT_SESSION_STREAMING_CLEAR', nodeId });
   }, []);
 
   //
@@ -2060,6 +2183,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     clearInterceptRuleError,
     addAgentSessionMessage,
     clearAgentSessionMessages,
+    clearAgentSessionStreaming,
     //
     // Chain operations.
     //
