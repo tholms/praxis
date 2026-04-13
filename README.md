@@ -11,7 +11,7 @@ We're hoping to enrich our understanding of what's possible when you have legiti
 Built by [Origin](https://originhq.com) for security research and red team operations.
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Praxis demo" width="800">
+  <img src="https://github.com/originsec/praxis/raw/main/assets/demo.mp4" width="800">
 </p>
 
 ## Features
