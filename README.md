@@ -10,9 +10,7 @@ We're hoping to enrich our understanding of what's possible when you have legiti
 
 Built by [Origin](https://originhq.com) for security research and red team operations.
 
-<p align="center">
-  <img src="https://github.com/originsec/praxis/raw/main/assets/demo.mp4" width="800">
-</p>
+<video src="https://github.com/originsec/praxis/raw/main/assets/demo.mp4" autoplay loop muted playsinline></video>
 
 ## Features
 
