@@ -10,6 +10,10 @@ We're hoping to enrich our understanding of what's possible when you have legiti
 
 Built by [Origin](https://originhq.com) for security research and red team operations.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Praxis demo" width="800">
+</p>
+
 ## Features
 
 **Discover** and fingerprint agents on endpoints. **Recon** their tools, configs, and session histories. **Intercept** agent-to-LLM traffic with a built-in MITM proxy. Open **interactive sessions** to dialog with agents, or define **semantic operations** that chain natural language tasks with automatic triggers. Includes a **toolkit** of built-in offensive operations, **terminal access** to remote nodes, and an experimental **orchestrator** for coordinating across agents.
