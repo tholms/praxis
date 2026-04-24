@@ -2,9 +2,11 @@
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::Utc;
 use common::{
     node_semantic_queue_name, publish_json, publish_json_exchange, ClientBroadcastMessage,
-    ClientDirectMessage, NodeSignalMessage, CLIENT_BROADCAST_EXCHANGE,
+    ClientDirectMessage, NodeSignalMessage, TrafficMatch, TrafficMatchWithDetails,
+    CLIENT_BROADCAST_EXCHANGE,
 };
 
 use crate::config::service_config::APPLICATION_LOGS_ENABLED;
@@ -96,12 +98,6 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
         }
 
         NodeSignalMessage::CommandResponse(response) => {
-            //
-            // Forward to response_tracker for semantic operations.
-            //
-            ctx.response_tracker
-                .complete(&response.command_id, response.clone());
-
             if let Some(pending) = ctx.pending_commands.remove(&response.command_id).await {
                 //
                 // Track whether we need to broadcast state to all clients
@@ -131,27 +127,6 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
                     }
                 }
 
-                //
-                // Update session state if relevant.
-                //
-                if let common::NodeCommandResult::Session(ref result) = response.result {
-                    match result {
-                        common::SessionCommandResult::Created { session_id } => {
-                            ctx.node_registry
-                                .set_session_id(&response.node_id, Some(session_id.clone()))
-                                .await;
-                            should_broadcast_state = true;
-                        }
-                        common::SessionCommandResult::Closed => {
-                            ctx.node_registry
-                                .set_session_id(&response.node_id, None)
-                                .await;
-                            should_broadcast_state = true;
-                        }
-                        _ => {}
-                    }
-                }
-
                 let client_message = ClientDirectMessage::CommandResponse(response.clone());
                 if let Err(e) = send_to_client(
                     &ctx.client_publish_channel,
@@ -169,22 +144,6 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
                     "Forwarded command response {} to client {}",
                     response.command_id, pending.client_id
                 );
-
-                //
-                // Check if this is a AgentChat-related command.
-                //
-                if let Err(e) = ctx
-                    .agent_chat_manager
-                    .handle_command_response(
-                        &pending.client_id,
-                        &response.command_id,
-                        &response.node_id,
-                        &response.result,
-                    )
-                    .await
-                {
-                    common::log_warn!("AgentChat command response handling failed: {}", e);
-                }
 
                 if should_broadcast_state {
                     if let Err(e) = broadcast_state_to_clients(
@@ -231,8 +190,8 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
         NodeSignalMessage::SemanticParserRequest { node_id, request } => {
             common::log_info!(
                 "Received semantic parser request {} from node {}",
-                &request.request_id[..8.min(request.request_id.len())],
-                &node_id[..8.min(node_id.len())]
+                common::short_id(&request.request_id),
+                common::short_id(&node_id)
             );
 
             //
@@ -259,10 +218,10 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
             });
         }
 
-        NodeSignalMessage::InterceptedTraffic(entry) => {
+        NodeSignalMessage::InterceptedTraffic(mut entry) => {
             common::log_info!(
                 "Received intercepted traffic: node={} agent={} {} {} {} (status={})",
-                &entry.node_id[..8.min(entry.node_id.len())],
+                common::short_id(&entry.node_id),
                 entry.agent_short_name,
                 entry.direction,
                 entry.method.as_deref().unwrap_or("-"),
@@ -279,6 +238,13 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
             match ctx.database.insert_traffic(&entry).await {
                 Ok(traffic_id) => {
                     common::log_info!("Stored traffic entry id={} for {}", traffic_id, entry.url);
+                    entry.id = Some(traffic_id);
+
+                    //
+                    // Push the newly-stored entry onto the live broadcaster.
+                    // The broadcaster strips bodies before publishing.
+                    //
+                    ctx.intercept_broadcaster.push_entry(entry.clone());
 
                     //
                     // Check against rules and insert matches.
@@ -313,18 +279,38 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
                             }
 
                             //
-                            // Process summarization for matches with
-                            // summarization_prompt.
+                            // Broadcast and process summarization for each match.
                             //
                             for (match_id, rule) in matches {
+                                let match_info = TrafficMatch {
+                                    id: match_id,
+                                    traffic_id,
+                                    rule_id: rule.id,
+                                    rule_name: rule.name.clone(),
+                                    matched_at: Utc::now(),
+                                    summary: None,
+                                };
+                                ctx.intercept_broadcaster.push_match(
+                                    TrafficMatchWithDetails {
+                                        match_info: match_info.clone(),
+                                        traffic: entry.clone(),
+                                    },
+                                );
+
                                 if let Some(ref prompt) = rule.summarization_prompt {
                                     let db = ctx.database.clone();
                                     let cfg = ctx.service_config.clone();
                                     let entry_clone = entry.clone();
                                     let prompt_clone = prompt.clone();
+                                    let broadcaster = ctx.intercept_broadcaster.clone();
+                                    let rule_id = rule.id;
+                                    let rule_name = rule.name.clone();
 
                                     //
-                                    // Spawn async task for summarization.
+                                    // Spawn async task for summarization. On
+                                    // success, both persist the summary and
+                                    // re-broadcast the match so live viewers
+                                    // see the updated summary without refresh.
                                     //
                                     tokio::spawn(async move {
                                         let result = semantic_helpers::summarize_traffic(
@@ -343,6 +329,17 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
                                                         e
                                                     );
                                                 }
+                                                broadcaster.push_match(TrafficMatchWithDetails {
+                                                    match_info: TrafficMatch {
+                                                        id: match_id,
+                                                        traffic_id,
+                                                        rule_id,
+                                                        rule_name,
+                                                        matched_at: match_info.matched_at,
+                                                        summary: Some(summary),
+                                                    },
+                                                    traffic: entry_clone,
+                                                });
                                             }
                                         } else if let Some(err) = result.error {
                                             common::log_warn!(
@@ -373,7 +370,7 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
         NodeSignalMessage::InterceptStatusUpdate(status) => {
             common::log_info!(
                 "Received intercept status update from node {}: enabled={}",
-                &status.node_id[..8.min(status.node_id.len())],
+                common::short_id(&status.node_id),
                 status.enabled
             );
             ctx.node_registry
@@ -387,48 +384,16 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
             let _ = publish_json_exchange(&ctx.broadcast_channel, CLIENT_BROADCAST_EXCHANGE, &message).await;
         }
 
-        NodeSignalMessage::ReconResultUpdate {
-            node_id,
-            agent_short_name,
-            recon_result,
-            is_semantic,
-        } => {
-            common::log_info!(
-                "Received recon result from node {} agent {}: {} tools, {} configs, {} sessions",
-                &node_id[..8.min(node_id.len())],
-                agent_short_name,
-                recon_result.tools.mcp_servers.len()
-                    + recon_result.tools.skills.len()
-                    + recon_result.tools.internal_tools.len(),
-                recon_result.config.len(),
-                recon_result.sessions.len()
-            );
-
-            //
-            // Store in database.
-            //
+        NodeSignalMessage::Acp { node_id, client_id, json_rpc } => {
             if let Err(e) = ctx
-                .database
-                .upsert_recon_result(&node_id, &agent_short_name, &recon_result, is_semantic)
+                .acp_node_proxy
+                .forward_to_client(&ctx.client_publish_channel, &node_id, &client_id, &json_rpc)
                 .await
             {
-                common::log_error!("Failed to store recon result: {}", e);
-            }
-        }
-
-        NodeSignalMessage::SessionUpdate(update) => {
-            common::log_info!(
-                "Forwarding session update to client {}",
-                update.client_id.get(..8).unwrap_or(&update.client_id)
-            );
-            let client_id = update.client_id.clone();
-            let client_message = ClientDirectMessage::SessionUpdate(update);
-            if let Err(e) =
-                send_to_client(&ctx.client_publish_channel, &client_id, client_message).await
-            {
                 common::log_error!(
-                    "Failed to send session update to client {}: {}",
-                    client_id, e
+                    "Failed to forward node ACP frame to client {}: {}",
+                    common::short_id(&client_id),
+                    e
                 );
             }
         }

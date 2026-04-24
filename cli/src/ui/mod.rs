@@ -1,4 +1,6 @@
 pub mod common;
+pub mod intercept;
+pub mod log_query;
 pub mod nodes;
 pub mod operations;
 pub mod orchestrator;
@@ -43,11 +45,15 @@ pub fn render(f: &mut Frame, app: &App) {
             &app.operations.operations,
             &app.operations.chain_executions,
         ),
+        Window::Intercept => intercept::render(f, chunks[1], app),
+        Window::LogQuery => log_query::render(f, chunks[1], &app.log_query),
         Window::Operations => {
             if let Some(ref form) = app.new_op_form {
                 popup::render_new_op_form(f, chunks[1], form);
             } else if let Some(ref opts) = app.run_options {
                 popup::render_run_options(f, chunks[1], opts);
+            } else if let Some(ref tform) = app.trigger_form {
+                popup::render_trigger_form(f, chunks[1], tform);
             } else {
                 operations::render(f, chunks[1], &app.operations);
             }
@@ -65,6 +71,9 @@ pub fn render(f: &mut Frame, app: &App) {
     }
     if let Some(ref confirm) = app.confirm {
         popup::render_confirm(f, confirm);
+    }
+    if let Some(ref picker) = app.intercept_method_picker {
+        popup::render_intercept_method_picker(f, picker);
     }
 }
 

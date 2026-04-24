@@ -62,13 +62,8 @@ pub enum NodeSignalMessage {
     // Intercept status update
     InterceptStatusUpdate(InterceptStatus),
 
-    // Recon result update
-    ReconResultUpdate {
-        node_id: String,
-        agent_short_name: String,
-        recon_result: ReconResult,
-        is_semantic: bool,
-    },
+    // Outbound ACP frame (response or session/update notification)
+    Acp { node_id: String, client_id: String, json_rpc: String },
 }
 ```
 
@@ -86,6 +81,9 @@ pub enum NodeDirectMessage {
 
     // Semantic parser response
     SemanticParserResponse(SemanticParserResponse),
+
+    // Inbound ACP frame (request or notification destined for the node)
+    Acp(AcpFrame),
 }
 ```
 
@@ -267,16 +265,71 @@ pub enum ClientBroadcastMessage {
 }
 ```
 
-## Node Commands
+## Node Protocol
 
-### NodeCommand
+Agent and session interaction with the node uses **ACP (Agent Client
+Protocol)** over RabbitMQ. Everything else uses the `NodeCommand` envelope.
 
-Commands sent to nodes for execution.
+### ACP transport envelope
+
+```rust
+pub struct AcpFrame {
+    pub client_id: String,   // originating/receiving external client
+    pub json_rpc: String,    // raw JSON-RPC 2.0 frame
+}
+```
+
+`NodeDirectMessage::Acp(AcpFrame)` carries inbound frames (service → node).
+`NodeSignalMessage::Acp { node_id, client_id, json_rpc }` carries outbound
+frames (node → service → originating client).
+
+The service proxies node-bound ACP frames: an external client's frame is
+forwarded to the right node when `_meta.praxis.nodeId` is set on
+`session/new`, and subsequent frames for the returned `session_id` are
+routed automatically. Inside the service, orchestrator-originated frames
+use a `svc_*` pseudo-client-id so responses are consumed in-process by
+`AcpNodeProxy::request` instead of being fanned out to a RabbitMQ client
+queue.
+
+### Connector selection
+
+`session/new` requires a `_meta.praxis.connector` field naming the local
+agent connector to use (e.g. `"claude-code"`, `"codex"`). Discover the
+connector catalog via `InitializeResponse._meta.connectors`:
+
+```json
+{
+  "extensions": { "_praxis/recon": { "version": 1 } },
+  "connectors": [
+    { "shortName": "claude-code", "name": "Claude Code" },
+    { "shortName": "codex",       "name": "OpenAI Codex" }
+  ],
+  "nodeId": "..."
+}
+```
+
+### Extension methods
+
+All extensions are advertised under `InitializeResponse._meta.extensions`.
+
+- `_praxis/recon` — agent-scoped reconnaissance. Params
+  `{ "agent_short_name": string, "is_semantic": bool }`; result is a
+  serialized `ReconResult`. Replaces the legacy `NodeCommand::Agent(Recon)`.
+- `_praxis/read_file` — read a file on the node. Params
+  `{ "agent_short_name": string, "path": string }`.
+- `_praxis/write_file` — write a file on the node. Params
+  `{ "agent_short_name": string, "path": string, "contents": string }`.
+- `_praxis/grep_files` — regex search across one or more files. Params
+  `{ "agent_short_name": string, "path": string, "pattern": string }`.
+- `_praxis/write_session_content` — write agent-session content through
+  the connector's `write_session_content` hook (so agents with virtual
+  session stores can intercept the write). Params
+  `{ "agent_short_name": string, "session_file": string, "contents": string }`.
+
+### NodeCommand (non-agent concerns)
 
 ```rust
 pub enum NodeCommand {
-    Agent(AgentCommand),
-    Session(SessionCommand),
     Intercept(InterceptCommand),
     Terminal(TerminalCommand),
     Config(ConfigCommand),
@@ -284,41 +337,10 @@ pub enum NodeCommand {
 }
 ```
 
-### AgentCommand
-
-```rust
-pub enum AgentCommand {
-    Update,                                    // Request info update
-    Select { short_name: String },             // Select an agent
-    Recon,                                     // Static reconnaissance
-    ReconSemantic,                             // Semantic reconnaissance
-    ReadFile { file_type, path, line_start, line_end }, // Read file content
-    WriteFile { file_type, path, contents },            // Write file content
-    GrepFiles { file_type, paths, pattern },             // Search files with regex (batch, glob support)
-}
-```
-
-`file_type` is either `Config` or `Session`.
-
-`ReadFile` uses 1-based inclusive line bounds (`line_start` and `line_end`).
-If no bounds are provided, the entire file is returned.
-
-`GrepFiles` accepts multiple paths (including glob patterns like `/etc/*.conf`)
-and returns per-file results with 1-based line numbers in a single round-trip.
-If no lines match for a file, it returns an entry with an empty `matches` list.
-
-`WriteFile` is only allowed for `file_type=Config`. Session writes are rejected.
-
-### SessionCommand
-
-```rust
-pub enum SessionCommand {
-    Create { context: SessionContext },        // Create session
-    Close,                                     // Close session
-    Prompt { text, transaction_id },           // Send prompt
-    CancelTransaction { transaction_id },      // Cancel pending
-}
-```
+Agent and session traffic no longer flows through `NodeCommand`; the
+legacy `Agent` and `Session` variants were removed alongside the ACP
+migration. `CommandRequest` / `CommandResponse` still wrap `NodeCommand`
+for intercept, terminal, config, and registry traffic.
 
 ### InterceptCommand
 

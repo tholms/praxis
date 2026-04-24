@@ -670,11 +670,11 @@ impl RabbitMqClient {
     }
 
     //
-    // Hunting methods.
+    // LogQuery methods.
     //
 
-    pub async fn hunting_query(&self, query: String) -> Result<()> {
-        let message = ClientSignalMessage::HuntingQuery {
+    pub async fn log_query(&self, query: String) -> Result<()> {
+        let message = ClientSignalMessage::LogQuery {
             client_id: self.state.client_id.clone(),
             query,
         };
@@ -824,7 +824,7 @@ impl RabbitMqClient {
         //
         self.channel
             .queue_declare(
-                &client_queue,
+                client_queue.as_str().into(),
                 QueueDeclareOptions::default(),
                 FieldTable::default(),
             )
@@ -836,7 +836,7 @@ impl RabbitMqClient {
         //
         self.channel
             .exchange_declare(
-                CLIENT_BROADCAST_EXCHANGE,
+                CLIENT_BROADCAST_EXCHANGE.into(),
                 ExchangeKind::Fanout,
                 ExchangeDeclareOptions::default(),
                 FieldTable::default(),
@@ -845,7 +845,7 @@ impl RabbitMqClient {
 
         let broadcast_queue = self.channel
             .queue_declare(
-                "",
+                "".into(),
                 QueueDeclareOptions {
                     exclusive: true,
                     auto_delete: true,
@@ -857,9 +857,9 @@ impl RabbitMqClient {
 
         self.channel
             .queue_bind(
-                broadcast_queue.name().as_str(),
-                CLIENT_BROADCAST_EXCHANGE,
-                "",
+                broadcast_queue.name().as_str().into(),
+                CLIENT_BROADCAST_EXCHANGE.into(),
+                "".into(),
                 QueueBindOptions::default(),
                 FieldTable::default(),
             )
@@ -904,8 +904,8 @@ impl RabbitMqClient {
     async fn consume_direct_messages(&self, queue_name: &str) -> Result<()> {
         let mut consumer = self.channel
             .basic_consume(
-                queue_name,
-                "web_direct_consumer",
+                queue_name.into(),
+                "web_direct_consumer".into(),
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
             )
@@ -936,8 +936,10 @@ impl RabbitMqClient {
     async fn consume_broadcast_messages(&self, queue_name: &str) -> Result<()> {
         let mut consumer = self.channel
             .basic_consume(
-                queue_name,
-                &format!("web_broadcast_consumer_{}", &self.state.client_id[..8]),
+                queue_name.into(),
+                format!("web_broadcast_consumer_{}", &self.state.client_id[..8])
+                    .as_str()
+                    .into(),
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
             )
@@ -1213,13 +1215,13 @@ impl RabbitMqClient {
             }
 
             //
-            // Hunting responses.
+            // LogQuery responses.
             //
-            ClientDirectMessage::HuntingQueryResponse { columns, rows, total_count } => {
-                self.state.broadcast(ServerMessage::HuntingQueryResponse { columns, rows, total_count });
+            ClientDirectMessage::LogQueryResponse { columns, rows, total_count } => {
+                self.state.broadcast(ServerMessage::LogQueryResponse { columns, rows, total_count });
             }
-            ClientDirectMessage::HuntingQueryError { message } => {
-                self.state.broadcast(ServerMessage::HuntingQueryError { message });
+            ClientDirectMessage::LogQueryError { message } => {
+                self.state.broadcast(ServerMessage::LogQueryError { message });
             }
 
             //
@@ -1278,6 +1280,12 @@ impl RabbitMqClient {
             ClientDirectMessage::SessionUpdate(update) => {
                 self.state.broadcast(ServerMessage::SessionUpdate { update });
             }
+
+            //
+            // Cli TUI fetches full entry bodies via TrafficGetRequest; the
+            // web UI does not use this path today.
+            //
+            ClientDirectMessage::TrafficGetResponse { .. } => {}
         }
 
         Ok(())
@@ -1313,6 +1321,13 @@ impl RabbitMqClient {
                 common::logging::set_event_log_enabled(enabled);
                 common::log_info!("Event logging {}", if enabled { "enabled" } else { "disabled" });
             }
+            //
+            // Live intercept batches are consumed by the cli TUI. The web
+            // frontend uses the existing request/response traffic API and
+            // does not render these batches today, so drop them here.
+            //
+            ClientBroadcastMessage::InterceptedTrafficBatch { .. } => {}
+            ClientBroadcastMessage::TrafficMatchBatch { .. } => {}
         }
 
         Ok(())

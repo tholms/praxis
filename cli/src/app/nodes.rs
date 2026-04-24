@@ -1,6 +1,78 @@
 use super::*;
 
 impl App {
+    //
+    // Pull the session/list for every connected node and funnel the
+    // results back to the main loop as NodeSessionsRefreshed. Entries
+    // whose server session_id isn't already tracked locally are merged
+    // into `nodes.sessions` so existing (restart-persistent) sessions
+    // show up in the overlay.
+    //
+
+    pub(crate) fn refresh_node_sessions(&self) {
+        let nodes: Vec<String> = self.nodes.nodes.iter().map(|n| n.node_id.clone()).collect();
+        if nodes.is_empty() {
+            return;
+        }
+        let tracked: std::collections::HashSet<String> = self
+            .nodes
+            .sessions
+            .values()
+            .filter_map(|s| s.session_id.clone())
+            .collect();
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let Some(tx) = tx else { return };
+            let mut entries: Vec<crate::event::NodeSessionEntry> = Vec::new();
+
+            for node_id in nodes {
+                let value = match client
+                    .acp_request(&node_id, "session/list", serde_json::json!({}))
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(sessions) = value.get("sessions").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                for s in sessions {
+                    let Some(sid) = s.get("sessionId").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if tracked.contains(sid) {
+                        continue;
+                    }
+                    let agent = s
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if agent.is_empty() {
+                        continue;
+                    }
+                    let cwd = s
+                        .get("cwd")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| s != ".");
+                    entries.push(crate::event::NodeSessionEntry {
+                        node_id: node_id.clone(),
+                        agent_short_name: agent,
+                        session_id: sid.to_string(),
+                        cwd,
+                    });
+                }
+            }
+
+            if !entries.is_empty() {
+                let _ = tx.send(AppEvent::NodeSessionsRefreshed { entries });
+            }
+        });
+    }
+
     pub(crate) async fn handle_nodes_key(&mut self, key: KeyEvent) {
         if self.nodes.terminal.is_some() {
             self.handle_terminal_key(key).await;
@@ -12,8 +84,26 @@ impl App {
             return;
         }
 
-        if self.nodes.session.is_some() {
+        //
+        // Sessions list overlay takes precedence over everything else.
+        //
+
+        if self.nodes.sessions_list_open {
+            self.handle_sessions_list_key(key).await;
+            return;
+        }
+
+        if self.nodes.active_session().is_some() {
             self.handle_session_key(key);
+            return;
+        }
+
+        //
+        // Ctrl+W in the nodes browse view toggles the sessions list.
+        //
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
+            self.toggle_sessions_list();
             return;
         }
 
@@ -66,6 +156,14 @@ impl App {
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.confirm_reset_node();
             }
+            KeyCode::Char('i') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                //
+                // `i` while focused in the Nodes window (not in detail
+                // pane) toggles intercept for the selected node. The
+                // existing ^i global shortcut still opens the window.
+                //
+                self.toggle_intercept_for_selected_node().await;
+            }
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(node) = self.nodes.nodes.get(self.nodes.selected) {
                     if node.capabilities.is_empty()
@@ -78,6 +176,63 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    //
+    // Toggle intercept for the currently-selected node from the Nodes
+    // window. Fires the same ConfirmAction as the old ^i handler in the
+    // intercept window did, but sourced from the selected node row
+    // rather than the selected traffic entry.
+    //
+    pub(crate) async fn toggle_intercept_for_selected_node(&mut self) {
+        let Some(node) = self.nodes.nodes.get(self.nodes.selected) else {
+            return;
+        };
+        //
+        // Only allow toggling intercept on nodes that report the
+        // Interception capability. Empty capabilities list is treated as
+        // "supports everything" for backward-compat.
+        //
+        if !node.capabilities.is_empty()
+            && !node
+                .capabilities
+                .contains(&common::NodeCapability::Interception)
+        {
+            return;
+        }
+        let node_id = node.node_id.clone();
+        let machine = node.machine_name.clone();
+        let os_lower = node.os_details.to_lowercase();
+        let currently_on = self
+            .intercept
+            .intercept_statuses
+            .get(&node_id)
+            .map(|s| s.enabled)
+            .unwrap_or(node.intercept_active);
+
+        if currently_on {
+            //
+            // Disable path just needs a confirm prompt.
+            //
+            self.confirm = Some(ConfirmAction {
+                message: format!("Disable interception on {}?", machine),
+                action: ConfirmKind::ToggleIntercept {
+                    node_id,
+                    enable: false,
+                },
+            });
+        } else {
+            //
+            // Enable path opens the method picker — mirrors the web UI.
+            //
+            self.intercept_method_picker = Some(InterceptMethodPicker {
+                node_id,
+                machine_name: machine,
+                is_windows: os_lower.contains("windows"),
+                is_linux: os_lower.contains("linux"),
+                selected: 0,
+            });
         }
     }
 
@@ -127,28 +282,12 @@ impl App {
 
         tokio::spawn(async move {
             let Some(tx) = tx else { return };
-            let result = client
-                .send_command(
-                    &node_id,
-                    NodeCommand::Terminal(common::TerminalCommand::Create),
-                )
-                .await;
-
-            match result {
-                Ok(resp) => {
-                    if let NodeCommandResult::Terminal(common::TerminalCommandResult::Created {
+            match client.create_terminal(&node_id).await {
+                Ok(terminal_id) => {
+                    let _ = tx.send(AppEvent::TerminalCreated {
+                        node_id,
                         terminal_id,
-                    }) = resp.result
-                    {
-                        let _ = tx.send(AppEvent::TerminalCreated {
-                            node_id,
-                            terminal_id,
-                        });
-                    } else {
-                        let _ = tx.send(AppEvent::TerminalCreateFailed(
-                            "Failed to open terminal: unexpected response".to_string(),
-                        ));
-                    }
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::TerminalCreateFailed(format!(
@@ -235,24 +374,150 @@ impl App {
         }
     }
 
-    pub(crate) fn close_session(&mut self) {
-        if let Some(ref session) = self.nodes.session {
-            if session.session_id.is_some() {
-                let client = self.client.clone();
-                let node_id = session.node_id.clone();
-                tokio::spawn(async move {
-                    use common::SessionCommand;
+    //
+    // Pause the active session: hide the chat view but keep the session
+    // alive on the node and its state preserved locally. The session
+    // stays in self.nodes.sessions and can be resumed from the list.
+    //
+
+    pub(crate) fn pause_active_session(&mut self) {
+        self.nodes.active_session_id = None;
+    }
+
+    //
+    // Foreground a session by local_id. If unknown, no-op.
+    //
+
+    pub(crate) fn resume_session(&mut self, local_id: &str) {
+        if self.nodes.sessions.contains_key(local_id) {
+            self.nodes.active_session_id = Some(local_id.to_string());
+            self.nodes.sessions_list_open = false;
+        }
+    }
+
+    //
+    // Discard a session by local_id: fire session/cancel if a prompt is
+    // in-flight, then session/close, then remove from state. If it is the
+    // currently foregrounded session, also clear active_session_id.
+    //
+
+    pub(crate) fn discard_session(&mut self, local_id: &str) {
+        let Some(session) = self.nodes.sessions.remove(local_id) else {
+            return;
+        };
+        if self.nodes.active_session_id.as_deref() == Some(local_id) {
+            self.nodes.active_session_id = None;
+        }
+        if let Some(session_id) = session.session_id.clone() {
+            let client = self.client.clone();
+            let node_id = session.node_id.clone();
+            let in_flight = session.is_waiting;
+            tokio::spawn(async move {
+                if in_flight {
                     let _ = client
-                        .send_command(&node_id, NodeCommand::Session(SessionCommand::Close))
+                        .acp_notification(
+                            &node_id,
+                            "session/cancel",
+                            serde_json::json!({ "sessionId": session_id }),
+                        )
                         .await;
-                });
+                }
+                let _ = client
+                    .acp_request(&node_id, "session/close", serde_json::json!({
+                        "sessionId": session_id,
+                    }))
+                    .await;
+            });
+        }
+
+        //
+        // Clamp the list selection.
+        //
+
+        let len = self.nodes.sessions.len();
+        if len == 0 {
+            self.nodes.sessions_list_selected = 0;
+            self.nodes.sessions_list_open = false;
+        } else if self.nodes.sessions_list_selected >= len {
+            self.nodes.sessions_list_selected = len - 1;
+        }
+    }
+
+    //
+    // Close the currently-active session (the "existing close key" path
+    // from inside the chat view — behaves like today: sends session/close
+    // and removes the session).
+    //
+
+    pub(crate) fn close_active_session(&mut self) {
+        if let Some(id) = self.nodes.active_session_id.clone() {
+            self.discard_session(&id);
+        }
+    }
+
+    pub(crate) fn toggle_sessions_list(&mut self) {
+        self.nodes.sessions_list_open = !self.nodes.sessions_list_open;
+        if self.nodes.sessions_list_open {
+            //
+            // Clamp on open so we don't index past the end after a
+            // discard that happened with the list closed.
+            //
+            let len = self.nodes.sessions.len();
+            if len == 0 {
+                self.nodes.sessions_list_selected = 0;
+            } else if self.nodes.sessions_list_selected >= len {
+                self.nodes.sessions_list_selected = len - 1;
             }
         }
-        self.nodes.session = None;
+    }
+
+    pub(crate) async fn handle_sessions_list_key(&mut self, key: KeyEvent) {
+        let count = self.nodes.sessions.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.nodes.sessions_list_open = false;
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.nodes.sessions_list_open = false;
+            }
+            KeyCode::Up => {
+                if self.nodes.sessions_list_selected > 0 {
+                    self.nodes.sessions_list_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.nodes.sessions_list_selected + 1 < count {
+                    self.nodes.sessions_list_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(id) = self.selected_list_session_id() {
+                    self.resume_session(&id);
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let Some(id) = self.selected_list_session_id() {
+                    self.discard_session(&id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    //
+    // Return the local_id of the session currently selected in the
+    // sessions list overlay (in newest-first order).
+    //
+
+    pub(crate) fn selected_list_session_id(&self) -> Option<String> {
+        self.nodes
+            .sessions_sorted()
+            .get(self.nodes.sessions_list_selected)
+            .map(|s| s.local_id.clone())
     }
 
     pub(crate) fn send_session_message(&mut self) {
-        let Some(ref mut session) = self.nodes.session else {
+        let Some(session) = self.nodes.active_session_mut() else {
             return;
         };
         let input = session.input.trim().to_string();
@@ -272,57 +537,67 @@ impl App {
         session.active_transaction_id = Some(uuid::Uuid::new_v4().to_string());
         session.scroll_offset = 0;
         session.streaming_content.clear();
+        session.revealed_chars = 0;
         session.had_tool_call = false;
         session.tool_calls.clear();
         session.agent_status = None;
         session.pending_permission = None;
+        session.last_activity_at = std::time::Instant::now();
 
         let node_id = session.node_id.clone();
         let transaction_id = session.active_transaction_id.clone().unwrap_or_default();
+        let session_id = session.session_id.clone().unwrap_or_default();
+        let local_id = session.local_id.clone();
         let client = self.client.clone();
         let tx = self.event_tx.clone();
 
         tokio::spawn(async move {
             use crate::event::{AppEvent, SessionResult};
-            use common::SessionCommand;
 
             let Some(tx) = tx else { return };
-            match client
-                .send_command(
+            let result = client
+                .acp_request_collecting_text(
                     &node_id,
-                    NodeCommand::Session(SessionCommand::Prompt {
-                        text: input,
-                        transaction_id: transaction_id.clone(),
+                    "session/prompt",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "prompt": [{ "type": "text", "text": input }],
                     }),
                 )
-                .await
-            {
-                Ok(resp) => match resp.result {
-                    NodeCommandResult::Session(common::SessionCommandResult::PromptResponse {
-                        transaction_id,
-                        response,
-                    }) => {
-                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Response {
+                .await;
+
+            match result {
+                Ok((value, text)) => {
+                    //
+                    // The node returns { stopReason } where StopReason is
+                    // "cancelled" or "end_turn". Treat cancellation as a
+                    // cancel event so the UI resets, otherwise report the
+                    // collected text as the agent's reply.
+                    //
+
+                    let stop = value
+                        .get("stopReason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("end_turn");
+
+                    if stop == "cancelled" {
+                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Cancelled {
+                            session_local_id: local_id,
                             transaction_id,
-                            text: response,
+                        }));
+                    } else {
+                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Response {
+                            session_local_id: local_id,
+                            transaction_id,
+                            text,
                         }));
                     }
-                    NodeCommandResult::Session(
-                        common::SessionCommandResult::TransactionCancelled { transaction_id },
-                    ) => {
-                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Cancelled(
-                            transaction_id,
-                        )));
-                    }
-                    NodeCommandResult::Error { message } => {
-                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Error(message)));
-                    }
-                    _ => {}
-                },
+                }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::SessionResponse(SessionResult::Error(
-                        e.to_string(),
-                    )));
+                    let _ = tx.send(AppEvent::SessionResponse(SessionResult::Error {
+                        session_local_id: local_id,
+                        message: e.to_string(),
+                    }));
                 }
             }
         });
@@ -419,12 +694,17 @@ impl App {
         let node_id = opts.node_id.clone();
         let agent = opts.agent_name.clone();
         let yolo = opts.yolo;
+        let local_id = uuid::Uuid::new_v4().to_string();
+        let now = std::time::Instant::now();
 
-        self.nodes.session = Some(SessionChat {
+        self.nodes.sessions.insert(local_id.clone(), SessionChat {
+            local_id: local_id.clone(),
             node_id: node_id.clone(),
             agent_name: agent.clone(),
             session_id: None,
             active_transaction_id: None,
+            created_at: now,
+            last_activity_at: now,
             messages: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
@@ -436,18 +716,19 @@ impl App {
             yolo,
             working_dir: working_dir.clone(),
             streaming_content: String::new(),
+            revealed_chars: 0,
             had_tool_call: false,
             agent_status: None,
             pending_permission: None,
             tool_calls: Vec::new(),
         });
+        self.nodes.active_session_id = Some(local_id.clone());
 
         let client = self.client.clone();
         let tx = self.event_tx.clone();
 
         tokio::spawn(async move {
             use crate::event::{AppEvent, SessionResult};
-            use common::{AgentCommand, SessionCommand, SessionContext};
 
             let Some(tx) = tx else { return };
 
@@ -460,44 +741,43 @@ impl App {
                         .and_then(|v| v.parse::<u64>().ok())
                 });
 
-            let _ = client
-                .send_command(
-                    &node_id,
-                    NodeCommand::Agent(AgentCommand::Select {
-                        short_name: agent.clone(),
-                    }),
-                )
-                .await;
+            let cwd = working_dir.clone().unwrap_or_else(|| "/".to_string());
+            let mut praxis_meta = serde_json::json!({
+                "nodeId": node_id,
+                "connector": agent,
+                "yolo": yolo,
+                "interactive": true,
+            });
+            if let Some(t) = prompt_timeout_secs {
+                praxis_meta["promptTimeoutSecs"] = serde_json::json!(t);
+            }
 
             match client
-                .send_command(
-                    &node_id,
-                    NodeCommand::Session(SessionCommand::Create {
-                        context: SessionContext {
-                            working_dir,
-                            yolo_mode: yolo,
-                            prompt_timeout_secs,
-                            interactive: true,
-                        },
-                    }),
-                )
+                .acp_request(&node_id, "session/new", serde_json::json!({
+                    "cwd": cwd,
+                    "mcpServers": [],
+                    "_meta": { "praxis": praxis_meta }
+                }))
                 .await
             {
-                Ok(resp) => {
-                    if let NodeCommandResult::Session(common::SessionCommandResult::Created {
-                        session_id,
-                    }) = resp.result
-                    {
-                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Created(
-                            session_id,
-                        )));
+                Ok(value) => {
+                    if let Some(session_id) = value.get("sessionId").and_then(|v| v.as_str()) {
+                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Created {
+                            session_local_id: local_id,
+                            session_id: session_id.to_string(),
+                        }));
+                    } else {
+                        let _ = tx.send(AppEvent::SessionResponse(SessionResult::Error {
+                            session_local_id: local_id,
+                            message: "Session create: missing sessionId in response".to_string(),
+                        }));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::SessionResponse(SessionResult::Error(format!(
-                        "Session create failed: {}",
-                        e
-                    ))));
+                    let _ = tx.send(AppEvent::SessionResponse(SessionResult::Error {
+                        session_local_id: local_id,
+                        message: format!("Session create failed: {}", e),
+                    }));
                 }
             }
         });
@@ -505,78 +785,56 @@ impl App {
 
     pub(crate) fn handle_session_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            if key.code == KeyCode::Char('c') {
-                if let Some(ref mut session) = self.nodes.session {
-                    if session.is_waiting {
-                        let Some(transaction_id) = session.active_transaction_id.clone() else {
-                            return;
-                        };
-                        let client = self.client.clone();
-                        let node_id = session.node_id.clone();
-                        let tx = self.event_tx.clone();
-                        tokio::spawn(async move {
-                            use crate::event::{AppEvent, SessionResult};
-                            use common::SessionCommand;
-                            let Some(tx) = tx else { return };
+            //
+            // Ctrl+W pauses the active session (hides the chat view,
+            // keeps the session alive on the node). Use the sessions
+            // list (also Ctrl+W from the browse view) to resume.
+            //
 
-                            match client
-                                .send_command(
-                                    &node_id,
-                                    NodeCommand::Session(SessionCommand::CancelTransaction {
-                                        transaction_id: transaction_id.clone(),
-                                        force: false,
-                                    }),
-                                )
-                                .await
-                            {
-                                Ok(resp) => match resp.result {
-                                    NodeCommandResult::Session(
-                                        common::SessionCommandResult::TransactionCancelled {
-                                            transaction_id,
-                                        },
-                                    ) => {
-                                        let _ = tx.send(AppEvent::SessionResponse(
-                                            SessionResult::Cancelled(transaction_id),
-                                        ));
-                                    }
-                                    NodeCommandResult::Error { message } => {
-                                        let _ = tx.send(AppEvent::SessionResponse(
-                                            SessionResult::Error(message),
-                                        ));
-                                    }
-                                    _ => {
-                                        let _ = tx.send(AppEvent::SessionResponse(
-                                            SessionResult::Error("Unexpected response".to_string()),
-                                        ));
-                                    }
-                                },
-                                Err(e) => {
-                                    let _ = tx.send(AppEvent::SessionResponse(
-                                        SessionResult::Error(format!("{}", e)),
-                                    ));
-                                }
-                            }
-                        });
-                        session.messages.push(ChatMessage {
-                            role: ChatRole::System,
-                            text: "Cancelling...".to_string(),
-                        });
-                    } else {
-                        let client = self.client.clone();
-                        let node_id = session.node_id.clone();
-                        if session.session_id.is_some() {
-                            tokio::spawn(async move {
-                                use common::SessionCommand;
-                                let _ = client
-                                    .send_command(
-                                        &node_id,
-                                        NodeCommand::Session(SessionCommand::Close),
-                                    )
-                                    .await;
-                            });
-                        }
-                        self.nodes.session = None;
-                    }
+            if key.code == KeyCode::Char('w') {
+                self.pause_active_session();
+                return;
+            }
+
+            if key.code == KeyCode::Char('c') {
+                let Some(session) = self.nodes.active_session_mut() else {
+                    return;
+                };
+                if session.is_waiting {
+                    let Some(session_id) = session.session_id.clone() else {
+                        return;
+                    };
+                    let client = self.client.clone();
+                    let node_id = session.node_id.clone();
+                    session.messages.push(ChatMessage {
+                        role: ChatRole::System,
+                        text: "Cancelling...".to_string(),
+                    });
+                    tokio::spawn(async move {
+                        //
+                        // session/cancel is a JSON-RPC notification
+                        // (no id, no response) — the node cancels the
+                        // in-flight prompt which then resolves with
+                        // stopReason=cancelled through the normal
+                        // session/prompt response flow.
+                        //
+
+                        let _ = client
+                            .acp_notification(
+                                &node_id,
+                                "session/cancel",
+                                serde_json::json!({ "sessionId": session_id }),
+                            )
+                            .await;
+                    });
+                } else {
+                    //
+                    // Not waiting — Ctrl+C acts as the existing "close
+                    // session" key, firing session/close and removing
+                    // the session from state.
+                    //
+
+                    self.close_active_session();
                 }
                 return;
             }
@@ -584,13 +842,18 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.close_session();
+                //
+                // Esc pauses (preserves the session). Use Ctrl+C (when
+                // idle) to actually close and discard.
+                //
+
+                self.pause_active_session();
             }
             KeyCode::Enter => {
                 self.send_session_message();
             }
             KeyCode::Char(c) => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     if session.pending_permission.is_some() && session.is_waiting {
                         let decision = match c {
                             'a' | 'A' => Some(common::PermissionDecision::Allow),
@@ -598,27 +861,18 @@ impl App {
                             'd' | 'D' => Some(common::PermissionDecision::Deny),
                             _ => None,
                         };
-                        if let Some(decision) = decision {
-                            let perm = session.pending_permission.take().unwrap();
-                            let client = self.client.clone();
-                            let node_id = session.node_id.clone();
-                            let transaction_id =
-                                session.active_transaction_id.clone().unwrap_or_default();
-                            let permission_id = perm.permission_id.clone();
-                            tokio::spawn(async move {
-                                let _ = client
-                                    .send_command(
-                                        &node_id,
-                                        common::NodeCommand::Session(
-                                            common::SessionCommand::PermissionResponse {
-                                                transaction_id,
-                                                permission_id,
-                                                decision,
-                                            },
-                                        ),
-                                    )
-                                    .await;
-                            });
+                        if let Some(_decision) = decision {
+                            //
+                            // Under ACP the agent-initiated permission
+                            // flow uses `session/request_permission` +
+                            // client response. That wiring isn't hooked
+                            // up to the node ACP server yet, so this is
+                            // a no-op until the node side lands; we still
+                            // consume the decision keypress so the UI
+                            // clears the pending permission.
+                            //
+
+                            let _ = session.pending_permission.take();
                             return;
                         }
                     }
@@ -627,22 +881,22 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     input::backspace(&mut session.input, &mut session.cursor_pos);
                 }
             }
             KeyCode::Left => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     input::move_left(&mut session.cursor_pos);
                 }
             }
             KeyCode::Right => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     input::move_right(&session.input, &mut session.cursor_pos);
                 }
             }
             KeyCode::Up => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     input::history_up(
                         &mut session.input,
                         &mut session.cursor_pos,
@@ -653,7 +907,7 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     input::history_down(
                         &mut session.input,
                         &mut session.cursor_pos,
@@ -664,16 +918,331 @@ impl App {
                 }
             }
             KeyCode::PageUp => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     session.scroll_offset = session.scroll_offset.saturating_add(10);
                 }
             }
             KeyCode::PageDown => {
-                if let Some(ref mut session) = self.nodes.session {
+                if let Some(session) = self.nodes.active_session_mut() {
                     session.scroll_offset = session.scroll_offset.saturating_sub(10);
                 }
             }
             _ => {}
         }
+    }
+
+    pub(crate) async fn handle_nodes_mouse(&mut self, mouse: MouseEvent, content_area: Rect) {
+        //
+        // Sessions list overlay intercepts mouse when open.
+        //
+        if self.nodes.sessions_list_open {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                //
+                // The overlay is drawn as a centered panel; we delegate
+                // hit-testing to a helper that reproduces the render
+                // geometry.
+                //
+                if let Some(clicked) = Self::sessions_list_hit_test(
+                    mouse.row,
+                    mouse.column,
+                    content_area,
+                    self.nodes.sessions.len(),
+                ) {
+                    let count = self.nodes.sessions.len();
+                    if clicked < count {
+                        self.nodes.sessions_list_selected = clicked;
+                        if self.is_double_click(mouse.row, mouse.column) {
+                            if let Some(id) = self.selected_list_session_id() {
+                                self.resume_session(&id);
+                            }
+                        }
+                    }
+                } else {
+                    //
+                    // Click outside the list closes it.
+                    //
+                    self.nodes.sessions_list_open = false;
+                }
+            }
+            return;
+        }
+
+        //
+        // Session chat intercepts mouse.
+        //
+        if self.nodes.active_session().is_some() {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                let chat_chunks = Layout::vertical([
+                    Constraint::Length(1), // header
+                    Constraint::Length(1), // separator
+                    Constraint::Min(1),    // messages
+                    Constraint::Length(3), // input
+                    Constraint::Length(1), // hints
+                ])
+                .split(content_area);
+                let input_area = chat_chunks[3];
+                let hints_area = chat_chunks[4];
+
+                //
+                // Input area click — position cursor.
+                //
+                if mouse.row >= input_area.y
+                    && mouse.row < input_area.y.saturating_add(input_area.height)
+                {
+                    if let Some(session) = self.nodes.active_session_mut() {
+                        if !session.is_waiting && session.session_id.is_some() {
+                            // Inner: padding(2) + border(1) + prompt "▸ "(2)
+                            let text_start = input_area.x + 5;
+                            let click_offset = mouse.column.saturating_sub(text_start) as usize;
+                            session.cursor_pos = click_offset.min(session.input.len());
+                        }
+                    }
+                    return;
+                }
+
+                //
+                // Hint bar: "  enter send  ^w pause  ^c close"
+                //
+                if mouse.row == hints_area.y {
+                    let rel = mouse.column.saturating_sub(hints_area.x) as usize;
+                    if rel >= 2 && rel < 14 {
+                        // "enter send" — simulate Enter (send message)
+                        if let Some(session) = self.nodes.active_session_mut() {
+                            let ready = !session.input.trim().is_empty()
+                                && !session.is_waiting
+                                && session.session_id.is_some();
+                            if ready {
+                                self.send_session_message();
+                            }
+                        }
+                    } else if rel >= 14 && rel < 23 {
+                        // "^w pause" — pause active session
+                        self.pause_active_session();
+                    } else if rel >= 23 {
+                        // "^c close" — close active session
+                        self.close_active_session();
+                    }
+                    return;
+                }
+            }
+            return;
+        }
+
+        //
+        // Session options screen intercepts mouse.
+        //
+        if self.nodes.session_options.is_some() {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                let opts_chunks = Layout::vertical([
+                    Constraint::Length(2),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .split(content_area);
+                let opts_inner = Rect {
+                    x: opts_chunks[1].x + 2,
+                    width: opts_chunks[1].width.saturating_sub(4),
+                    ..opts_chunks[1]
+                };
+                let hints_area = opts_chunks[2];
+
+                let rel_row = mouse.row.saturating_sub(opts_inner.y) as usize;
+
+                if let Some(ref mut opts) = self.nodes.session_options {
+                    //
+                    // Row 0: YOLO toggle, 1: blank, 2: "Working Directory:",
+                    // 3+: directory items
+                    //
+                    if rel_row == 0 {
+                        opts.yolo = !opts.yolo;
+                    } else if rel_row >= 3 {
+                        let mut dir_count = 1 + opts.working_dirs.len();
+                        if opts.working_dirs.is_empty() {
+                            dir_count = 1;
+                        }
+                        let idx = rel_row - 3;
+                        if idx < dir_count {
+                            opts.selected_dir = idx;
+                        }
+                    }
+                }
+
+                //
+                // Hint bar: "enter start  esc cancel"
+                //
+                if mouse.row == hints_area.y {
+                    let rel = mouse.column.saturating_sub(hints_area.x) as usize;
+                    if rel >= 27 && rel < 40 {
+                        self.confirm_session_options();
+                    } else if rel >= 42 {
+                        self.nodes.session_options = None;
+                    }
+                }
+            }
+            return;
+        }
+
+        let outer =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content_area);
+        let hints_area = outer[1];
+        let node_chunks = Layout::horizontal([
+            Constraint::Percentage(self.nodes.split_percent),
+            Constraint::Percentage(100 - self.nodes.split_percent),
+        ])
+        .split(outer[0]);
+        let list_area = node_chunks[0];
+        let detail_area = node_chunks[1];
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                //
+                // Pane border drag start — must run before list/detail
+                // hit-tests so a click on the border column isn't eaten
+                // by the neighbouring pane.
+                //
+                if crate::ui::common::hit_vertical_border(list_area, mouse.column, mouse.row) {
+                    self.nodes.dragging = true;
+                    return;
+                }
+
+                //
+                // Node hint bar clicks.
+                //
+                if mouse.row == hints_area.y {
+                    let rel = mouse.column.saturating_sub(hints_area.x) as usize;
+                    if self.nodes.detail_focus {
+                        // " enter session  ^r reset  ^t terminal  ^w sessions(N)"
+                        if rel >= 1 && rel < 16 {
+                            self.start_session_with_selected_agent();
+                            return;
+                        }
+                    } else {
+                        // " enter select  ^r reset  ^t terminal  ^w sessions(N)"
+                        if rel >= 1 && rel < 14 {
+                            self.nodes.detail_focus = true;
+                            self.nodes.agent_selected = 0;
+                            return;
+                        }
+                    }
+                    // "^r reset" and "^t terminal" follow
+                    if rel >= 15 && rel < 24 {
+                        self.confirm_reset_node();
+                        return;
+                    }
+                    if rel >= 24 && rel < 36 {
+                        self.open_terminal();
+                        return;
+                    }
+                    if rel >= 36 {
+                        // "^w sessions(N)"
+                        self.toggle_sessions_list();
+                        return;
+                    }
+                }
+                //
+                // List item click. Table has Borders::ALL (1 row top border)
+                // + 1 row header = data starts at y+2.
+                //
+                let list_start_row = list_area.y.saturating_add(2);
+                let list_end_row = list_area
+                    .y
+                    .saturating_add(list_area.height)
+                    .saturating_sub(1);
+                if mouse.column >= list_area.x
+                    && mouse.column < list_area.x.saturating_add(list_area.width)
+                    && mouse.row >= list_start_row
+                    && mouse.row < list_end_row
+                {
+                    let clicked_idx = (mouse.row - list_start_row) as usize;
+                    if clicked_idx < self.nodes.nodes.len() {
+                        self.nodes.selected = clicked_idx;
+                        self.nodes.detail_focus = false;
+                    }
+                    return;
+                }
+
+                //
+                // Detail pane click — focus detail and check agent clicks.
+                //
+                if mouse.column >= detail_area.x
+                    && mouse.column < detail_area.x.saturating_add(detail_area.width)
+                    && mouse.row >= detail_area.y
+                    && mouse.row < detail_area.y.saturating_add(detail_area.height)
+                {
+                    self.nodes.detail_focus = true;
+                    let is_dbl = self.is_double_click(mouse.row, mouse.column);
+
+                    //
+                    // The detail inner area: border(1) + header(3 lines) +
+                    // blank(1) + "Agents"(1) = agents start at inner.y + 5.
+                    //
+                    let inner_y = detail_area.y.saturating_add(1);
+                    let agents_start = inner_y + 5;
+                    let agent_count = self
+                        .nodes
+                        .nodes
+                        .get(self.nodes.selected)
+                        .map(|n| n.discovered_agents.len())
+                        .unwrap_or(0);
+
+                    if mouse.row >= agents_start
+                        && mouse.row < agents_start + agent_count as u16
+                    {
+                        let clicked_agent = (mouse.row - agents_start) as usize;
+                        self.nodes.agent_selected = clicked_agent;
+                        if is_dbl {
+                            self.start_session_with_selected_agent();
+                        }
+                    }
+                    return;
+                }
+
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.nodes.dragging {
+                    self.nodes.split_percent = crate::ui::common::drag_split_percent(
+                        list_area.x,
+                        list_area.width + detail_area.width,
+                        mouse.column,
+                    );
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.nodes.dragging = false;
+            }
+            _ => {}
+        }
+    }
+
+    //
+    // Hit-test a click against the sessions list overlay. Returns the
+    // row index within the list, or None if the click is outside the
+    // panel. Keep this in sync with crate::ui::nodes::sessions_list.
+    //
+
+    fn sessions_list_hit_test(
+        row: u16,
+        col: u16,
+        content_area: Rect,
+        count: usize,
+    ) -> Option<usize> {
+        use crate::ui::nodes::sessions_list_rect;
+        let panel = sessions_list_rect(content_area, count);
+        //
+        // Panel layout: border(1) + title(1) + separator(1) = rows start
+        // at panel.y + 3. Each session row is one line.
+        //
+        if col < panel.x || col >= panel.x + panel.width {
+            return None;
+        }
+        if row < panel.y || row >= panel.y + panel.height {
+            return None;
+        }
+        let rows_start = panel.y + 3;
+        let rows_end = panel.y + panel.height - 2; // -border -hints
+        if row < rows_start || row >= rows_end {
+            return None;
+        }
+        Some((row - rows_start) as usize)
     }
 }

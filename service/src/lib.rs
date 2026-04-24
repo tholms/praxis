@@ -1,5 +1,6 @@
 //! Praxis Service - Orchestration service for the Praxis framework
 
+mod acp_node_proxy;
 mod acp_server;
 mod banner;
 mod claude_bridge;
@@ -8,7 +9,7 @@ mod conversions;
 mod database;
 mod dispatch;
 mod handlers;
-mod hunting;
+mod log_query;
 mod mcp;
 mod messaging;
 mod agent_chat;
@@ -52,7 +53,7 @@ use handlers::{ClientMessageHandler, NodeMessageHandler};
 use agent_chat::AgentChatManager;
 use orchestrator::OrchestratorManager;
 use config::service_config::APPLICATION_LOGS_ENABLED;
-use semantic_ops::{SemanticOpsManager, ResponseTracker, ChainExecutor};
+use semantic_ops::{SemanticOpsManager, ChainExecutor};
 use state::{NodeRegistry, ClientRegistry, PendingCommands};
 use tools::ToolkitManager;
 use messaging::broadcast_state_to_clients;
@@ -113,7 +114,7 @@ async fn run_main_loop() -> Result<()> {
 
     node_signal_channel
         .queue_declare(
-            NODE_SIGNAL_QUEUE,
+            NODE_SIGNAL_QUEUE.into(),
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
@@ -123,13 +124,13 @@ async fn run_main_loop() -> Result<()> {
     // Purge stale messages from previous service run.
     //
     let purged = node_signal_channel
-        .queue_purge(NODE_SIGNAL_QUEUE, QueuePurgeOptions::default())
+        .queue_purge(NODE_SIGNAL_QUEUE.into(), QueuePurgeOptions::default())
         .await?;
     common::log_info!("Declared queue: {} (purged {} stale messages)", NODE_SIGNAL_QUEUE, purged);
 
     broadcast_channel
         .exchange_declare(
-            NODE_BROADCAST_EXCHANGE,
+            NODE_BROADCAST_EXCHANGE.into(),
             ExchangeKind::Fanout,
             ExchangeDeclareOptions::default(),
             FieldTable::default(),
@@ -140,7 +141,7 @@ async fn run_main_loop() -> Result<()> {
     let client_signal_channel = connection.create_channel().await?;
     client_signal_channel
         .queue_declare(
-            CLIENT_SIGNAL_QUEUE,
+            CLIENT_SIGNAL_QUEUE.into(),
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
@@ -150,13 +151,13 @@ async fn run_main_loop() -> Result<()> {
     // Purge stale messages from previous service run.
     //
     let purged = client_signal_channel
-        .queue_purge(CLIENT_SIGNAL_QUEUE, QueuePurgeOptions::default())
+        .queue_purge(CLIENT_SIGNAL_QUEUE.into(), QueuePurgeOptions::default())
         .await?;
     common::log_info!("Declared queue: {} (purged {} stale messages)", CLIENT_SIGNAL_QUEUE, purged);
 
     broadcast_channel
         .exchange_declare(
-            CLIENT_BROADCAST_EXCHANGE,
+            CLIENT_BROADCAST_EXCHANGE.into(),
             ExchangeKind::Fanout,
             ExchangeDeclareOptions::default(),
             FieldTable::default(),
@@ -277,19 +278,31 @@ async fn run_main_loop() -> Result<()> {
         config.get_bool(APPLICATION_LOGS_ENABLED, false)
     };
     common::logging::set_event_log_enabled(event_logging_enabled);
-    let response_tracker = Arc::new(ResponseTracker::new());
 
     let semantic_ops_channel = connection.create_channel().await?;
+
     //
-    // Semantic operations use LLM config from service_config.
+    // Initialize Orchestrator manager, ACP server, and ACP node proxy.
+    // The proxy is constructed first because several managers depend on it.
     //
-    let node_exec_lock = semantic_ops::NodeExecLock::new();
+    let orchestrator_manager = Arc::new(OrchestratorManager::new());
+    let acp_node_proxy = acp_node_proxy::AcpNodeProxy::new();
+    let acp_server = Arc::new(acp_server::AcpServer::new(
+        orchestrator_manager.clone(),
+        service_config.clone(),
+        acp_node_proxy.clone(),
+    ));
+    common::log_info!("Initialized Orchestrator manager, ACP server, and ACP node proxy");
+
+    //
+    // Semantic operations use LLM config from service_config and drive the
+    // node over ACP via acp_node_proxy.
+    //
     let semantic_ops_manager = Arc::new(SemanticOpsManager::new(
         database.clone(),
         service_config.clone(),
         semantic_ops_channel.clone(),
-        response_tracker.clone(),
-        node_exec_lock.clone(),
+        acp_node_proxy.clone(),
     ));
 
     if let Ok(count) = semantic_ops_manager.cancel_stale_operations().await {
@@ -314,19 +327,9 @@ async fn run_main_loop() -> Result<()> {
         database.clone(),
         agent_chat_channel,
         node_registry.clone(),
-        pending_commands.clone(),
+        acp_node_proxy.clone(),
     ));
     common::log_info!("Initialized AgentChat manager");
-
-    //
-    // Initialize Orchestrator manager and ACP server.
-    //
-    let orchestrator_manager = Arc::new(OrchestratorManager::new());
-    let acp_server = Arc::new(acp_server::AcpServer::new(
-        orchestrator_manager.clone(),
-        service_config.clone(),
-    ));
-    common::log_info!("Initialized Orchestrator manager and ACP server");
 
     //
     // Initialize Toolkit manager.
@@ -335,8 +338,8 @@ async fn run_main_loop() -> Result<()> {
         database.clone(),
         service_config.clone(),
         node_registry.clone(),
-        response_tracker.clone(),
         publish_channel.clone(),
+        acp_node_proxy.clone(),
     ));
     common::log_info!("Initialized Toolkit manager");
 
@@ -367,7 +370,7 @@ async fn run_main_loop() -> Result<()> {
     let web_event_log_channel = connection.create_channel().await?;
     web_event_log_channel
         .queue_declare(
-            common::WEB_EVENT_LOG_QUEUE,
+            common::WEB_EVENT_LOG_QUEUE.into(),
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
@@ -377,7 +380,7 @@ async fn run_main_loop() -> Result<()> {
     let node_event_log_channel = connection.create_channel().await?;
     node_event_log_channel
         .queue_declare(
-            common::NODE_EVENT_LOG_QUEUE,
+            common::NODE_EVENT_LOG_QUEUE.into(),
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
@@ -386,8 +389,8 @@ async fn run_main_loop() -> Result<()> {
 
     let mut web_event_log_consumer = web_event_log_channel
         .basic_consume(
-            common::WEB_EVENT_LOG_QUEUE,
-            "service_web_event_log_consumer",
+            common::WEB_EVENT_LOG_QUEUE.into(),
+            "service_web_event_log_consumer".into(),
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
@@ -395,8 +398,8 @@ async fn run_main_loop() -> Result<()> {
 
     let mut node_event_log_consumer = node_event_log_channel
         .basic_consume(
-            common::NODE_EVENT_LOG_QUEUE,
-            "service_node_event_log_consumer",
+            common::NODE_EVENT_LOG_QUEUE.into(),
+            "service_node_event_log_consumer".into(),
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
@@ -487,8 +490,8 @@ async fn run_main_loop() -> Result<()> {
 
     let mut node_signal_consumer = node_signal_channel
         .basic_consume(
-            NODE_SIGNAL_QUEUE,
-            "server_node_signal_consumer",
+            NODE_SIGNAL_QUEUE.into(),
+            "server_node_signal_consumer".into(),
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
@@ -496,8 +499,8 @@ async fn run_main_loop() -> Result<()> {
 
     let mut client_signal_consumer = client_signal_channel
         .basic_consume(
-            CLIENT_SIGNAL_QUEUE,
-            "server_client_signal_consumer",
+            CLIENT_SIGNAL_QUEUE.into(),
+            "server_client_signal_consumer".into(),
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
@@ -619,14 +622,21 @@ async fn run_main_loop() -> Result<()> {
         chain_executor.clone(),
         node_registry.clone(),
         service_config.clone(),
-        response_tracker.clone(),
+        acp_node_proxy.clone(),
         semantic_ops_channel.clone(),
         broadcast_channel.clone(),
         toolkit_manager.clone(),
-        node_exec_lock.clone(),
     ));
     trigger_engine.start_scheduler();
     common::log_info!("Initialized trigger engine");
+
+    //
+    // Spawn the live intercept broadcaster. Coalesces new traffic
+    // entries and rule matches into small batches before publishing
+    // them to the client broadcast exchange.
+    //
+    let intercept_broadcaster =
+        dispatch::traffic_broadcast::InterceptBroadcaster::spawn(broadcast_channel.clone());
 
     //
     // Create the service context for message dispatch.
@@ -639,17 +649,17 @@ async fn run_main_loop() -> Result<()> {
         client_handler,
         database,
         service_config: service_config.clone(),
-        response_tracker,
         semantic_ops_manager,
         chain_executor,
-        node_exec_lock: node_exec_lock.clone(),
         agent_chat_manager,
         acp_server,
+        acp_node_proxy,
         toolkit_manager,
         mcp_manager,
         ccrv1_manager,
         ccrv2_manager,
         trigger_engine: Some(trigger_engine.clone()),
+        intercept_broadcaster,
         publish_channel,
         client_publish_channel,
         broadcast_channel,

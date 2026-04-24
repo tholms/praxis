@@ -14,8 +14,8 @@ use common::ai::{
 };
 use common::{OrchestratorPlan, PlanStep, PlanStepStatus};
 use rmcp::{
-    model::{CallToolRequestParam, RawContent},
-    transport::SseClientTransport,
+    model::{CallToolRequestParams, RawContent},
+    transport::StreamableHttpClientTransport,
     ServiceExt,
 };
 
@@ -122,7 +122,11 @@ impl OrchestratorManager {
             }
         };
 
-        if model_def.api_key.is_empty() {
+        let provider_needs_key = Provider::from_str(&model_def.provider)
+            .map(|p| !p.api_key_optional())
+            .unwrap_or(true);
+
+        if model_def.api_key.is_empty() && provider_needs_key {
             let _ = send_to_client(
                 publish_channel,
                 client_id,
@@ -146,7 +150,7 @@ impl OrchestratorManager {
 
         let provider = Provider::from_str(&model_def.provider).unwrap_or(Provider::Anthropic);
 
-        let client = match create_ai_client(provider, model_def.api_key.clone()) {
+        let client = match create_ai_client(provider, model_def.api_key.clone(), model_def.base_url.as_deref()) {
             Ok(c) => c,
             Err(e) => {
                 let _ = send_to_client(
@@ -222,21 +226,10 @@ impl OrchestratorManager {
                 // Connect to MCP SSE server (this is the slow part).
                 //
 
-                let sse_url = format!("http://127.0.0.1:{}/sse", mcp_port);
-                common::log_info!("Orchestrator connecting to MCP server at {}", sse_url);
+                let mcp_url = format!("http://127.0.0.1:{}/mcp", mcp_port);
+                common::log_info!("Orchestrator connecting to MCP server at {}", mcp_url);
 
-                let transport = match SseClientTransport::start(sse_url.clone()).await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        common::log_error!("Failed to connect to MCP server at {}: {}", sse_url, e);
-                        send_and_log!(acp_error_response(
-                                Value::Null,
-                                -32000,
-                                &format!("Failed to connect to MCP server at {}: {}", sse_url, e),
-                            ));
-                        return;
-                    }
-                };
+                let transport = StreamableHttpClientTransport::from_uri(mcp_url.as_str());
 
                 let mcp_service = match ().serve(transport).await {
                     Ok(s) => s,
@@ -275,7 +268,7 @@ impl OrchestratorManager {
 
                 common::log_info!(
                     "Orchestrator ready for client {} session {} with provider {:?}, model {}, max_tokens {}, tools {}",
-                    &client_id_owned[..8.min(client_id_owned.len())], &sid[..8.min(sid.len())],
+                    common::short_id(&client_id_owned), common::short_id(&sid),
                     provider, model, max_tokens, tools.len()
                 );
 
@@ -295,7 +288,7 @@ impl OrchestratorManager {
 
                     common::log_info!(
                         "Orchestrator received prompt for {}: {}...",
-                        &client_id_owned[..8.min(client_id_owned.len())],
+                        common::short_id(&client_id_owned),
                         common::truncate_str(&prompt, 50)
                     );
 
@@ -555,8 +548,8 @@ impl OrchestratorManager {
 
                     send_and_log!(acp_response(
                         prompt_id_to_json_rpc_id(&prompt_id),
-                        serde_json::to_value(agent_client_protocol::PromptResponse::new(
-                            agent_client_protocol::StopReason::EndTurn,
+                        serde_json::to_value(agent_client_protocol::schema::PromptResponse::new(
+                            agent_client_protocol::schema::StopReason::EndTurn,
                         )).unwrap(),
                     ));
                 }
@@ -700,8 +693,8 @@ impl OrchestratorManager {
                 client_id,
                 acp_response(
                     prompt_id_to_json_rpc_id(&prompt_id),
-                    serde_json::to_value(agent_client_protocol::PromptResponse::new(
-                        agent_client_protocol::StopReason::Cancelled,
+                    serde_json::to_value(agent_client_protocol::schema::PromptResponse::new(
+                        agent_client_protocol::schema::StopReason::Cancelled,
                     )).unwrap(),
                 ),
             ).await;
@@ -874,10 +867,8 @@ async fn execute_mcp_tool(
         None
     };
 
-    let request = CallToolRequestParam {
-        name: tool_name.to_string().into(),
-        arguments,
-    };
+    let mut request = CallToolRequestParams::new(tool_name.to_string());
+    request.arguments = arguments;
 
     match peer.call_tool(request).await {
         Ok(result) => {

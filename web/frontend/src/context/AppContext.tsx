@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer, useEffect, useCallback, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useReducer, useEffect, useCallback, useMemo, useRef, type ReactNode, type Dispatch } from 'react';
 import { wsClient } from '../api/websocket';
 import { generateUUID } from '../utils/uuid';
 import type { OrchestratorState, OrchestratorSessionState } from './orchestratorTypes';
@@ -85,6 +85,19 @@ interface PendingAcpRequest {
   method: string;
   sessionId?: string;
   label?: string;
+  //
+  // Optional generic resolve/reject for callers using `sendAcpNodeRequest`.
+  // When present, the response handler invokes these instead of (or in
+  // addition to) the orchestrator-specific switch.
+  //
+  resolve?: (result: unknown, text: string) => void;
+  reject?: (reason: unknown) => void;
+  //
+  // When true, accumulated `agent_message_chunk` text for the associated
+  // sessionId is appended to `textBuf` and returned on resolve.
+  //
+  collectText?: boolean;
+  textBuf?: string;
 }
 
 const initialOrchestratorState: OrchestratorState = {
@@ -168,9 +181,9 @@ interface ToolkitState {
 }
 
 //
-// Hunting state.
+// LogQuery state.
 //
-interface HuntingState {
+interface LogQueryState {
   query: string;
   isRunning: boolean;
   columns: string[];
@@ -179,7 +192,7 @@ interface HuntingState {
   error: string | null;
 }
 
-const initialHuntingState: HuntingState = {
+const initialLogQueryState: LogQueryState = {
   query: '',
   isRunning: false,
   columns: [],
@@ -222,7 +235,7 @@ interface AppState {
   opDefSuccess: string | null;
   orchestrator: OrchestratorState;
   intercept: InterceptState;
-  hunting: HuntingState;
+  logQuery: LogQueryState;
   chains: ChainState;
   agentChat: AgentChatState;
   toolkit: ToolkitState;
@@ -247,6 +260,22 @@ interface AppState {
   // Recently accessed node IDs (most recent first).
   //
   recentlyAccessedNodeIds: string[];
+  //
+  // Per-node agent sessions. Keyed by `${nodeId}|${agentShortName}` so a
+  // single node can host multiple concurrent sessions, one per connector.
+  // Each entry stores the ACP sessionId plus the originating (nodeId,
+  // agentShortName) pair for ergonomic lookup.
+  //
+  nodeSessions: Record<string, { nodeId: string; agentShortName: string; sessionId: string }>;
+}
+
+//
+// Stable composite key for nodeSessions / agentSessionStreaming so the
+// same (nodeId, agentShortName) pair always hashes to one entry.
+//
+
+export function nodeSessionKey(nodeId: string, agentShortName: string): string {
+  return `${nodeId}|${agentShortName}`;
 }
 
 //
@@ -267,7 +296,7 @@ function createInitialState(): AppState {
     opDefSuccess: null,
     orchestrator: loadPersistedOrchestratorState(initialOrchestratorState),
     intercept: initialInterceptState,
-    hunting: initialHuntingState,
+    logQuery: initialLogQueryState,
     chains: initialChainState,
     agentChat: initialAgentChatState,
     toolkit: initialToolkitState,
@@ -276,6 +305,7 @@ function createInitialState(): AppState {
     agentSessionMessages: {},
     agentSessionStreaming: {},
     recentlyAccessedNodeIds: loadRecentNodes(MAX_RECENT_NODES),
+    nodeSessions: {},
   };
 }
 
@@ -310,12 +340,12 @@ type Action =
   | { type: 'ORCHESTRATOR_CLEAR_MESSAGES'; sessionId: string }
   | { type: 'ORCHESTRATOR_TOKEN_USAGE'; sessionId: string; promptTokens: number; completionTokens: number; totalTokens: number }
   //
-  // Hunting actions.
+  // LogQuery actions.
   //
-  | { type: 'HUNTING_SET_QUERY'; query: string }
-  | { type: 'HUNTING_QUERY_START' }
-  | { type: 'HUNTING_QUERY_RESPONSE'; columns: string[]; rows: unknown[][]; totalCount: number }
-  | { type: 'HUNTING_QUERY_ERROR'; message: string }
+  | { type: 'LOG_QUERY_SET_QUERY'; query: string }
+  | { type: 'LOG_QUERY_START' }
+  | { type: 'LOG_QUERY_RESPONSE'; columns: string[]; rows: unknown[][]; totalCount: number }
+  | { type: 'LOG_QUERY_ERROR'; message: string }
   //
   // Intercept actions.
   //
@@ -336,6 +366,9 @@ type Action =
   | { type: 'AGENT_SESSION_STREAMING_UPDATE'; nodeId: string; transactionId: string; update: import('../api/types').SessionUpdateKind }
   | { type: 'AGENT_SESSION_STREAMING_COMPLETE'; nodeId: string; transactionId: string }
   | { type: 'AGENT_SESSION_STREAMING_CLEAR'; nodeId: string }
+  | { type: 'AGENT_SESSION_STREAMING_CHUNK'; nodeId: string; text: string }
+  | { type: 'NODE_SESSION_SET'; nodeId: string; sessionId: string; agentShortName: string }
+  | { type: 'NODE_SESSION_CLEAR'; nodeId: string; agentShortName: string }
   //
   // Chain actions.
   //
@@ -771,23 +804,23 @@ function reduceIntercept(state: AppState, action: Action): AppState | null {
   }
 }
 
-function reduceHunting(state: AppState, action: Action): AppState | null {
+function reduceLogQuery(state: AppState, action: Action): AppState | null {
   switch (action.type) {
-    case 'HUNTING_SET_QUERY':
+    case 'LOG_QUERY_SET_QUERY':
       return {
         ...state,
-        hunting: { ...state.hunting, query: action.query },
+        logQuery: { ...state.logQuery, query: action.query },
       };
-    case 'HUNTING_QUERY_START':
+    case 'LOG_QUERY_START':
       return {
         ...state,
-        hunting: { ...state.hunting, isRunning: true, error: null },
+        logQuery: { ...state.logQuery, isRunning: true, error: null },
       };
-    case 'HUNTING_QUERY_RESPONSE':
+    case 'LOG_QUERY_RESPONSE':
       return {
         ...state,
-        hunting: {
-          ...state.hunting,
+        logQuery: {
+          ...state.logQuery,
           isRunning: false,
           columns: action.columns,
           rows: action.rows,
@@ -795,10 +828,10 @@ function reduceHunting(state: AppState, action: Action): AppState | null {
           error: null,
         },
       };
-    case 'HUNTING_QUERY_ERROR':
+    case 'LOG_QUERY_ERROR':
       return {
         ...state,
-        hunting: { ...state.hunting, isRunning: false, error: action.message },
+        logQuery: { ...state.logQuery, isRunning: false, error: action.message },
       };
     default:
       return null;
@@ -906,6 +939,43 @@ function reduceAgentSessions(state: AppState, action: Action): AppState | null {
     case 'AGENT_SESSION_STREAMING_CLEAR': {
       const { [action.nodeId]: _, ...rest } = state.agentSessionStreaming;
       return { ...state, agentSessionStreaming: rest };
+    }
+    case 'AGENT_SESSION_STREAMING_CHUNK': {
+      const key = action.nodeId;
+      const existing = state.agentSessionStreaming[key] || {
+        content: '',
+        transactionId: '',
+        toolCalls: [],
+        pendingPermission: null,
+        agentStatus: null,
+        hadToolCall: false,
+      };
+      return {
+        ...state,
+        agentSessionStreaming: {
+          ...state.agentSessionStreaming,
+          [key]: { ...existing, content: existing.content + action.text, hadToolCall: false },
+        },
+      };
+    }
+    case 'NODE_SESSION_SET': {
+      const key = nodeSessionKey(action.nodeId, action.agentShortName);
+      return {
+        ...state,
+        nodeSessions: {
+          ...state.nodeSessions,
+          [key]: {
+            nodeId: action.nodeId,
+            agentShortName: action.agentShortName,
+            sessionId: action.sessionId,
+          },
+        },
+      };
+    }
+    case 'NODE_SESSION_CLEAR': {
+      const key = nodeSessionKey(action.nodeId, action.agentShortName);
+      const { [key]: _, ...rest } = state.nodeSessions;
+      return { ...state, nodeSessions: rest };
     }
     default:
       return null;
@@ -1240,7 +1310,7 @@ function reducer(state: AppState, action: Action): AppState {
     reduceCore(state, action)
     ?? reduceOrchestrator(state, action)
     ?? reduceIntercept(state, action)
-    ?? reduceHunting(state, action)
+    ?? reduceLogQuery(state, action)
     ?? reduceAgentSessions(state, action)
     ?? reduceChains(state, action)
     ?? reduceRecentNodes(state, action)
@@ -1256,6 +1326,12 @@ function reducer(state: AppState, action: Action): AppState {
 interface AppContextValue {
   state: AppState;
   //
+  // Raw reducer dispatch — exposed for components that need to update
+  // multi-slice state (e.g. per-node session tracking) without us adding a
+  // one-off setter for each action.
+  //
+  dispatch: Dispatch<Action>;
+  //
   // Helpers.
   //
   getNode: (nodeId: string) => NodeState | undefined;
@@ -1263,6 +1339,23 @@ interface AppContextValue {
   // Commands.
   //
   sendCommand: (nodeId: string, command: CommandRequest['command']) => Promise<CommandResponse>;
+  //
+  // Send an ACP JSON-RPC request targeted at a specific node. The node is
+  // identified via `_meta.praxis.nodeId` in the params (the service proxy
+  // routes any ACP frame carrying that marker to the owning node). When
+  // `collectText` is true the helper also buffers streamed
+  // `agent_message_chunk` text for the session and returns it in `text`.
+  //
+  sendAcpNodeRequest: (
+    nodeId: string,
+    method: string,
+    params: Record<string, unknown>,
+    collectText?: boolean,
+  ) => Promise<{ result: unknown; text: string }>;
+  //
+  // Send an ACP JSON-RPC notification (no response) to a specific node.
+  //
+  sendAcpNodeNotification: (nodeId: string, method: string, params: Record<string, unknown>) => void;
   //
   // Terminal.
   //
@@ -1364,10 +1457,10 @@ interface AppContextValue {
   agentChatSetCurrentChannel: (channelId: string | null) => void;
   agentChatClearError: () => void;
   //
-  // Hunting.
+  // LogQuery.
   //
-  huntingSetQuery: (query: string) => void;
-  huntingQuery: (query: string) => void;
+  logQuerySetQuery: (query: string) => void;
+  logQueryRun: (query: string) => void;
   //
   // Lua agent scripts.
   //
@@ -1427,15 +1520,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
           break;
         }
         case 'state_update':
-          //
-          // Debug: Log selected_agent info from state updates.
-          //
-          if (message.state.nodes?.length > 0) {
-            const nodeWithSession = message.state.nodes.find(n => n.selected_agent?.session_id);
-            if (nodeWithSession) {
-              console.log('[state_update] Node with session:', nodeWithSession.node_id, 'selected_agent:', nodeWithSession.selected_agent);
-            }
-          }
           dispatch({ type: 'SET_STATE', state: message.state });
           break;
         case 'command_response': {
@@ -1544,11 +1628,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 case 'agent_message_chunk': {
                   const text = extractText(update);
                   if (text) {
-                    dispatch({
-                      type: 'ORCHESTRATOR_ADD_CONTENT',
-                      sessionId,
-                      content: text,
-                    });
+                    //
+                    // Dispatch to orchestrator for WEB_ prefixed orchestrator
+                    // sessions (matches existing behavior). Node-bound agent
+                    // sessions feed the per-node streaming UI instead.
+                    //
+                    const nodeEntry = Object.values(nodeSessionsRef.current)
+                      .find((s) => s.sessionId === sessionId);
+                    if (nodeEntry) {
+                      dispatch({
+                        type: 'AGENT_SESSION_STREAMING_CHUNK',
+                        nodeId: nodeEntry.nodeId,
+                        text,
+                      });
+                    } else {
+                      dispatch({
+                        type: 'ORCHESTRATOR_ADD_CONTENT',
+                        sessionId,
+                        content: text,
+                      });
+                    }
+                    //
+                    // Buffer into any pending ACP request with `collectText`
+                    // targeting this session so `sendAcpNodeRequest` can
+                    // return the concatenated reply.
+                    //
+                    for (const [, pending] of pendingAcpRequestsRef.current) {
+                      if (pending.collectText && pending.sessionId === sessionId) {
+                        pending.textBuf = (pending.textBuf ?? '') + text;
+                      }
+                    }
                   }
                   break;
                 }
@@ -1581,10 +1690,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
                   break;
                 }
                 case 'plan': {
-                  const planData = update.plan as { entries?: Array<{ content: string; status: string }> } | undefined;
-                  if (planData?.entries) {
+                  const entries = update.entries as Array<{ content: string; status: string }> | undefined;
+                  if (entries) {
                     const plan: OrchestratorPlan = {
-                      steps: planData.entries.map(e => ({
+                      steps: entries.map(e => ({
                         description: e.content,
                         status: e.status === 'completed' ? 'done' as const
                           : e.status === 'in_progress' ? 'in_progress' as const
@@ -1609,6 +1718,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
               const pending = pendingAcpRequestsRef.current.get(rpc.id);
               if (!pending) break;
               pendingAcpRequestsRef.current.delete(rpc.id);
+
+              //
+              // Generic resolver path used by `sendAcpNodeRequest`. Matches
+              // before the orchestrator-specific switch so callers outside
+              // the orchestrator chat flow get their promise settled.
+              //
+              if (pending.resolve || pending.reject) {
+                if (rpc.error) {
+                  pending.reject?.(new Error(rpc.error.message));
+                } else {
+                  pending.resolve?.(rpc.result ?? null, pending.textBuf ?? '');
+                }
+                break;
+              }
 
               if (rpc.error) {
                 const sessionId = pending.sessionId;
@@ -1789,13 +1912,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
           break;
 
         //
-        // Hunting messages.
+        // LogQuery messages.
         //
-        case 'hunting_query_response':
-          dispatch({ type: 'HUNTING_QUERY_RESPONSE', columns: message.columns, rows: message.rows, totalCount: message.total_count });
+        case 'log_query_response':
+          dispatch({ type: 'LOG_QUERY_RESPONSE', columns: message.columns, rows: message.rows, totalCount: message.total_count });
           break;
-        case 'hunting_query_error':
-          dispatch({ type: 'HUNTING_QUERY_ERROR', message: message.message });
+        case 'log_query_error':
+          dispatch({ type: 'LOG_QUERY_ERROR', message: message.message });
           break;
 
         //
@@ -2111,6 +2234,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   orchestratorSessionsRef.current = state.orchestrator.sessions;
   const orchestratorActiveIdRef = useRef(state.orchestrator.activeSessionId);
   orchestratorActiveIdRef.current = state.orchestrator.activeSessionId;
+  const nodeSessionsRef = useRef(state.nodeSessions);
+  nodeSessionsRef.current = state.nodeSessions;
 
   const orchestratorSetActiveSession = useCallback((sessionId: string | null) => {
     dispatch({ type: 'ORCHESTRATOR_SET_ACTIVE_SESSION', sessionId });
@@ -2133,6 +2258,73 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const orchestratorClearMessages = useCallback((sessionId: string) => {
     dispatch({ type: 'ORCHESTRATOR_CLEAR_MESSAGES', sessionId });
   }, []);
+
+  //
+  // Send an ACP JSON-RPC request targeted at a specific node. Merges the
+  // provided params with `_meta.praxis.nodeId` so the service proxy routes
+  // the frame to the owning node. Returns the response result alongside any
+  // streamed `agent_message_chunk` text collected while the request was in
+  // flight (when `collectText` is true).
+  //
+  const sendAcpNodeRequest = useCallback(
+    (
+      nodeId: string,
+      method: string,
+      params: Record<string, unknown>,
+      collectText = false,
+    ): Promise<{ result: unknown; text: string }> => {
+      const existingMeta = (typeof params._meta === 'object' && params._meta !== null)
+        ? (params._meta as Record<string, unknown>)
+        : {};
+      const existingPraxis = (typeof existingMeta.praxis === 'object' && existingMeta.praxis !== null)
+        ? (existingMeta.praxis as Record<string, unknown>)
+        : {};
+      const merged = {
+        ...params,
+        _meta: {
+          ...existingMeta,
+          praxis: { ...existingPraxis, nodeId },
+        },
+      };
+      const jsonRpc = acpRequest(method, merged);
+      const parsed = JSON.parse(jsonRpc);
+      const sessionId = typeof params.sessionId === 'string' ? params.sessionId : undefined;
+
+      return new Promise<{ result: unknown; text: string }>((resolve, reject) => {
+        pendingAcpRequestsRef.current.set(parsed.id, {
+          method,
+          sessionId,
+          collectText,
+          textBuf: '',
+          resolve: (result, text) => resolve({ result, text }),
+          reject,
+        });
+        wsClient.send({ type: 'acp_message', json_rpc: jsonRpc });
+      });
+    },
+    [],
+  );
+
+  const sendAcpNodeNotification = useCallback(
+    (nodeId: string, method: string, params: Record<string, unknown>) => {
+      const existingMeta = (typeof params._meta === 'object' && params._meta !== null)
+        ? (params._meta as Record<string, unknown>)
+        : {};
+      const existingPraxis = (typeof existingMeta.praxis === 'object' && existingMeta.praxis !== null)
+        ? (existingMeta.praxis as Record<string, unknown>)
+        : {};
+      const merged = {
+        ...params,
+        _meta: {
+          ...existingMeta,
+          praxis: { ...existingPraxis, nodeId },
+        },
+      };
+      const jsonRpc = JSON.stringify({ jsonrpc: '2.0', method, params: merged });
+      wsClient.send({ type: 'acp_message', json_rpc: jsonRpc });
+    },
+    [],
+  );
 
   //
   // Traffic interception functions.
@@ -2413,15 +2605,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   //
-  // Hunting functions.
+  // LogQuery functions.
   //
-  const huntingSetQuery = useCallback((query: string) => {
-    dispatch({ type: 'HUNTING_SET_QUERY', query });
+  const logQuerySetQuery = useCallback((query: string) => {
+    dispatch({ type: 'LOG_QUERY_SET_QUERY', query });
   }, []);
 
-  const huntingQuery = useCallback((query: string) => {
-    dispatch({ type: 'HUNTING_QUERY_START' });
-    wsClient.send({ type: 'hunting_query', query });
+  const logQueryRun = useCallback((query: string) => {
+    dispatch({ type: 'LOG_QUERY_START' });
+    wsClient.send({ type: 'log_query', query });
   }, []);
 
   //
@@ -2451,10 +2643,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     wsClient.send({ type: 'lua_agent_script_toggle_disabled', script_id: scriptId, disabled });
   }, []);
 
-  const value: AppContextValue = {
+  const value = useMemo<AppContextValue>(() => ({
     state,
+    dispatch,
     getNode,
     sendCommand,
+    sendAcpNodeRequest,
+    sendAcpNodeNotification,
     registerTerminalHandler,
     sendTerminalInput,
     requestOperations,
@@ -2526,10 +2721,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     agentChatSetCurrentChannel,
     agentChatClearError,
     //
-    // Hunting.
+    // LogQuery.
     //
-    huntingSetQuery,
-    huntingQuery,
+    logQuerySetQuery,
+    logQueryRun,
     //
     // Lua agent scripts.
     //
@@ -2539,7 +2734,83 @@ export function AppProvider({ children }: { children: ReactNode }) {
     deleteLuaAgentScript,
     resetLuaAgentScriptDefaults,
     toggleLuaAgentScriptDisabled,
-  };
+  }), [
+    state,
+    dispatch,
+    getNode,
+    sendCommand,
+    sendAcpNodeRequest,
+    sendAcpNodeNotification,
+    registerTerminalHandler,
+    sendTerminalInput,
+    requestOperations,
+    runOperation,
+    cancelOperation,
+    removeOperation,
+    clearOperations,
+    clearEventLog,
+    removeNode,
+    resetNode,
+    getConfig,
+    setConfig,
+    clearOpDefStatus,
+    orchestratorCreateSession,
+    orchestratorCloseSession,
+    orchestratorCancelPrompt,
+    orchestratorSendPrompt,
+    orchestratorSetActiveSession,
+    orchestratorClearMessages,
+    send,
+    requestTrafficLog,
+    requestTrafficMatches,
+    clearTraffic,
+    requestInterceptRules,
+    createInterceptRule,
+    updateInterceptRule,
+    deleteInterceptRule,
+    enableIntercept,
+    disableIntercept,
+    clearInterceptRuleError,
+    addAgentSessionMessage,
+    clearAgentSessionMessages,
+    clearAgentSessionStreaming,
+    requestChainDefList,
+    requestChain,
+    createChain,
+    updateChain,
+    deleteChain,
+    runChain,
+    cancelChainExecution,
+    removeChainExecution,
+    clearChainExecutions,
+    requestChainExecutions,
+    clearChainStatus,
+    clearLastCreatedChain,
+    requestChainTriggers,
+    createChainTrigger,
+    updateChainTrigger,
+    deleteChainTrigger,
+    trackNodeAccess,
+    agentChatStart,
+    agentChatStop,
+    agentChatAddAgent,
+    agentChatRemoveAgent,
+    agentChatReorderAgents,
+    agentChatSendMessage,
+    agentChatJoinChannel,
+    agentChatGetHistory,
+    agentChatGetState,
+    agentChatSetCurrentChannel,
+    agentChatClearError,
+    logQuerySetQuery,
+    logQueryRun,
+    listLuaAgentScripts,
+    addLuaAgentScript,
+    updateLuaAgentScript,
+    deleteLuaAgentScript,
+    resetLuaAgentScriptDefaults,
+    toggleLuaAgentScriptDisabled,
+  ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

@@ -8,9 +8,8 @@ use async_trait::async_trait;
 use common::{
     client_queue_name, mcp::McpClient, publish_json, ChainDefinitionInfo, ChainExecutionUpdate,
     ClientBroadcastMessage, ClientDirectMessage, ClientRegistration, ClientSignalMessage,
-    CommandRequest, CommandResponse, InterceptedTrafficEntry, NodeCommand, NodeCommandResult,
-    OperationDefinitionInfo, PraxisServer, ReconResult, SemanticOpUpdate, SystemState,
-    TrafficSearchFilters, CLIENT_BROADCAST_EXCHANGE, CLIENT_SIGNAL_QUEUE,
+    InterceptedTrafficEntry, OperationDefinitionInfo, PraxisServer, ReconResult, SemanticOpUpdate,
+    SystemState, TrafficSearchFilters, CLIENT_BROADCAST_EXCHANGE, CLIENT_SIGNAL_QUEUE,
 };
 use futures_util::StreamExt;
 use lapin::{
@@ -18,11 +17,12 @@ use lapin::{
     types::FieldTable,
     Channel, Connection, ConnectionProperties, ExchangeKind,
 };
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -38,10 +38,22 @@ pub struct ServiceMcpClient {
     state: Arc<Mutex<ClientState>>,
 }
 
+//
+// In-flight ACP request. When `text_buf` is Some, `session/update`
+// notifications with matching sessionId and update.sessionUpdate ==
+// "agent_message_chunk" are appended to it.
+//
+
+struct PendingAcp {
+    response_tx: Option<oneshot::Sender<Result<Value, String>>>,
+    text_buf: Option<String>,
+    session_id: Option<String>,
+}
+
 #[derive(Default)]
 struct ClientState {
     system_state: Option<SystemState>,
-    pending_commands: HashMap<String, Option<NodeCommandResult>>,
+    pending_acp: HashMap<String, PendingAcp>,
     pending_semantic_ops: HashMap<String, Option<String>>,
     pending_traffic_search: Option<(Vec<InterceptedTrafficEntry>, usize)>,
     pending_recon_get: Option<Option<ReconResult>>,
@@ -76,14 +88,17 @@ impl ServiceMcpClient {
 
         channel
             .queue_declare(
-                &client_queue,
+                client_queue.as_str().into(),
                 QueueDeclareOptions::default(),
                 FieldTable::default(),
             )
             .await?;
 
         channel
-            .queue_purge(&client_queue, lapin::options::QueuePurgeOptions::default())
+            .queue_purge(
+                client_queue.as_str().into(),
+                lapin::options::QueuePurgeOptions::default(),
+            )
             .await?;
 
         //
@@ -92,7 +107,7 @@ impl ServiceMcpClient {
 
         channel
             .exchange_declare(
-                CLIENT_BROADCAST_EXCHANGE,
+                CLIENT_BROADCAST_EXCHANGE.into(),
                 ExchangeKind::Fanout,
                 ExchangeDeclareOptions::default(),
                 FieldTable::default(),
@@ -101,7 +116,7 @@ impl ServiceMcpClient {
 
         let broadcast_queue = channel
             .queue_declare(
-                "",
+                "".into(),
                 QueueDeclareOptions {
                     exclusive: true,
                     auto_delete: true,
@@ -113,9 +128,9 @@ impl ServiceMcpClient {
 
         channel
             .queue_bind(
-                broadcast_queue.name().as_str(),
-                CLIENT_BROADCAST_EXCHANGE,
-                "",
+                broadcast_queue.name().as_str().into(),
+                CLIENT_BROADCAST_EXCHANGE.into(),
+                "".into(),
                 lapin::options::QueueBindOptions::default(),
                 FieldTable::default(),
             )
@@ -155,8 +170,8 @@ impl ServiceMcpClient {
             let consumer_tag = format!("mcp_direct_{}", Uuid::new_v4());
             let mut direct_consumer = match channel
                 .basic_consume(
-                    &client_queue,
-                    &consumer_tag,
+                    client_queue.as_str().into(),
+                    consumer_tag.as_str().into(),
                     BasicConsumeOptions::default(),
                     FieldTable::default(),
                 )
@@ -172,8 +187,8 @@ impl ServiceMcpClient {
             let broadcast_tag = format!("mcp_broadcast_{}", Uuid::new_v4());
             let mut broadcast_consumer = match channel
                 .basic_consume(
-                    &broadcast_queue,
-                    &broadcast_tag,
+                    broadcast_queue.as_str().into(),
+                    broadcast_tag.as_str().into(),
                     BasicConsumeOptions::default(),
                     FieldTable::default(),
                 )
@@ -219,10 +234,8 @@ impl ServiceMcpClient {
             ClientDirectMessage::StateUpdate(system_state) => {
                 state.system_state = Some(system_state);
             }
-            ClientDirectMessage::CommandResponse(response) => {
-                if let Some(entry) = state.pending_commands.get_mut(&response.command_id) {
-                    *entry = Some(response.result);
-                }
+            ClientDirectMessage::AcpMessage { json_rpc } => {
+                Self::handle_acp_frame(&mut state, &json_rpc);
             }
             ClientDirectMessage::SemanticOpQueued { operation_id, request_id, .. } => {
                 if let Some(entry) = state.pending_semantic_ops.get_mut(&request_id) {
@@ -300,6 +313,95 @@ impl ServiceMcpClient {
         }
     }
 
+    //
+    // Handle an incoming ACP JSON-RPC frame (either a response to a pending
+    // request, or a streamed session/update notification whose text we want
+    // to buffer for a still-pending request).
+    //
+
+    fn handle_acp_frame(state: &mut ClientState, json_rpc: &str) {
+        let msg: Value = match serde_json::from_str(json_rpc) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let has_method = msg.get("method").and_then(|m| m.as_str()).is_some();
+        let id_str = msg.get("id").map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        });
+
+        if !has_method {
+            //
+            // Response: { id, result } or { id, error }. Take only
+            // response_tx — leave the PendingAcp entry (with its text_buf) in
+            // place so do_acp_request can collect the buffered chunk text
+            // after awaiting the response. do_acp_request removes the entry
+            // once it's read the text.
+            //
+
+            let Some(request_id) = id_str else { return };
+            let Some(pending) = state.pending_acp.get_mut(&request_id) else {
+                return;
+            };
+            let Some(tx) = pending.response_tx.take() else { return };
+
+            if let Some(err) = msg.get("error") {
+                let message = err
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ACP error")
+                    .to_string();
+                let _ = tx.send(Err(message));
+            } else {
+                let result = msg.get("result").cloned().unwrap_or(Value::Null);
+                let _ = tx.send(Ok(result));
+            }
+            return;
+        }
+
+        //
+        // Notification: session/update with agent_message_chunk. Append text
+        // to any pending request whose session_id matches.
+        //
+
+        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        if method != "session/update" {
+            return;
+        }
+
+        let params = match msg.get("params") {
+            Some(p) => p,
+            None => return,
+        };
+        let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return,
+        };
+        let update = match params.get("update") {
+            Some(u) => u,
+            None => return,
+        };
+        let kind = update.get("sessionUpdate").and_then(|v| v.as_str());
+        if kind != Some("agent_message_chunk") {
+            return;
+        }
+        let text = update
+            .get("content")
+            .and_then(|c| c.get("text"))
+            .and_then(|v| v.as_str());
+        let Some(text) = text else { return };
+
+        for pending in state.pending_acp.values_mut() {
+            if let (Some(buf), Some(sid)) = (&mut pending.text_buf, &pending.session_id) {
+                if sid == session_id {
+                    buf.push_str(text);
+                }
+            }
+        }
+    }
+
     async fn handle_broadcast_message(state: &Arc<Mutex<ClientState>>, data: &[u8]) {
         let Ok(message) = serde_json::from_slice::<ClientBroadcastMessage>(data) else {
             return;
@@ -340,23 +442,183 @@ impl ServiceMcpClient {
         // Wait for initial state.
         //
 
-        let poll_interval = Duration::from_millis(100);
         let max_polls = (self.timeout.as_millis() / 100) as usize;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let state = self.state.lock().await;
-            if state.system_state.is_some() {
-                return Ok(());
-            }
-        }
-
-        Err(anyhow!("Timeout waiting for initial state from service"))
+        self.poll_pending(
+            max_polls,
+            |s| s.system_state.as_ref().map(|_| ()),
+            "initial state from service",
+        )
+        .await
     }
 
     async fn publish_signal(&self, message: ClientSignalMessage) -> Result<()> {
         publish_json(&self.channel, CLIENT_SIGNAL_QUEUE, &message).await?;
         Ok(())
+    }
+
+    //
+    // Poll the shared `ClientState` every 100 ms, up to `max_polls` times,
+    // returning the first value extracted by `extract`. Used to wait for
+    // responses that arrive via the RabbitMQ consumer loop and are parked
+    // in dedicated `pending_*` slots.
+    //
+
+    async fn poll_pending<T>(
+        &self,
+        max_polls: usize,
+        mut extract: impl FnMut(&mut ClientState) -> Option<T>,
+        label: &str,
+    ) -> Result<T> {
+        let poll_interval = Duration::from_millis(100);
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            let mut state = self.state.lock().await;
+            if let Some(v) = extract(&mut state) {
+                return Ok(v);
+            }
+        }
+        Err(anyhow!("Timeout waiting for {}", label))
+    }
+
+    //
+    // Send an ACP request and await the response. If `collect_text` is true,
+    // any `session/update` notifications that carry agent_message_chunk text
+    // for the session targeted by this request (either explicitly via params
+    // or discovered from the response) are buffered and returned alongside
+    // the result.
+    //
+
+    async fn do_acp_request(
+        &self,
+        node_id: &str,
+        method: &str,
+        params: Value,
+        collect_text: bool,
+    ) -> Result<(Value, String)> {
+        let request_id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+
+        //
+        // session_id the caller already knows (e.g. session/prompt carries
+        // sessionId in params). When absent, we can't correlate streaming
+        // chunks at all — that's fine for non-prompt methods.
+        //
+
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        {
+            let mut state = self.state.lock().await;
+            state.pending_acp.insert(
+                request_id.clone(),
+                PendingAcp {
+                    response_tx: Some(tx),
+                    text_buf: if collect_text { Some(String::new()) } else { None },
+                    session_id,
+                },
+            );
+        }
+
+        let frame = build_request_frame(&request_id, node_id, method, params);
+        if let Err(e) = self
+            .publish_signal(ClientSignalMessage::AcpMessage {
+                client_id: self.client_id.clone(),
+                json_rpc: serde_json::to_string(&frame)?,
+            })
+            .await
+        {
+            //
+            // Publish failed — drop the pending entry so we don't leak it.
+            //
+
+            self.state.lock().await.pending_acp.remove(&request_id);
+            return Err(e);
+        }
+
+        let outcome = tokio::time::timeout(self.timeout, rx).await;
+
+        //
+        // Always drain the PendingAcp entry before producing a result so
+        // error paths (JSON-RPC error, dropped oneshot, timeout) don't leak
+        // the entry — handle_acp_frame would otherwise keep appending
+        // streamed chunks into its text_buf forever.
+        //
+
+        let text = {
+            let mut state = self.state.lock().await;
+            state
+                .pending_acp
+                .remove(&request_id)
+                .and_then(|p| p.text_buf)
+                .unwrap_or_default()
+        };
+
+        let result = match outcome {
+            Ok(Ok(Ok(value))) => value,
+            Ok(Ok(Err(message))) => return Err(anyhow!(message)),
+            Ok(Err(_)) => return Err(anyhow!("ACP response channel closed")),
+            Err(_) => {
+                return Err(anyhow!(
+                    "Timeout waiting for ACP response to {} after {}s",
+                    method,
+                    self.timeout.as_secs()
+                ));
+            }
+        };
+
+        Ok((result, text))
+    }
+}
+
+//
+// Build an ACP request envelope with the target node id injected into
+// `params._meta.praxis.nodeId` so the service-side AcpNodeProxy knows how
+// to route it. Existing `_meta.praxis` keys in `params` are preserved.
+//
+
+fn build_request_frame(
+    request_id: &str,
+    node_id: &str,
+    method: &str,
+    mut params: Value,
+) -> Value {
+    inject_node_id(&mut params, node_id);
+    json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": method,
+        "params": params,
+    })
+}
+
+fn build_notification_frame(node_id: &str, method: &str, mut params: Value) -> Value {
+    inject_node_id(&mut params, node_id);
+    json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+    })
+}
+
+fn inject_node_id(params: &mut Value, node_id: &str) {
+    if !params.is_object() {
+        *params = json!({});
+    }
+    let obj = params.as_object_mut().unwrap();
+    let meta = obj.entry("_meta").or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    let meta_obj = meta.as_object_mut().unwrap();
+    let praxis = meta_obj.entry("praxis").or_insert_with(|| json!({}));
+    if !praxis.is_object() {
+        *praxis = json!({});
+    }
+    let praxis_obj = praxis.as_object_mut().unwrap();
+    if !praxis_obj.contains_key("nodeId") {
+        praxis_obj.insert("nodeId".to_string(), Value::String(node_id.to_string()));
     }
 }
 
@@ -366,57 +628,38 @@ impl McpClient for ServiceMcpClient {
         self.state.lock().await.system_state.clone()
     }
 
-    async fn send_command(&self, node_id: &str, command: NodeCommand) -> Result<CommandResponse> {
-        let command_id = Uuid::new_v4().to_string();
+    async fn acp_request(
+        &self,
+        node_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        self.do_acp_request(node_id, method, params, false)
+            .await
+            .map(|(v, _)| v)
+    }
 
-        {
-            let mut state = self.state.lock().await;
-            state.pending_commands.insert(command_id.clone(), None);
-        }
+    async fn acp_request_collecting_text(
+        &self,
+        node_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<(Value, String)> {
+        self.do_acp_request(node_id, method, params, true).await
+    }
 
-        let request = CommandRequest {
-            command_id: command_id.clone(),
+    async fn acp_notification(
+        &self,
+        node_id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<()> {
+        let frame = build_notification_frame(node_id, method, params);
+        self.publish_signal(ClientSignalMessage::AcpMessage {
             client_id: self.client_id.clone(),
-            node_id: node_id.to_string(),
-            command,
-        };
-
-        self.publish_signal(ClientSignalMessage::Command(request)).await?;
-
-        //
-        // Poll for response.
-        //
-
-        let poll_interval = Duration::from_millis(250);
-        let max_polls = (self.timeout.as_millis() / 250) as usize;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-
-            let has_result = state
-                .pending_commands
-                .get(&command_id)
-                .map(|v| v.is_some())
-                .unwrap_or(false);
-
-            if has_result {
-                if let Some(Some(result)) = state.pending_commands.remove(&command_id) {
-                    return Ok(CommandResponse {
-                        command_id: command_id.clone(),
-                        node_id: node_id.to_string(),
-                        result,
-                    });
-                }
-            }
-        }
-
-        {
-            let mut state = self.state.lock().await;
-            state.pending_commands.remove(&command_id);
-        }
-
-        Err(anyhow!("Timeout waiting for command response"))
+            json_rpc: serde_json::to_string(&frame)?,
+        })
+        .await
     }
 
     async fn search_traffic(
@@ -435,18 +678,12 @@ impl McpClient for ServiceMcpClient {
 
         self.publish_signal(message).await?;
 
-        let poll_interval = Duration::from_millis(100);
-        let max_polls = 100;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-            if let Some(response) = state.pending_traffic_search.take() {
-                return Ok(response);
-            }
-        }
-
-        Err(anyhow!("Timeout waiting for traffic search response"))
+        self.poll_pending(
+            100,
+            |s| s.pending_traffic_search.take(),
+            "traffic search response",
+        )
+        .await
     }
 
     async fn run_semantic_op(
@@ -474,23 +711,39 @@ impl McpClient for ServiceMcpClient {
 
         self.publish_signal(message).await?;
 
-        let poll_interval = Duration::from_millis(100);
-        let max_polls = 50;
+        let request_id_for_poll = request_id.clone();
+        let result = self
+            .poll_pending(
+                50,
+                move |s| match s.pending_semantic_ops.get(&request_id_for_poll) {
+                    Some(Some(_)) => {
+                        if let Some(Some(id)) = s.pending_semantic_ops.remove(&request_id_for_poll)
+                        {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                },
+                "operation to be queued",
+            )
+            .await;
 
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-            if let Some(Some(operation_id)) = state.pending_semantic_ops.remove(&request_id) {
-                return Ok(operation_id);
-            }
+        //
+        // Drop the placeholder entry on timeout so a stale `Some(None)`
+        // doesn't mislead the dispatcher if a late response arrives.
+        //
+
+        if result.is_err() {
+            self.state
+                .lock()
+                .await
+                .pending_semantic_ops
+                .remove(&request_id);
         }
 
-        {
-            let mut state = self.state.lock().await;
-            state.pending_semantic_ops.remove(&request_id);
-        }
-
-        Err(anyhow!("Timeout waiting for operation to be queued"))
+        result
     }
 
     async fn cancel_semantic_op(&self, operation_id: String) -> Result<()> {
@@ -595,18 +848,12 @@ impl McpClient for ServiceMcpClient {
         };
         self.publish_signal(message).await?;
 
-        let poll_interval = Duration::from_millis(100);
-        let max_polls = 50;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-            if let Some(result) = state.pending_recon_get.take() {
-                return Ok(result);
-            }
-        }
-
-        Err(anyhow!("Timeout waiting for stored recon result"))
+        self.poll_pending(
+            50,
+            |s| s.pending_recon_get.take(),
+            "stored recon result",
+        )
+        .await
     }
 
     async fn request_chain_trigger_list(&self, chain_id: Option<String>) -> Result<()> {
@@ -691,18 +938,13 @@ impl McpClient for ServiceMcpClient {
         };
         self.publish_signal(message).await?;
 
-        let poll_interval = Duration::from_millis(100);
-        let max_polls = 50;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-            if let Some(result) = state.pending_op_def_add.take() {
-                return result.map_err(|e| anyhow!(e));
-            }
-        }
-
-        Err(anyhow!("Timeout waiting for operation definition to be created"))
+        self.poll_pending(
+            50,
+            |s| s.pending_op_def_add.take(),
+            "operation definition to be created",
+        )
+        .await?
+        .map_err(|e| anyhow!(e))
     }
 
     async fn delete_op_def(&self, full_name: &str) -> Result<()> {
@@ -717,18 +959,14 @@ impl McpClient for ServiceMcpClient {
         };
         self.publish_signal(message).await?;
 
-        let poll_interval = Duration::from_millis(100);
-        let max_polls = 50;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            let mut state = self.state.lock().await;
-            if let Some(result) = state.pending_op_def_delete.take() {
-                return result.map(|_| ()).map_err(|e| anyhow!(e));
-            }
-        }
-
-        Err(anyhow!("Timeout waiting for operation definition to be deleted"))
+        self.poll_pending(
+            50,
+            |s| s.pending_op_def_delete.take(),
+            "operation definition to be deleted",
+        )
+        .await?
+        .map(|_| ())
+        .map_err(|e| anyhow!(e))
     }
 
     async fn reset_node(&self, node_id: &str) -> Result<()> {
@@ -762,33 +1000,56 @@ impl McpServerManager {
         self.stop().await;
 
         let bind_addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-        common::log_info!("Starting MCP SSE server on {}", bind_addr);
+        common::log_info!("Starting MCP streamable-http server on {}", bind_addr);
 
-        let sse_server = rmcp::transport::sse_server::SseServer::serve(bind_addr).await?;
+        //
+        // rmcp 1.x replaced SSE transport with streamable-http. The server
+        // mounts at /mcp (was /sse) and we build it as an axum service
+        // instead of letting rmcp own the listener loop.
+        //
 
+        let ct = CancellationToken::new();
         let rabbitmq_url = rabbitmq_url.to_string();
-        let ct = sse_server.with_service(move || {
-            let url = rabbitmq_url.clone();
-            let client = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    ServiceMcpClient::connect(&url, 600).await
-                })
-            });
-            match client {
-                Ok(c) => PraxisServer::with_client(c),
-                Err(e) => {
-                    common::log_error!("Failed to create MCP client: {}", e);
-                    //
-                    // Return a server that will fail - there's no good fallback.
-                    //
-                    panic!("Failed to create MCP client: {}", e);
+
+        let service_ct = ct.clone();
+        let service: rmcp::transport::streamable_http_server::StreamableHttpService<
+            PraxisServer<ServiceMcpClient>,
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
+        > = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+            move || {
+                let url = rabbitmq_url.clone();
+                let client = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        ServiceMcpClient::connect(&url, 600).await
+                    })
+                });
+                match client {
+                    Ok(c) => Ok(PraxisServer::with_client(c)),
+                    Err(e) => {
+                        common::log_error!("Failed to create MCP client: {}", e);
+                        Err(std::io::Error::other(format!("Failed to create MCP client: {}", e)))
+                    }
                 }
-            }
+            },
+            std::sync::Arc::new(
+                rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+            ),
+            rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+                .with_cancellation_token(service_ct),
+        );
+
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+        let shutdown_ct = ct.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { shutdown_ct.cancelled_owned().await })
+                .await;
         });
 
         *self.cancellation_token.write().await = Some(ct);
 
-        common::log_info!("MCP SSE server started on port {}", port);
+        common::log_info!("MCP streamable-http server started on port {} (endpoint /mcp)", port);
         Ok(())
     }
 

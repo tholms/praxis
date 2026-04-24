@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Result};
+use serde_json::json;
 use std::time::Duration;
 
+use crate::acp_ext::{EXT_PRAXIS_GREP_FILES, EXT_PRAXIS_READ_FILE};
 use crate::mcp::McpClient;
 use crate::{
-    AgentCommand, AgentCommandResult, AgentFileType, AgentTool, ChainDefinitionFull,
-    ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo, ConfigItem, GrepFileEntry,
-    McpServer, NodeCommand, NodeCommandResult, OperationDefinitionInfo, SemanticOperationSpec,
-    SemanticOpUpdate, SessionItem, SystemState, TargetSpec, TriggerConfig,
+    AgentFileType, AgentTool, ChainDefinitionFull, ChainDefinitionInfo, ChainExecutionUpdate,
+    ChainTriggerInfo, ConfigItem, GrepFileEntry, McpServer, OperationDefinitionInfo,
+    SemanticOperationSpec, SemanticOpUpdate, SessionItem, SystemState, TargetSpec, TriggerConfig,
 };
 
 //
@@ -59,20 +60,6 @@ pub fn resolve_node_id(state: &SystemState, prefix: &str) -> Result<String> {
         })
         .map(|n| n.node_id.clone())
         .ok_or_else(|| anyhow!("No node found matching '{}'. Use node_list to see connected nodes.", prefix))
-}
-
-//
-// Resolve the selected agent short name for a node.
-//
-
-fn resolve_selected_agent(state: &SystemState, node_id: &str) -> Result<String> {
-    state
-        .nodes
-        .iter()
-        .find(|n| n.node_id == node_id)
-        .and_then(|n| n.selected_agent.as_ref())
-        .map(|a| a.short_name.clone())
-        .ok_or_else(|| anyhow!("No agent selected on node. Use agent_select to select one first."))
 }
 
 //
@@ -442,15 +429,15 @@ struct ResolvedRecon {
 async fn resolve_recon(
     client: &(impl McpClient + Sync),
     node_prefix: &str,
+    agent: &str,
     file_type: AgentFileType,
 ) -> Result<ResolvedRecon> {
     let state = client.get_state().await.ok_or_else(|| anyhow!("No state available. The service may still be starting — try again in a moment."))?;
     let node_id = resolve_node_id(&state, node_prefix)?;
-    let agent = resolve_selected_agent(&state, &node_id)?;
     let recon = client
-        .get_stored_recon(&node_id, &agent)
+        .get_stored_recon(&node_id, agent)
         .await?
-        .ok_or_else(|| anyhow!("No stored recon data. Run recon_run first, then select an agent with agent_select."))?;
+        .ok_or_else(|| anyhow!("No stored recon data for agent '{}' on this node. Run recon_run first.", agent))?;
 
     let paths: Vec<String> = match file_type {
         AgentFileType::Config => recon.config.iter().map(|c| c.path.clone()).collect(),
@@ -499,38 +486,75 @@ pub struct ReadFileResult {
 pub async fn recon_read_file(
     client: &(impl McpClient + Sync),
     node_prefix: &str,
+    agent: &str,
     file_type: AgentFileType,
     path: &str,
     line_start: Option<usize>,
     line_end: Option<usize>,
 ) -> Result<ReadFileResult> {
-    let resolved = resolve_recon(client, node_prefix, file_type).await?;
+    let resolved = resolve_recon(client, node_prefix, agent, file_type).await?;
     validate_paths(&resolved.paths, &[path.to_string()], file_type)?;
-    read_file_inner(client, &resolved.node_id, file_type, path, line_start, line_end).await
+    read_file_inner(client, &resolved.node_id, agent, file_type, path, line_start, line_end).await
 }
 
 async fn read_file_inner(
     client: &(impl McpClient + Sync),
     node_id: &str,
+    agent: &str,
     file_type: AgentFileType,
     path: &str,
     line_start: Option<usize>,
     line_end: Option<usize>,
 ) -> Result<ReadFileResult> {
-    let cmd = NodeCommand::Agent(AgentCommand::ReadFile {
-        file_type,
-        path: path.to_string(),
-        line_start,
-        line_end,
+    let mut params = json!({
+        "agent_short_name": agent,
+        "file_type": file_type,
+        "path": path,
     });
-    let response = client.send_command(node_id, cmd).await?;
-    match response.result {
-        NodeCommandResult::Agent(AgentCommandResult::ReadFileResult {
-            path, content, line_start, line_end, error, ..
-        }) => Ok(ReadFileResult { path, content, line_start, line_end, error }),
-        NodeCommandResult::Error { message } => Err(anyhow!(message)),
-        _ => Err(anyhow!("Unexpected response")),
+    if let Some(v) = line_start {
+        params["line_start"] = json!(v);
     }
+    if let Some(v) = line_end {
+        params["line_end"] = json!(v);
+    }
+
+    let result = client
+        .acp_request(node_id, EXT_PRAXIS_READ_FILE, params)
+        .await?;
+
+    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+        // Extension errors wrapped by `ext_err` return {"error": "..."} only.
+        // A successful read_file returns the full ReadFileResult struct which
+        // also has an optional `error` field. Distinguish by presence of
+        // `path`.
+        if !result.get("path").is_some() {
+            return Err(anyhow!(err.to_string()));
+        }
+    }
+
+    Ok(ReadFileResult {
+        path: result
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| path.to_string()),
+        content: result
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        line_start: result
+            .get("line_start")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        line_end: result
+            .get("line_end")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize),
+        error: result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    })
 }
 
 //
@@ -540,11 +564,12 @@ async fn read_file_inner(
 pub async fn recon_read_all(
     client: &(impl McpClient + Sync),
     node_prefix: &str,
+    agent: &str,
     file_type: AgentFileType,
     line_start: Option<usize>,
     line_end: Option<usize>,
 ) -> Result<Vec<ReadFileResult>> {
-    let resolved = resolve_recon(client, node_prefix, file_type).await?;
+    let resolved = resolve_recon(client, node_prefix, agent, file_type).await?;
 
     if resolved.paths.is_empty() {
         return Err(anyhow!("No files found in recon data. Run recon_run to discover files."));
@@ -552,7 +577,7 @@ pub async fn recon_read_all(
 
     let mut results = Vec::new();
     for path in &resolved.paths {
-        match read_file_inner(client, &resolved.node_id, file_type, path, line_start, line_end).await {
+        match read_file_inner(client, &resolved.node_id, agent, file_type, path, line_start, line_end).await {
             Ok(r) => results.push(r),
             Err(e) => results.push(ReadFileResult {
                 path: path.clone(),
@@ -579,34 +604,65 @@ pub struct GrepFilesResult {
 pub async fn recon_grep_file(
     client: &(impl McpClient + Sync),
     node_prefix: &str,
+    agent: &str,
     file_type: AgentFileType,
     paths: &[String],
     pattern: &str,
 ) -> Result<GrepFilesResult> {
-    let resolved = resolve_recon(client, node_prefix, file_type).await?;
-    grep_files_inner(client, &resolved.node_id, file_type, paths, pattern).await
+    let resolved = resolve_recon(client, node_prefix, agent, file_type).await?;
+    grep_files_inner(client, &resolved.node_id, agent, file_type, paths, pattern).await
 }
 
 async fn grep_files_inner(
     client: &(impl McpClient + Sync),
     node_id: &str,
+    agent: &str,
     file_type: AgentFileType,
     paths: &[String],
     pattern: &str,
 ) -> Result<GrepFilesResult> {
-    let cmd = NodeCommand::Agent(AgentCommand::GrepFiles {
-        file_type,
-        paths: paths.to_vec(),
-        pattern: pattern.to_string(),
+    let params = json!({
+        "agent_short_name": agent,
+        "file_type": file_type,
+        "paths": paths,
+        "pattern": pattern,
     });
-    let response = client.send_command(node_id, cmd).await?;
-    match response.result {
-        NodeCommandResult::Agent(AgentCommandResult::GrepFilesResult {
-            pattern, results, errors, ..
-        }) => Ok(GrepFilesResult { pattern, results, errors }),
-        NodeCommandResult::Error { message } => Err(anyhow!(message)),
-        _ => Err(anyhow!("Unexpected response")),
+
+    let result = client
+        .acp_request(node_id, EXT_PRAXIS_GREP_FILES, params)
+        .await?;
+
+    //
+    // If the node returned only an `error` (ext_err shape), surface it.
+    //
+
+    if result.get("pattern").is_none() {
+        if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+            return Err(anyhow!(err.to_string()));
+        }
     }
+
+    let pattern = result
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| pattern.to_string());
+    let results: Vec<GrepFileEntry> = result
+        .get("results")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| anyhow!("Failed to parse grep results: {}", e))?
+        .unwrap_or_default();
+    let errors: Vec<String> = result
+        .get("errors")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| anyhow!("Failed to parse grep errors: {}", e))?
+        .unwrap_or_default();
+
+    Ok(GrepFilesResult { pattern, results, errors })
 }
 
 //
@@ -617,17 +673,18 @@ async fn grep_files_inner(
 pub async fn recon_grep_all(
     client: &(impl McpClient + Sync),
     node_prefix: &str,
+    agent: &str,
     file_type: AgentFileType,
     pattern: &str,
 ) -> Result<GrepFilesResult> {
-    let resolved = resolve_recon(client, node_prefix, file_type).await?;
+    let resolved = resolve_recon(client, node_prefix, agent, file_type).await?;
 
     if resolved.paths.is_empty() {
         return Err(anyhow!("No files found in recon data. Run recon_run to discover files."));
     }
 
     let mut result = grep_files_inner(
-        client, &resolved.node_id, file_type, &resolved.paths, pattern,
+        client, &resolved.node_id, agent, file_type, &resolved.paths, pattern,
     ).await?;
 
     // Filter to only files with matches

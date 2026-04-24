@@ -1,8 +1,9 @@
 use crate::acp::AcpNotification;
 use crate::client::Client;
 use common::{
-    ChainDefinitionInfo, ChainExecutionUpdate, OperationDefinitionInfo, SemanticOpUpdate,
-    SessionUpdate, SystemState, TerminalOutput,
+    ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo, InterceptRule, InterceptStatus,
+    InterceptedTrafficEntry, OperationDefinitionInfo, SemanticOpUpdate, SessionUpdate,
+    SystemState, TerminalOutput, TrafficMatchWithDetails,
 };
 use crossterm::event::{Event, EventStream};
 use futures_util::StreamExt;
@@ -30,6 +31,10 @@ pub enum AppEvent {
         chain_executions: Vec<ChainExecutionUpdate>,
         reset_selection: bool,
     },
+    TriggersRefreshed {
+        triggers: Vec<ChainTriggerInfo>,
+        intercept_rules: Vec<InterceptRule>,
+    },
     SessionResponse(SessionResult),
     TerminalCreated {
         node_id: String,
@@ -38,17 +43,54 @@ pub enum AppEvent {
     TerminalCreateFailed(String),
     TerminalOutput(TerminalOutput),
     SessionStreamUpdate(SessionUpdate),
+    //
+    // Discovered sessions pulled from connected nodes' session/list when the
+    // Nodes window is opened. Each entry is merged into the local sessions
+    // map so restart-persistent sessions show up in the overlay.
+    //
+    NodeSessionsRefreshed {
+        entries: Vec<NodeSessionEntry>,
+    },
+    //
+    // Live intercept stream updates.
+    //
+    InterceptEntriesAppended(Vec<InterceptedTrafficEntry>),
+    InterceptMatchesAppended(Vec<TrafficMatchWithDetails>),
+    InterceptStatusChanged(InterceptStatus),
+    //
+    // LogQuery result — either a successful result set or an error message
+    // returned from the service.
+    //
+    LogQueryResult(Result<crate::client::LogQueryResults, String>),
     Tick,
+    AnimationTick,
+}
+
+pub struct NodeSessionEntry {
+    pub node_id: String,
+    pub agent_short_name: String,
+    pub session_id: String,
+    pub cwd: Option<String>,
 }
 
 pub enum SessionResult {
-    Created(String), // session_id
+    Created {
+        session_local_id: String,
+        session_id: String,
+    },
     Response {
+        session_local_id: String,
         transaction_id: String,
         text: String,
     },
-    Cancelled(String), // transaction_id
-    Error(String),     // error message
+    Cancelled {
+        session_local_id: String,
+        transaction_id: String,
+    },
+    Error {
+        session_local_id: String,
+        message: String,
+    },
 }
 
 pub struct EventHandler {
@@ -137,6 +179,48 @@ impl EventHandler {
         });
 
         //
+        // Live intercept stream subscribers.
+        //
+        let tx_intercept = tx.clone();
+        let mut intercept_rx = client.subscribe_intercept_entries();
+        tokio::spawn(async move {
+            while let Some(batch) = intercept_rx.recv().await {
+                if tx_intercept
+                    .send(AppEvent::InterceptEntriesAppended(batch))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let tx_intercept_matches = tx.clone();
+        let mut intercept_matches_rx = client.subscribe_intercept_matches();
+        tokio::spawn(async move {
+            while let Some(batch) = intercept_matches_rx.recv().await {
+                if tx_intercept_matches
+                    .send(AppEvent::InterceptMatchesAppended(batch))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let tx_intercept_status = tx.clone();
+        let mut intercept_status_rx = client.subscribe_intercept_status();
+        tokio::spawn(async move {
+            while let Some(status) = intercept_status_rx.recv().await {
+                if tx_intercept_status
+                    .send(AppEvent::InterceptStatusChanged(status))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        //
         // State poll — checks for new system state at a lower frequency and
         // only emits when the timestamp changes.
         //
@@ -160,14 +244,31 @@ impl EventHandler {
         });
 
         //
-        // Animation / housekeeping tick.
+        // Housekeeping tick (operations refresh, spinner animation).
         //
-        let tx_tick = tx;
+        let tx_tick = tx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(125));
             loop {
                 interval.tick().await;
                 if tx_tick.send(AppEvent::Tick).is_err() {
+                    break;
+                }
+            }
+        });
+
+        //
+        // Animation tick — drives the typewriter reveal for streaming
+        // assistant text. Kept separate from the housekeeping tick so
+        // reveal feels smooth (~33 fps) without pulling the rest of the
+        // app into a high-frequency refresh.
+        //
+        let tx_anim = tx;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(30));
+            loop {
+                interval.tick().await;
+                if tx_anim.send(AppEvent::AnimationTick).is_err() {
                     break;
                 }
             }

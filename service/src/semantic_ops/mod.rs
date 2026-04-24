@@ -3,35 +3,31 @@ pub mod executor;
 pub mod chain_execution;
 
 pub use manager::SemanticOpsManager;
-pub use executor::ResponseTracker;
 #[allow(unused_imports)]
-pub use executor::{execute_one_shot, execute_agent_mode, select_agent, create_session, close_session};
+pub use executor::{
+    cancel_session_prompt, close_session, create_session, execute_agent_mode, execute_by_mode,
+    execute_one_shot,
+};
 pub use chain_execution::ChainExecutor;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
 //
-// Per-node execution lock. Both semantic operations and chain executions
-// must acquire this lock before running on a node. This ensures only one
-// operation or chain runs on a node at any time.
+// Sentinel error returned by executors when an operation is cancelled.
+// Carrying a typed value lets callers distinguish cancellation from
+// failure via `downcast_ref::<Cancelled>()` instead of string-matching
+// the `Display` form of the error.
 //
 
-#[derive(Clone)]
-pub struct NodeExecLock {
-    locks: Arc<std::sync::RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Operation cancelled")
+    }
 }
 
-impl NodeExecLock {
-    pub fn new() -> Self {
-        Self {
-            locks: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        }
-    }
+impl std::error::Error for Cancelled {}
 
-    pub fn get(&self, node_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.locks.write().unwrap();
-        locks.entry(node_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
-    }
+pub fn is_cancelled(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Cancelled>().is_some()
 }
