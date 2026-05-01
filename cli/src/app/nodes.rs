@@ -204,6 +204,11 @@ impl App {
                         self.nodes.agent_selected += 1;
                     }
                 }
+                KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let Some(node) = self.nodes.nodes.get(self.nodes.selected) else { return };
+                    let Some(agent) = node.discovered_agents.get(self.nodes.agent_selected) else { return };
+                    self.open_recon(node.node_id.clone(), agent.short_name.clone());
+                }
                 KeyCode::Enter => {
                     self.start_session_with_selected_agent();
                 }
@@ -295,28 +300,47 @@ impl App {
             .unwrap_or(node.intercept_active);
 
         if currently_on {
-            //
-            // Disable path just needs a confirm prompt.
-            //
             self.confirm = Some(ConfirmAction {
                 message: format!("Disable interception on {}?", machine),
                 action: ConfirmKind::ToggleIntercept {
                     node_id,
                     enable: false,
+                    method: None,
                 },
             });
-        } else {
-            //
-            // Enable path opens the method picker — mirrors the web UI.
-            //
-            self.intercept_method_picker = Some(InterceptMethodPicker {
-                node_id,
-                machine_name: machine,
-                is_windows: os_lower.contains("windows"),
-                is_linux: os_lower.contains("linux"),
-                selected: 0,
-            });
+            return;
         }
+
+        //
+        // Auto-pick the intercept method by OS — TPROXY on Linux,
+        // wintun VPN on Windows, nothing on macOS or unknown
+        // platforms. The capability gate above already excludes
+        // unprivileged nodes; this just picks the right method.
+        //
+        let method = if os_lower.contains("linux") {
+            common::InterceptMethod::Tproxy
+        } else if os_lower.contains("windows") {
+            common::InterceptMethod::Vpn
+        } else {
+            self.intercept
+                .set_error(format!("Interception not supported on {}", node.os_details));
+            return;
+        };
+
+        let method_label = match method {
+            common::InterceptMethod::Tproxy => "TPROXY",
+            common::InterceptMethod::Vpn => "VPN",
+            common::InterceptMethod::Proxy => "system proxy",
+            common::InterceptMethod::Hosts => "hosts file",
+        };
+        self.confirm = Some(ConfirmAction {
+            message: format!("Enable interception on {} via {}?", machine, method_label),
+            action: ConfirmKind::ToggleIntercept {
+                node_id,
+                enable: true,
+                method: Some(method),
+            },
+        });
     }
 
     pub(crate) fn terminal_content_size() -> (u16, u16) {
@@ -940,6 +964,7 @@ impl App {
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
+            max_scroll: std::cell::Cell::new(0),
             is_waiting: false,
             history: Vec::new(),
             history_index: None,
@@ -1149,7 +1174,8 @@ impl App {
             }
             KeyCode::PageUp => {
                 if let Some(session) = self.nodes.active_session_mut() {
-                    session.scroll_offset = session.scroll_offset.saturating_add(10);
+                    let max = session.max_scroll.get();
+                    session.scroll_offset = session.scroll_offset.saturating_add(10).min(max);
                 }
             }
             KeyCode::PageDown => {

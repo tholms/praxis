@@ -11,7 +11,8 @@ use common::{
 use crate::config::service_config::{
     APPLICATION_LOGS_ENABLED, CLAUDE_CCRV1_ENABLED, CLAUDE_CCRV1_PORT,
     CLAUDE_CCRV2_ENABLED, CLAUDE_CCRV2_PORT, KNOWN_CONFIG_KEYS,
-    MCP_SERVER_ENABLED, MCP_SERVER_PORT,
+    MCP_SERVER_ENABLED, MCP_SERVER_PORT, PRAXIS_AGENT_SETTINGS,
+    PRAXIS_AGENT_SYSTEM_PROMPT,
 };
 use crate::conversions::{to_common as convert_chain_element, to_database as convert_msg_chain_element};
 use crate::database::{self, OperationDefinition};
@@ -216,6 +217,21 @@ pub async fn handle(ctx: &ServiceContext, message: ClientSignalMessage) -> Resul
             handle_lua_script_list(ctx, client_id).await,
         ClientSignalMessage::LuaAgentScriptToggleDisabled { client_id, script_id, disabled } =>
             handle_lua_script_toggle_disabled(ctx, client_id, script_id, disabled).await,
+
+        //
+        // Intercept targets.
+        //
+
+        ClientSignalMessage::InterceptTargetList { client_id } =>
+            handle_intercept_target_list(ctx, client_id).await,
+        ClientSignalMessage::InterceptTargetAdd { client_id, name, agent_short_name, domains, url_pattern } =>
+            handle_intercept_target_add(ctx, client_id, name, agent_short_name, domains, url_pattern).await,
+        ClientSignalMessage::InterceptTargetUpdate { client_id, target_id, name, agent_short_name, domains, url_pattern } =>
+            handle_intercept_target_update(ctx, client_id, target_id, name, agent_short_name, domains, url_pattern).await,
+        ClientSignalMessage::InterceptTargetDelete { client_id, target_id } =>
+            handle_intercept_target_delete(ctx, client_id, target_id).await,
+        ClientSignalMessage::InterceptTargetToggleDisabled { client_id, target_id, disabled } =>
+            handle_intercept_target_toggle_disabled(ctx, client_id, target_id, disabled).await,
 
         //
         // LogQuery.
@@ -804,6 +820,7 @@ async fn handle_config_set(
         let mut mcp_server_changed = false;
         let mut ccrv1_changed = false;
         let mut ccrv2_changed = false;
+        let mut praxis_agent_changed = false;
         for (key, value) in values {
             if !KNOWN_CONFIG_KEYS.contains(&key.as_str()) {
                 common::log_warn!("Setting unrecognized config key: '{}'", key);
@@ -821,6 +838,9 @@ async fn handle_config_set(
             }
             if key == CLAUDE_CCRV2_ENABLED || key == CLAUDE_CCRV2_PORT {
                 ccrv2_changed = true;
+            }
+            if key == PRAXIS_AGENT_SETTINGS || key == PRAXIS_AGENT_SYSTEM_PROMPT {
+                praxis_agent_changed = true;
             }
             if let Err(e) = config.set(key, value).await {
                 save_error = Some(e);
@@ -847,6 +867,38 @@ async fn handle_config_set(
                 let _ = publish_json_exchange(&ctx.broadcast_channel, NODE_BROADCAST_EXCHANGE, &node_message).await;
                 let client_message = ClientBroadcastMessage::EventLoggingSet { enabled };
                 let _ = publish_json_exchange(&ctx.broadcast_channel, CLIENT_BROADCAST_EXCHANGE, &client_message).await;
+            }
+
+            if praxis_agent_changed {
+                let settings = config.get_praxis_agent_settings();
+                let enabled = settings.as_ref().map(|s| s.enabled).unwrap_or(false);
+                let resolved_config = if enabled {
+                    let r = config.resolve_praxis_agent_config();
+                    if r.is_none() {
+                        common::log_warn!(
+                            "Praxis agent is enabled but its selected model could not be resolved"
+                        );
+                    }
+                    r
+                } else {
+                    None
+                };
+
+                let node_message = NodeBroadcastMessage::PraxisAgentEnabled {
+                    enabled,
+                    config: resolved_config.clone(),
+                };
+                let _ = publish_json_exchange(
+                    &ctx.broadcast_channel,
+                    NODE_BROADCAST_EXCHANGE,
+                    &node_message,
+                )
+                .await;
+                common::log_info!(
+                    "Broadcast PraxisAgentEnabled {{ enabled: {}, config: {} }} after config change",
+                    enabled,
+                    if resolved_config.is_some() { "present" } else { "absent" },
+                );
             }
 
             //
@@ -2780,6 +2832,207 @@ async fn handle_lua_script_toggle_disabled(
         }
         Err(e) => {
             common::log_error!("Failed to toggle disabled for script {}: {}", script_id, e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Intercept targets
+// ---------------------------------------------------------------------------
+
+//
+// Push the latest enabled intercept target list to all nodes. Used by
+// CRUD handlers below so node capture configuration stays in sync.
+//
+
+async fn broadcast_intercept_targets(ctx: &ServiceContext, action: &str) {
+    let targets = match ctx.database.get_enabled_intercept_targets().await {
+        Ok(t) => t,
+        Err(e) => {
+            common::log_error!("Failed to load intercept targets after {}: {}", action, e);
+            return;
+        }
+    };
+    if let Err(e) = ctx.node_handler.broadcast_intercept_targets(targets).await {
+        common::log_error!("Failed to broadcast intercept targets after {}: {}", action, e);
+    }
+}
+
+async fn handle_intercept_target_list(ctx: &ServiceContext, client_id: String) {
+    common::log_info!(
+        "Received InterceptTargetList from client {}",
+        common::short_id(&client_id)
+    );
+
+    match ctx.database.list_intercept_targets().await {
+        Ok(targets) => {
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetListResponse { targets },
+            )
+            .await;
+        }
+        Err(e) => {
+            common::log_error!("Failed to list intercept targets: {}", e);
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetError { message: e.to_string() },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_intercept_target_add(
+    ctx: &ServiceContext,
+    client_id: String,
+    name: String,
+    agent_short_name: String,
+    domains: Vec<String>,
+    url_pattern: Option<String>,
+) {
+    common::log_info!(
+        "Received InterceptTargetAdd from client {}",
+        common::short_id(&client_id)
+    );
+
+    let id = uuid::Uuid::new_v4().to_string();
+    match ctx.database.upsert_intercept_target(
+        &id, &name, &agent_short_name, &domains,
+        url_pattern.as_deref(), false, false,
+    ).await {
+        Ok(()) => {
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetAdded { id, name },
+            )
+            .await;
+            broadcast_intercept_targets(ctx, "add").await;
+        }
+        Err(e) => {
+            common::log_error!("Failed to add intercept target: {}", e);
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetError { message: e.to_string() },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_intercept_target_update(
+    ctx: &ServiceContext,
+    client_id: String,
+    target_id: String,
+    name: String,
+    agent_short_name: String,
+    domains: Vec<String>,
+    url_pattern: Option<String>,
+) {
+    common::log_info!(
+        "Received InterceptTargetUpdate from client {}",
+        common::short_id(&client_id)
+    );
+
+    match ctx.database.update_intercept_target(
+        &target_id, &name, &agent_short_name, &domains, url_pattern.as_deref(),
+    ).await {
+        Ok(_) => {
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetUpdated { id: target_id, name },
+            )
+            .await;
+            broadcast_intercept_targets(ctx, "update").await;
+        }
+        Err(e) => {
+            common::log_error!("Failed to update intercept target: {}", e);
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetError { message: e.to_string() },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_intercept_target_delete(
+    ctx: &ServiceContext,
+    client_id: String,
+    target_id: String,
+) {
+    common::log_info!(
+        "Received InterceptTargetDelete from client {}",
+        common::short_id(&client_id)
+    );
+
+    match ctx.database.delete_intercept_target(&target_id).await {
+        Ok(success) => {
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetDeleted {
+                    target_id: target_id.clone(),
+                    success,
+                },
+            )
+            .await;
+            if success {
+                broadcast_intercept_targets(ctx, "delete").await;
+            }
+        }
+        Err(e) => {
+            common::log_error!("Failed to delete intercept target: {}", e);
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetError { message: e.to_string() },
+            )
+            .await;
+        }
+    }
+}
+
+async fn handle_intercept_target_toggle_disabled(
+    ctx: &ServiceContext,
+    client_id: String,
+    target_id: String,
+    disabled: bool,
+) {
+    common::log_info!(
+        "Received InterceptTargetToggleDisabled from client {}",
+        common::short_id(&client_id)
+    );
+
+    match ctx.database.set_intercept_target_disabled(&target_id, disabled).await {
+        Ok(success) => {
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetDisabledToggled {
+                    target_id: target_id.clone(),
+                    disabled,
+                },
+            )
+            .await;
+            if success {
+                broadcast_intercept_targets(ctx, "toggle disabled").await;
+            }
+        }
+        Err(e) => {
+            common::log_error!("Failed to toggle intercept target disabled: {}", e);
+            let _ = send_to_client(
+                &ctx.client_publish_channel,
+                &client_id,
+                ClientDirectMessage::InterceptTargetError { message: e.to_string() },
+            )
+            .await;
         }
     }
 }

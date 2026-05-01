@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use common::{ReconResult, SessionContext};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use uuid::Uuid;
 
 //
@@ -38,9 +39,17 @@ pub trait AgentSession: Send + Sync {
     fn mode(&self) -> AgentMode;
     fn transact(&self, prompt: &str) -> Result<String>;
     fn close(&self);
-    #[allow(dead_code)]
-    fn supports_streaming(&self) -> bool {
-        false
+
+    //
+    // Streaming sessions return a non-empty handle. The handler registers a
+    // common::SessionUpdateKind sender against this handle in the
+    // crate::acp update-sender registry before invoking transact, and the
+    // session pulls and pushes through it to stream chunks/tool calls/etc.
+    // back to the originating client. Non-streaming sessions return None
+    // and emit a single AgentMessageChunk after transact completes.
+    //
+    fn acp_handle(&self) -> Option<String> {
+        None
     }
 
     //
@@ -51,20 +60,17 @@ pub trait AgentSession: Send + Sync {
         false
     }
 
+    //
+    // Adopt a shared cancellation flag. The handler hands the
+    // NodeSession's cancel_flag to the session before calling transact so
+    // a single AtomicBool drives both `session/cancel` and the in-loop
+    // cancellation polls. Default: no-op (the session keeps whatever flag
+    // it constructed itself with, or none).
+    //
+    fn set_cancel_flag(&self, _flag: Arc<AtomicBool>) {}
+
     #[allow(dead_code)]
     fn as_any(&self) -> &dyn std::any::Any;
-}
-
-//
-// Trait for agents that support traffic interception.
-// Implement this trait to enable interception of network traffic for an agent.
-//
-
-pub trait AgentIntercept: Send + Sync {
-    fn intercept_domains(&self) -> Vec<&str>;           // Domains to intercept.
-    fn intercept_url_pattern(&self) -> Option<&str> {   // Regex pattern applied to full URL for filtering. Collect telemetry on match.
-        None
-    }
 }
 
 //
@@ -92,10 +98,6 @@ pub trait AgentRecon: Send + Sync {
 pub trait Agent: Send + Sync {
     fn name(&self) -> &str;
     fn short_name(&self) -> &str;
-
-    fn as_intercept(&self) -> Option<&dyn AgentIntercept> {
-        None
-    }
 
     fn as_recon(&self) -> Option<&dyn AgentRecon> {
         None

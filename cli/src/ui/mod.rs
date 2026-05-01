@@ -5,6 +5,7 @@ pub mod nodes;
 pub mod operations;
 pub mod orchestrator;
 pub mod popup;
+pub mod recon;
 pub mod settings;
 pub mod status_bar;
 pub mod theme;
@@ -74,9 +75,6 @@ pub fn render(f: &mut Frame, app: &App) {
     }
     if let Some(ref confirm) = app.confirm {
         popup::render_confirm(f, confirm);
-    }
-    if let Some(ref picker) = app.intercept_method_picker {
-        popup::render_intercept_method_picker(f, picker);
     }
 }
 

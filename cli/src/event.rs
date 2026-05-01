@@ -2,8 +2,8 @@ use crate::acp::AcpNotification;
 use crate::client::Client;
 use common::{
     ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo, InterceptRule, InterceptStatus,
-    InterceptedTrafficEntry, OperationDefinitionInfo, SemanticOpUpdate, SessionUpdate,
-    SystemState, TerminalOutput, TrafficMatchWithDetails,
+    InterceptedTrafficEntry, OperationDefinitionInfo, ReconResult, SemanticOpUpdate, SystemState,
+    TerminalOutput, TrafficMatchWithDetails,
 };
 use crossterm::event::{Event, EventStream};
 use futures_util::StreamExt;
@@ -42,7 +42,6 @@ pub enum AppEvent {
     },
     TerminalCreateFailed(String),
     TerminalOutput(TerminalOutput),
-    SessionStreamUpdate(SessionUpdate),
     //
     // Discovered sessions pulled from connected nodes' session/list when the
     // Nodes window is opened. Each entry is merged into the local sessions
@@ -57,6 +56,23 @@ pub enum AppEvent {
     InterceptEntriesAppended(Vec<InterceptedTrafficEntry>),
     InterceptMatchesAppended(Vec<TrafficMatchWithDetails>),
     InterceptStatusChanged(InterceptStatus),
+    ReconGetResponse {
+        node_id: String,
+        agent_short_name: String,
+        recon_result: Option<ReconResult>,
+        performed_at: Option<String>,
+        is_semantic: Option<bool>,
+    },
+    ReconConfigContent {
+        target_idx: usize,
+        content: Option<String>,
+        error: Option<String>,
+    },
+    ReconSessionContent {
+        target_idx: usize,
+        content: Option<String>,
+        error: Option<String>,
+    },
     //
     // LogQuery result — either a successful result set or an error message
     // returned from the service.
@@ -157,22 +173,6 @@ impl EventHandler {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 if tx_poll.send(AppEvent::SessionListPoll).is_err() {
-                    break;
-                }
-            }
-        });
-
-        //
-        // Session streaming updates from ACP agent sessions.
-        //
-        let tx_session = tx.clone();
-        let mut session_rx = client.subscribe_session_updates();
-        tokio::spawn(async move {
-            while let Some(update) = session_rx.recv().await {
-                if tx_session
-                    .send(AppEvent::SessionStreamUpdate(update))
-                    .is_err()
-                {
                     break;
                 }
             }

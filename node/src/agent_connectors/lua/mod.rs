@@ -3,18 +3,17 @@ pub mod runtime;
 mod session;
 mod uia;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use common::{LuaRegisteredAgentInfo, ReconResult, SessionContext};
 use mlua::Lua;
-use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use uuid::Uuid;
 
-use crate::agent_connectors::traits::{Agent, AgentIntercept, AgentRecon, AgentSession};
+use crate::agent_connectors::traits::{Agent, AgentRecon, AgentSession};
 
 pub use session::LuaAgentSession;
 
@@ -37,9 +36,9 @@ pub struct LuaAgent {
     name: String,
     short_name: String,
     //
-    // Probe VM: long-lived, used by fingerprint, recon, intercept_domains,
-    // intercept_url_pattern, and read_session_content. Not attached to any
-    // session. Built from source at agent-load time.
+    // Probe VM: long-lived, used by fingerprint, recon, and
+    // read_session_content. Not attached to any session. Built from
+    // source at agent-load time.
     //
     vm: Arc<Mutex<Lua>>,
     //
@@ -55,11 +54,7 @@ pub struct LuaAgent {
     //
     session_vms: RwLock<HashMap<Uuid, Arc<Mutex<Lua>>>>,
     has_recon: bool,
-    has_intercept_domains: bool,
-    has_intercept_url_pattern: bool,
     has_read_session_content: bool,
-    intercept_domains_cache: OnceCell<Vec<String>>,
-    intercept_url_pattern_cache: OnceCell<Option<String>>,
     fingerprint_process_path: RwLock<Option<String>>,
     fingerprint_version: RwLock<Option<String>>,
     fingerprint_at: RwLock<Option<Instant>>,
@@ -85,11 +80,7 @@ impl LuaAgent {
             bytecode,
             session_vms: RwLock::new(HashMap::new()),
             has_recon: manifest.has_recon,
-            has_intercept_domains: manifest.has_intercept_domains,
-            has_intercept_url_pattern: manifest.has_intercept_url_pattern,
             has_read_session_content: manifest.has_read_session_content,
-            intercept_domains_cache: OnceCell::new(),
-            intercept_url_pattern_cache: OnceCell::new(),
             fingerprint_process_path: RwLock::new(None),
             fingerprint_version: RwLock::new(None),
             fingerprint_at: RwLock::new(None),
@@ -107,20 +98,8 @@ impl Agent for LuaAgent {
         &self.short_name
     }
 
-    fn as_intercept(&self) -> Option<&dyn AgentIntercept> {
-        if self.has_intercept_domains || self.has_intercept_url_pattern {
-            Some(self)
-        } else {
-            None
-        }
-    }
-
     fn as_recon(&self) -> Option<&dyn AgentRecon> {
-        if self.has_recon {
-            Some(self)
-        } else {
-            None
-        }
+        if self.has_recon { Some(self) } else { None }
     }
 
     async fn do_fingerprint(&self) -> bool {
@@ -130,15 +109,13 @@ impl Agent for LuaAgent {
             let lua = match vm.try_lock() {
                 Ok(lua) => lua,
                 Err(_) => {
-                    common::log_warn!(
-                        "Lua VM busy for '{}', skipping fingerprint",
-                        short_name
-                    );
+                    common::log_warn!("Lua VM busy for '{}', skipping fingerprint", short_name);
                     return None;
                 }
             };
             Some(runtime::vm_fingerprint_details(&lua))
-        }).await;
+        })
+        .await;
 
         let available = match result {
             Ok(Some(Ok(details))) => {
@@ -158,7 +135,11 @@ impl Agent for LuaAgent {
                 self.fingerprint_at.read().unwrap().is_some()
             }
             Err(e) => {
-                common::log_error!("Lua fingerprint task panicked for '{}': {}", self.short_name, e);
+                common::log_error!(
+                    "Lua fingerprint task panicked for '{}': {}",
+                    self.short_name,
+                    e
+                );
                 false
             }
         };
@@ -178,7 +159,12 @@ impl Agent for LuaAgent {
         let process_path = self.fingerprint_process_path.read().unwrap().clone();
         common::log_info!(
             "Lua agent '{}': create_session_with_id (session_id={}, process_path={:?}, working_dir={:?}, yolo={}, prompt_timeout={:?})",
-            self.short_name, session_id, process_path, context.working_dir, context.yolo_mode, context.prompt_timeout_secs
+            self.short_name,
+            session_id,
+            process_path,
+            context.working_dir,
+            context.yolo_mode,
+            context.prompt_timeout_secs
         );
 
         //
@@ -192,7 +178,9 @@ impl Agent for LuaAgent {
             Err(e) => {
                 common::log_error!(
                     "Lua agent '{}': failed to build session VM for {}: {}",
-                    self.short_name, session_id, e
+                    self.short_name,
+                    session_id,
+                    e
                 );
                 return None;
             }
@@ -208,7 +196,9 @@ impl Agent for LuaAgent {
             Err(e) => {
                 common::log_error!(
                     "Lua agent '{}': session creation failed for {}: {}",
-                    self.short_name, session_id, e
+                    self.short_name,
+                    session_id,
+                    e
                 );
                 self.session_vms.write().unwrap().remove(&session_id);
                 None
@@ -217,10 +207,17 @@ impl Agent for LuaAgent {
     }
 
     fn drop_session(&self, session_id: Uuid) {
-        if self.session_vms.write().unwrap().remove(&session_id).is_some() {
+        if self
+            .session_vms
+            .write()
+            .unwrap()
+            .remove(&session_id)
+            .is_some()
+        {
             common::log_debug!(
                 "Lua agent '{}': dropped session VM for {}",
-                self.short_name, session_id
+                self.short_name,
+                session_id
             );
         }
     }
@@ -236,34 +233,13 @@ impl Agent for LuaAgent {
                 Err(e) => {
                     common::log_error!(
                         "Lua read_session_content failed for '{}': {}",
-                        self.short_name, e
+                        self.short_name,
+                        e
                     );
                 }
             }
         }
         std::fs::read_to_string(session_file).ok()
-    }
-}
-
-impl AgentIntercept for LuaAgent {
-    fn intercept_domains(&self) -> Vec<&str> {
-        let mut domains = Vec::new();
-        for domain in self.intercept_domains_cache.get_or_init(|| {
-            let lua = self.vm.lock().unwrap();
-            runtime::vm_intercept_domains(&lua).unwrap_or_default()
-        }) {
-            domains.push(domain.as_str());
-        }
-        domains
-    }
-
-    fn intercept_url_pattern(&self) -> Option<&str> {
-        self.intercept_url_pattern_cache
-            .get_or_init(|| {
-                let lua = self.vm.lock().unwrap();
-                runtime::vm_intercept_url_pattern(&lua).unwrap_or(None)
-            })
-            .as_deref()
     }
 }
 
@@ -282,8 +258,14 @@ impl AgentRecon for LuaAgent {
                     return None;
                 }
             };
-            Some(runtime::vm_recon(&lua, is_semantic, process_path.as_deref()))
-        }).await {
+            Some(runtime::vm_recon(
+                &lua,
+                is_semantic,
+                process_path.as_deref(),
+            ))
+        })
+        .await
+        {
             Ok(Some(Ok(result))) => result,
             Ok(Some(Err(e))) => {
                 common::log_error!("Lua recon failed for '{}': {}", self.short_name, e);
@@ -303,8 +285,7 @@ impl AgentRecon for LuaAgent {
 
         if !result.tools.mcp_servers.is_empty() {
             let servers = std::mem::take(&mut result.tools.mcp_servers);
-            result.tools.mcp_servers =
-                crate::utils::mcp::fetch_all_mcp_server_tools(servers).await;
+            result.tools.mcp_servers = crate::utils::mcp::fetch_all_mcp_server_tools(servers).await;
         }
 
         Some(result)

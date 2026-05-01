@@ -17,7 +17,7 @@ pub mod wintun;
 pub use certificate::CertificateAuthority;
 pub use proxy::{InterceptProxy, ProxyConfig};
 pub use state::cleanup_stale_state;
-pub use system_proxy::{disable_system_proxy, enable_system_proxy, SavedProxySettings};
+pub use system_proxy::{SavedProxySettings, disable_system_proxy, enable_system_proxy};
 #[cfg(target_os = "linux")]
 pub use tproxy::TproxyManager;
 #[cfg(target_os = "linux")]
@@ -26,19 +26,18 @@ pub use tun_linux::LinuxTunManager;
 pub use wintun::WintunManager;
 
 use anyhow::{Context, Result};
-use common::{InterceptMethod, InterceptedTrafficEntry};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use tokio::task::JoinHandle;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use tokio_util::sync::CancellationToken;
-use crate::agent_connectors::Agent;
+use common::{InterceptMethod, InterceptTargetConfig, InterceptedTrafficEntry};
 use dns_resolver::DomainResolver;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use packet_engine::PacketEngine;
 use routing::{Ipv6Manager, RouteManager, VpnBypassManager};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::{RwLock, mpsc};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tokio::task::JoinHandle;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tokio_util::sync::CancellationToken;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tun_device::SharedTunDevice;
 
@@ -111,7 +110,6 @@ pub struct NodeInterceptManager {
     /// DNS resolver for TPROXY mode
     #[cfg(target_os = "linux")]
     tproxy_dns_resolver: Option<Arc<DomainResolver>>,
-
 }
 
 impl NodeInterceptManager {
@@ -162,10 +160,10 @@ impl NodeInterceptManager {
         }
     }
 
-    /// Enable interception for all agents that support it
+    /// Enable interception using the supplied target list
     ///
     /// This will:
-    /// 1. Collect intercept domains from all agents
+    /// 1. Collect intercept domains from each target's domains list
     /// 2. Create a root CA certificate
     /// 3. Install the root CA in the system certificate store
     /// 4. Generate leaf certificates for each domain
@@ -176,7 +174,7 @@ impl NodeInterceptManager {
     ///    - Hosts: Configure hosts file entries
     pub async fn enable(
         &mut self,
-        agents: &[Arc<dyn Agent>],
+        targets: &[InterceptTargetConfig],
         method: InterceptMethod,
     ) -> Result<InterceptMethod> {
         if self.is_enabled {
@@ -206,66 +204,63 @@ impl NodeInterceptManager {
         }
 
         //
-        // Collect domains and URL patterns from all agents that support
-        // interception.
+        // Collect domains and URL patterns from the configured target list.
+        // Targets are pushed by the service via the registration ack and
+        // refreshed via NodeBroadcastMessage::InterceptTargetsUpdate.
         //
         self.domains.clear();
         self.domain_to_agent.clear();
         let mut domain_to_url_pattern = HashMap::new();
 
-        for agent in agents {
+        for target in targets {
+            if target.domains.is_empty() {
+                continue;
+            }
+
+            common::log_info!(
+                "Adding intercept domains from target '{}' ({}): {:?}",
+                target.name,
+                target.agent_short_name,
+                target.domains
+            );
+
             //
-            // Check if agent supports interception via the AgentIntercept
-            // trait.
+            // Compile the URL pattern once per target. Uses fancy-regex
+            // so patterns with negative lookahead (e.g. ^(?!.*pacman).*$)
+            // continue to work.
             //
-            if let Some(intercept) = agent.as_intercept() {
-                let domains = intercept.intercept_domains();
-                if !domains.is_empty() {
-                    common::log_info!(
-                        "Adding intercept domains from {}: {:?}",
-                        agent.short_name(),
-                        domains
-                    );
-
-                    //
-                    // Compile URL pattern once for all domains of this agent
-                    // Uses fancy-regex to support negative lookahead, e.g.,
-                    // ^(?!.*pacman).*$.
-                    //
-                    let url_pattern = intercept.intercept_url_pattern().and_then(|pattern| {
-                        match fancy_regex::Regex::new(pattern) {
-                            Ok(re) => {
-                                common::log_info!("  URL filter pattern: {}", pattern);
-                                Some(re)
-                            }
-                            Err(e) => {
-                                common::log_warn!(
-                                    "Invalid URL pattern '{}' for {}: {}",
-                                    pattern,
-                                    agent.short_name(),
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    });
-
-                    for domain in domains {
-                        self.domains.insert(domain.to_string());
-                        self.domain_to_agent
-                            .insert(domain.to_string(), agent.short_name().to_string());
-
-                        if let Some(ref re) = url_pattern {
-                            domain_to_url_pattern.insert(domain.to_string(), re.clone());
-                        }
+            let url_pattern = target.url_pattern.as_deref().and_then(|pattern| {
+                match fancy_regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        common::log_info!("  URL filter pattern: {}", pattern);
+                        Some(re)
                     }
+                    Err(e) => {
+                        common::log_warn!(
+                            "Invalid URL pattern '{}' for target '{}': {}",
+                            pattern,
+                            target.name,
+                            e
+                        );
+                        None
+                    }
+                }
+            });
+
+            for domain in &target.domains {
+                self.domains.insert(domain.clone());
+                self.domain_to_agent
+                    .insert(domain.clone(), target.agent_short_name.clone());
+
+                if let Some(ref re) = url_pattern {
+                    domain_to_url_pattern.insert(domain.clone(), re.clone());
                 }
             }
         }
 
         if self.domains.is_empty() {
             return Err(anyhow::anyhow!(
-                "No agents have intercept domains configured"
+                "No intercept targets configured — add one in Settings → Intercept"
             ));
         }
 
@@ -497,14 +492,19 @@ impl NodeInterceptManager {
                     } else {
                         None
                     };
-                    if let Err(e) = env_vars::set_intercept_env_vars(&cert_path, proxy_addr.as_deref()) {
+                    if let Err(e) =
+                        env_vars::set_intercept_env_vars(&cert_path, proxy_addr.as_deref())
+                    {
                         common::log_warn!("Failed to set intercept environment variables: {}", e);
                     } else {
                         intercept_state.env_vars_set = true;
                     }
                 }
                 Err(e) => {
-                    common::log_warn!("Failed to export CA certificate for NODE_EXTRA_CA_CERTS: {}", e);
+                    common::log_warn!(
+                        "Failed to export CA certificate for NODE_EXTRA_CA_CERTS: {}",
+                        e
+                    );
                 }
             }
         }
@@ -646,9 +646,7 @@ impl NodeInterceptManager {
         //    IPv6 traffic doesn't go through our packet engine properly.
         //
         let mut ipv6_manager = Ipv6Manager::new();
-        ipv6_manager
-            .disable()
-            .context("Failed to disable IPv6")?;
+        ipv6_manager.disable().context("Failed to disable IPv6")?;
 
         //
         // 1. Set up VPN bypass routing FIRST (before adding TUN routes).
@@ -752,7 +750,9 @@ impl NodeInterceptManager {
     /// Non-Windows/non-Linux stub for VPN mode.
     #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
     async fn enable_vpn_mode(&mut self, _proxy_port: u16) -> Result<()> {
-        Err(anyhow::anyhow!("VPN mode is only supported on Windows and Linux"))
+        Err(anyhow::anyhow!(
+            "VPN mode is only supported on Windows and Linux"
+        ))
     }
 
     /// Enable TPROXY mode with iptables-based packet interception (Linux).
@@ -770,9 +770,7 @@ impl NodeInterceptManager {
         //    TPROXY rules only handle IPv4 currently.
         //
         let mut ipv6_manager = Ipv6Manager::new();
-        ipv6_manager
-            .disable()
-            .context("Failed to disable IPv6")?;
+        ipv6_manager.disable().context("Failed to disable IPv6")?;
         self.ipv6_manager = Some(ipv6_manager);
 
         //
@@ -1000,7 +998,6 @@ impl NodeInterceptManager {
     pub fn proxy_port(&self) -> Option<u16> {
         self.proxy_port
     }
-
 }
 
 impl NodeInterceptManager {

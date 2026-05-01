@@ -24,6 +24,7 @@ pub enum RuntimeExit {
     Reset,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     channel: Arc<Channel>,
     node_id: String,
@@ -32,10 +33,17 @@ pub async fn run(
     factory: Arc<AgentFactory>,
     shutdown_token: CancellationToken,
     lua_scripts: Vec<String>,
+    intercept_targets: Vec<common::InterceptTargetConfig>,
+    praxis_agent_enabled: bool,
+    praxis_agent_config: Option<common::PraxisAgentConfig>,
 ) -> anyhow::Result<RuntimeExit> {
-    listen_to_queues(channel, node_id, node_queue, registry, factory, shutdown_token, lua_scripts).await
+    listen_to_queues(
+        channel, node_id, node_queue, registry, factory, shutdown_token,
+        lua_scripts, intercept_targets, praxis_agent_enabled, praxis_agent_config,
+    ).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn listen_to_queues(
     channel: Arc<Channel>,
     node_id: String,
@@ -44,6 +52,9 @@ async fn listen_to_queues(
     factory: Arc<AgentFactory>,
     shutdown_token: CancellationToken,
     lua_scripts: Vec<String>,
+    intercept_targets: Vec<common::InterceptTargetConfig>,
+    praxis_agent_enabled: bool,
+    praxis_agent_config: Option<common::PraxisAgentConfig>,
 ) -> anyhow::Result<RuntimeExit> {
     //
     // Create a private broadcast queue bound to the fanout exchange.
@@ -119,13 +130,23 @@ async fn listen_to_queues(
     common::logging::init("node".to_string(), node_id.clone(), event_log_tx);
 
     //
-    // Node state for intercept and terminal management.
+    // Node state for intercept and terminal management. Seeds the
+    // initial intercept target list from the registration ack.
     //
-    let node_state = Arc::new(RwLock::new(NodeState::new(
-        node_id.clone(),
-        terminal_output_tx,
-        traffic_tx,
-    )));
+    let node_state = Arc::new(RwLock::new({
+        let mut state = NodeState::new(
+            node_id.clone(),
+            terminal_output_tx,
+            traffic_tx,
+        );
+        state.intercept_targets = intercept_targets;
+        state.factory_config.praxis_agent_config = if praxis_agent_enabled {
+            praxis_agent_config
+        } else {
+            None
+        };
+        state
+    }));
 
     //
     // Node-side ACP server. Handles inbound ACP JSON-RPC frames arriving on
@@ -500,13 +521,21 @@ async fn listen_to_queues(
     // Rebuild agent registry with Lua scripts received in the RegistrationAck.
     //
 
+    {
+        let mut state = node_state.write().await;
+        state.last_lua_scripts = lua_scripts.clone();
+        factory.set_config(state.factory_config.clone());
+    }
+
     if !lua_scripts.is_empty() {
         common::log_info!(
             "Rebuilding agent registry with {} scripts from service",
             lua_scripts.len()
         );
-        handle_agent_registry_update(lua_scripts, &registry, &factory).await;
+    } else {
+        common::log_info!("Rebuilding agent registry with native and embedded agents");
     }
+    handle_agent_registry_update(lua_scripts, &registry, &factory).await;
 
     //
     // Run initial fingerprint after registry rebuild, then send first update.
@@ -643,23 +672,47 @@ async fn listen_to_queues(
                         match serde_json::from_slice::<NodeDirectMessage>(&delivery.data) {
                             Ok(message) => match message {
                                 NodeDirectMessage::RegistrationAck(ack) => {
-                                    if !ack.lua_scripts.is_empty() {
+                                    //
+                                    // Always refresh the intercept target list and
+                                    // Praxis agent state — even if the script set
+                                    // didn't change, the service may have updated
+                                    // either of those.
+                                    //
+                                    let scripts = ack.lua_scripts;
+                                    {
+                                        let mut state = node_state.write().await;
+                                        state.intercept_targets = ack.intercept_targets;
+                                        state.last_lua_scripts = scripts.clone();
+                                        state.factory_config.praxis_agent_config =
+                                            if ack.praxis_agent_enabled {
+                                                ack.praxis_agent_config
+                                            } else {
+                                                None
+                                            };
+                                        factory.set_config(state.factory_config.clone());
+                                    }
+
+                                    if !scripts.is_empty() {
                                         common::log_info!(
                                             "Re-registration: rebuilding registry with {} scripts",
-                                            ack.lua_scripts.len()
+                                            scripts.len()
                                         );
-                                        handle_agent_registry_update(
-                                            ack.lua_scripts,
-                                            &registry,
-                                            &factory,
-                                        )
-                                        .await;
-                                        fingerprint_all_agents(&registry, &fingerprint_cache).await;
-                                        if let Err(e) = send_node_information_update(
-                                            &channel, &node_id, &registry, &node_state, &fingerprint_cache,
-                                        ).await {
-                                            common::log_error!("Failed to send info update after re-registration: {}", e);
-                                        }
+                                    } else {
+                                        common::log_info!(
+                                            "Re-registration: rebuilding registry with native and embedded agents"
+                                        );
+                                    }
+                                    handle_agent_registry_update(
+                                        scripts,
+                                        &registry,
+                                        &factory,
+                                    )
+                                    .await;
+                                    fingerprint_all_agents(&registry, &fingerprint_cache).await;
+                                    if let Err(e) = send_node_information_update(
+                                        &channel, &node_id, &registry, &node_state, &fingerprint_cache,
+                                    ).await {
+                                        common::log_error!("Failed to send info update after re-registration: {}", e);
                                     }
                                 }
                                 NodeDirectMessage::Command(cmd_request) => {
@@ -753,8 +806,38 @@ async fn handle_broadcast_message(
                 if enabled { "enabled" } else { "disabled" }
             );
         }
+        NodeBroadcastMessage::PraxisAgentEnabled { enabled, config } => {
+            common::log_info!(
+                "Received PraxisAgentEnabled: {} (config: {})",
+                if enabled { "enabled" } else { "disabled" },
+                if config.is_some() { "present" } else { "absent" },
+            );
+            let lua_scripts = {
+                let mut state = node_state.write().await;
+                state.factory_config.praxis_agent_config =
+                    if enabled { config } else { None };
+                factory.set_config(state.factory_config.clone());
+                state.last_lua_scripts.clone()
+            };
+
+            handle_agent_registry_update(lua_scripts, registry, factory).await;
+
+            fingerprint_all_agents(registry, fingerprint_cache).await;
+            if let Err(e) = send_node_information_update(
+                channel, node_id, registry, node_state, fingerprint_cache,
+            )
+            .await
+            {
+                common::log_error!("Failed to send info update after Praxis agent change: {}", e);
+            }
+        }
         NodeBroadcastMessage::AgentRegistryUpdate { scripts } => {
             common::log_info!("Received AgentRegistryUpdate with {} scripts", scripts.len());
+            {
+                let mut state = node_state.write().await;
+                state.last_lua_scripts = scripts.clone();
+                factory.set_config(state.factory_config.clone());
+            }
             handle_agent_registry_update(scripts, registry, factory).await;
 
             fingerprint_all_agents(registry, fingerprint_cache).await;
@@ -765,6 +848,17 @@ async fn handle_broadcast_message(
             {
                 common::log_error!("Failed to send info update after registry rebuild: {}", e);
             }
+        }
+        NodeBroadcastMessage::InterceptTargetsUpdate { targets } => {
+            let count = targets.len();
+            {
+                let mut state = node_state.write().await;
+                state.intercept_targets = targets;
+            }
+            common::log_info!(
+                "Received InterceptTargetsUpdate ({} target(s)); will apply on next intercept enable",
+                count
+            );
         }
     }
 }
@@ -789,8 +883,7 @@ async fn handle_command(
 
     let result = match request.command.clone() {
         NodeCommand::Intercept(cmd) => {
-            let agents = registry.read().await.get_all();
-            handle_intercept_command(cmd, &agents, node_state).await
+            handle_intercept_command(cmd, node_state).await
         }
         NodeCommand::Terminal(cmd) => {
             handle_terminal_command(cmd, &request.client_id, node_state).await
@@ -798,6 +891,11 @@ async fn handle_command(
         NodeCommand::Config(cmd) => handle_config_command(cmd, node_state).await,
         NodeCommand::AgentRegistry(cmd) => match cmd {
             common::AgentRegistryCommand::Update { scripts } => {
+                {
+                    let mut state = node_state.write().await;
+                    state.last_lua_scripts = scripts.clone();
+                    factory.set_config(state.factory_config.clone());
+                }
                 handle_agent_registry_update(scripts, registry, factory).await
             }
             common::AgentRegistryCommand::List => {
@@ -901,26 +999,13 @@ async fn send_node_information_update(
     };
 
     //
-    // Determine if interception is supported on this node. Supported on
-    // Windows (all methods) and Linux (system proxy only).
+    // Determine if interception is supported on this node. Now node-level,
+    // not per-agent: Windows (all methods) and Linux (system proxy / TPROXY
+    // / VPN). The per-target filter is decided server-side via the
+    // configured intercept target list.
     //
 
-    let intercept_supported = {
-        #[cfg(any(windows, target_os = "linux"))]
-        {
-            agents.iter().any(|agent| {
-                if let Some(intercept) = agent.as_intercept() {
-                    !intercept.intercept_domains().is_empty()
-                } else {
-                    false
-                }
-            })
-        }
-        #[cfg(not(any(windows, target_os = "linux")))]
-        {
-            false
-        }
-    };
+    let intercept_supported = cfg!(any(windows, target_os = "linux"));
 
     //
     // Build the update message and publish it to the service. selected_agent

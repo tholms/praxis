@@ -10,7 +10,7 @@ import { LuaCodeEditor } from '../common/LuaCodeEditor';
 import { useApp } from '../../context/AppContext';
 import { getFeatureFlags } from '../../utils/featureFlags';
 
-type Tab = 'llm' | 'agents' | 'service' | 'about';
+type Tab = 'llm' | 'agents' | 'intercept' | 'service' | 'about';
 type LLMView = 'models' | 'features';
 
 interface SettingsModalProps {
@@ -49,11 +49,22 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     state, getConfig, setConfig, clearEventLog,
     listLuaAgentScripts, addLuaAgentScript, updateLuaAgentScript,
     deleteLuaAgentScript, resetLuaAgentScriptDefaults, toggleLuaAgentScriptDisabled,
+    listInterceptTargets, addInterceptTarget, updateInterceptTarget,
+    deleteInterceptTarget, toggleInterceptTargetDisabled,
   } = useApp();
 
 
   const [activeTab, setActiveTab] = useState<Tab>('llm');
   const [llmView, setLlmView] = useState<LLMView>('models');
+
+  //
+  // Praxis agent settings.
+  //
+
+  const [praxisModelRef, setPraxisModelRef] = useState('');
+  const [praxisThinkingEffort, setPraxisThinkingEffort] = useState('');
+  const [praxisEnabled, setPraxisEnabled] = useState(false);
+  const [praxisSystemPrompt, setPraxisSystemPrompt] = useState('');
 
   //
   // Model definitions state.
@@ -129,6 +140,22 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [showBuiltinWarning, setShowBuiltinWarning] = useState(false);
 
   //
+  // Intercept target form state. editingTargetId === null with isEditingTarget
+  // == true means "create new"; else it's an edit on the named id.
+  //
+
+  const [isEditingTarget, setIsEditingTarget] = useState(false);
+  const [editingTargetId, setEditingTargetId] = useState<string | null>(null);
+  const [targetForm, setTargetForm] = useState<{
+    name: string;
+    agent_short_name: string;
+    domains: string;
+    url_pattern: string;
+  }>({ name: '', agent_short_name: '', domains: '', url_pattern: '' });
+  const [targetFormError, setTargetFormError] = useState<string | null>(null);
+  const [confirmDeleteTargetId, setConfirmDeleteTargetId] = useState<string | null>(null);
+
+  //
   // Load config and providers on mount.
   //
 
@@ -150,6 +177,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       'claude_ccrv1_port',
       'claude_ccrv2_enabled',
       'claude_ccrv2_port',
+      'praxis_agent_settings',
+      'praxis_agent_system_prompt',
     ]);
   }, [state.connected, getConfig]);
 
@@ -189,6 +218,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       listLuaAgentScripts();
     }
   }, [activeTab, state.connected, listLuaAgentScripts]);
+
+  //
+  // Load intercept targets when the intercept tab becomes active.
+  //
+
+  useEffect(() => {
+    if (activeTab === 'intercept' && state.connected) {
+      listInterceptTargets();
+    }
+  }, [activeTab, state.connected, listInterceptTargets]);
 
   //
   // Sync config into local state.
@@ -245,6 +284,18 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       setCcrV2Enabled(false);
     }
     setCcrV2Port(cfg.claude_ccrv2_port || '8587');
+
+    if (cfg.praxis_agent_settings) {
+      try {
+        const s = JSON.parse(cfg.praxis_agent_settings);
+        setPraxisModelRef(s.modelRef || '');
+        setPraxisThinkingEffort(s.thinkingEffort || '');
+        setPraxisEnabled(!!s.enabled);
+      } catch { /* ignore */ }
+    }
+    if (cfg.praxis_agent_system_prompt) {
+      setPraxisSystemPrompt(cfg.praxis_agent_system_prompt);
+    }
   }, [state.config]);
 
   //
@@ -264,6 +315,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       llm_orchestrator_max_tokens: maxTokens,
     });
   }, [setConfig]);
+
+  const savePraxisSettings = useCallback(() => {
+    setConfig({
+      praxis_agent_settings: JSON.stringify({
+        modelRef: praxisModelRef,
+        thinkingEffort: praxisThinkingEffort,
+        enabled: praxisEnabled,
+      }),
+      praxis_agent_system_prompt: praxisSystemPrompt,
+    });
+  }, [setConfig, praxisModelRef, praxisThinkingEffort, praxisEnabled, praxisSystemPrompt]);
 
   //
   // Model CRUD handlers.
@@ -516,6 +578,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: 'llm', label: 'LLM', icon: <Cpu size={14} /> },
     { id: 'agents', label: 'Agents', icon: <FileCode size={14} /> },
+    { id: 'intercept', label: 'Intercept', icon: <Wifi size={14} /> },
     { id: 'service', label: 'Service', icon: <Server size={14} /> },
     { id: 'about', label: 'About', icon: <Info size={14} /> },
   ];
@@ -589,7 +652,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 ]).map(v => (
                   <button
                     key={v.id}
-                    onClick={() => setLlmView(v.id)}
+                    onClick={() => { setLlmView(v.id); }}
                     className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
                       llmView === v.id
                         ? 'text-highlight border-[var(--accent-info)]'
@@ -933,6 +996,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   )}
                 </div>
               )}
+
             </div>
           )}
 
@@ -944,6 +1008,90 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
           {activeTab === 'agents' && (
             <div className="flex flex-col flex-1 min-h-0 p-5 pb-0">
+              <div className="mb-5 flex-shrink-0">
+                <h3 className="text-xs font-semibold text-highlight tracking-wider mb-0.5">PRAXIS AGENT</h3>
+                <p className="text-[10px] text-muted mb-3">Native agent connector exposed by nodes when enabled.</p>
+
+                {modelDefinitions.length === 0 ? (
+                  <div className="p-6 text-center text-muted border border-dashed border-subtle">
+                    <Key size={24} className="mx-auto mb-2 opacity-50" />
+                    <p className="text-xs">No model definitions available</p>
+                    <p className="text-[10px] mt-0.5">
+                      <button onClick={() => { setActiveTab('llm'); setLlmView('models'); }} className="text-[var(--accent-info)] hover:underline">
+                        Add model definitions
+                      </button> to configure the Praxis Agent
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3 p-2.5 bg-[var(--bg-secondary)] border border-dim">
+                      <div className="w-32 flex-shrink-0">
+                        <p className="text-xs font-medium text-highlight">Enabled</p>
+                        <p className="text-[10px] text-muted">Expose connector</p>
+                      </div>
+                      <button
+                        onClick={() => setPraxisEnabled(v => !v)}
+                        className="flex items-center gap-1.5 text-xs text-muted hover:text-highlight transition-colors"
+                      >
+                        {praxisEnabled
+                          ? <CircleCheck size={14} className="text-[var(--accent-success)]" />
+                          : <Circle size={14} className="text-[var(--text-secondary)]" />}
+                        {praxisEnabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-3 p-2.5 bg-[var(--bg-secondary)] border border-dim">
+                      <div className="w-32 flex-shrink-0">
+                        <p className="text-xs font-medium text-highlight">Model</p>
+                        <p className="text-[10px] text-muted">Session backend</p>
+                      </div>
+                      <select
+                        value={praxisModelRef}
+                        onChange={e => setPraxisModelRef(e.target.value)}
+                        className={`flex-1 ${inputCls}`}
+                      >
+                        <option value="">Select model...</option>
+                        {modelDefinitions.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-3 p-2.5 bg-[var(--bg-secondary)] border border-dim">
+                      <div className="w-32 flex-shrink-0">
+                        <p className="text-xs font-medium text-highlight">Thinking Effort</p>
+                        <p className="text-[10px] text-muted">Model-specific</p>
+                      </div>
+                      <input
+                        type="text"
+                        value={praxisThinkingEffort}
+                        onChange={e => setPraxisThinkingEffort(e.target.value)}
+                        placeholder="low, medium, high"
+                        className={`flex-1 ${inputCls}`}
+                      />
+                    </div>
+
+                    <div className="p-2.5 bg-[var(--bg-secondary)] border border-dim space-y-2">
+                      <div>
+                        <p className="text-xs font-medium text-highlight">System Prompt</p>
+                        <p className="text-[10px] text-muted">Prompt sent to the model for Praxis agent sessions.</p>
+                      </div>
+                      <textarea
+                        value={praxisSystemPrompt}
+                        onChange={e => setPraxisSystemPrompt(e.target.value)}
+                        rows={4}
+                        placeholder="You are Praxis, an autonomous agent running on the target system..."
+                        className={`${inputCls} resize-y font-mono min-h-[6rem]`}
+                      />
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button onClick={savePraxisSettings} className={btnSave}>
+                        <Save size={12} /> Save Praxis Agent
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center justify-between mb-3 flex-shrink-0">
                 <div>
                   <h3 className="text-xs font-semibold text-highlight tracking-wider mb-0.5">AGENT DEFINITIONS</h3>
@@ -1129,6 +1277,232 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   )}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/*
+          //
+          // Intercept tab — manages the intercept-target list (URLs +
+          // filters) the service pushes to nodes.
+          //
+          */}
+
+          {activeTab === 'intercept' && (
+            <div className="space-y-5">
+              <div>
+                <h3 className="text-xs font-semibold text-highlight tracking-wider mb-0.5">INTERCEPT TARGETS</h3>
+                <p className="text-[10px] text-muted">
+                  Domains and URL filters captured by the node-level proxy. Built-ins ship with default values; edit, disable, or add your own.
+                </p>
+              </div>
+
+              {!isEditingTarget && (
+                <div className="space-y-1">
+                  {state.interceptTargets.length === 0 && (
+                    <div className="text-[11px] text-muted py-3">
+                      No intercept targets configured.
+                    </div>
+                  )}
+                  {state.interceptTargets.map(target => (
+                    <div
+                      key={target.id}
+                      className="flex items-start gap-2 px-2 py-1.5 border border-subtle hover:border-dim transition-colors"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 text-[11px]">
+                          <span className={target.disabled ? 'text-dim line-through' : 'text-highlight'}>
+                            {target.name}
+                          </span>
+                          <span className="text-dim">agent={target.agent_short_name}</span>
+                          {target.is_builtin && (
+                            <span className="text-[9px] uppercase tracking-wider text-[var(--accent-info)]">builtin</span>
+                          )}
+                          {target.disabled && (
+                            <span className="text-[9px] uppercase tracking-wider text-[var(--accent-error)]">disabled</span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-muted mt-0.5 break-all">
+                          {target.domains.join(', ')}
+                          {target.url_pattern ? <span className="text-dim"> · /{target.url_pattern}/</span> : null}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => toggleInterceptTargetDisabled(target.id, !target.disabled)}
+                          className="p-1 hover:bg-[var(--bg-tertiary)] text-muted hover:text-highlight"
+                          title={target.disabled ? 'Enable' : 'Disable'}
+                        >
+                          {target.disabled ? <Circle size={12} /> : <CircleCheck size={12} />}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setIsEditingTarget(true);
+                            setEditingTargetId(target.id);
+                            setTargetForm({
+                              name: target.name,
+                              agent_short_name: target.agent_short_name,
+                              domains: target.domains.join(', '),
+                              url_pattern: target.url_pattern ?? '',
+                            });
+                            setTargetFormError(null);
+                          }}
+                          className="p-1 hover:bg-[var(--bg-tertiary)] text-muted hover:text-highlight"
+                          title="Edit"
+                        >
+                          <Edit2 size={12} />
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteTargetId(target.id)}
+                          className="p-1 hover:bg-[var(--bg-tertiary)] text-muted hover:text-[var(--accent-error)]"
+                          title="Delete"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    onClick={() => {
+                      setIsEditingTarget(true);
+                      setEditingTargetId(null);
+                      setTargetForm({ name: '', agent_short_name: '', domains: '', url_pattern: '' });
+                      setTargetFormError(null);
+                    }}
+                    className={`${btnGreen} mt-2`}
+                  >
+                    <Plus size={12} />
+                    Add intercept target
+                  </button>
+                </div>
+              )}
+
+              {isEditingTarget && (
+                <div className="space-y-3 border border-subtle p-3">
+                  <div className="text-xs font-semibold text-highlight">
+                    {editingTargetId ? 'Edit intercept target' : 'Add intercept target'}
+                  </div>
+                  <div className="space-y-2">
+                    <label className="block text-[10px] text-muted">
+                      Name
+                      <input
+                        type="text"
+                        value={targetForm.name}
+                        onChange={e => setTargetForm({ ...targetForm, name: e.target.value })}
+                        className={inputCls + ' mt-0.5'}
+                        placeholder="e.g. My Custom Agent"
+                      />
+                    </label>
+                    <label className="block text-[10px] text-muted">
+                      Agent short name
+                      <input
+                        type="text"
+                        value={targetForm.agent_short_name}
+                        onChange={e => setTargetForm({ ...targetForm, agent_short_name: e.target.value })}
+                        className={inputCls + ' mt-0.5'}
+                        placeholder="e.g. claudecode"
+                      />
+                    </label>
+                    <label className="block text-[10px] text-muted">
+                      Domains (comma- or newline-separated)
+                      <textarea
+                        rows={2}
+                        value={targetForm.domains}
+                        onChange={e => setTargetForm({ ...targetForm, domains: e.target.value })}
+                        className={inputCls + ' mt-0.5 font-mono'}
+                        placeholder="api.example.com, api2.example.com"
+                      />
+                    </label>
+                    <label className="block text-[10px] text-muted">
+                      URL pattern (regex, optional)
+                      <input
+                        type="text"
+                        value={targetForm.url_pattern}
+                        onChange={e => setTargetForm({ ...targetForm, url_pattern: e.target.value })}
+                        className={inputCls + ' mt-0.5 font-mono'}
+                        placeholder="messages"
+                      />
+                    </label>
+                  </div>
+                  {targetFormError && (
+                    <div className="text-[10px] text-[var(--accent-error)]">{targetFormError}</div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        const name = targetForm.name.trim();
+                        const agent = targetForm.agent_short_name.trim();
+                        const domains = Array.from(new Set(
+                          targetForm.domains.split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+                        ));
+                        const urlPattern = targetForm.url_pattern.trim() || null;
+                        if (!name) { setTargetFormError('Name is required'); return; }
+                        if (!agent) { setTargetFormError('Agent short name is required'); return; }
+                        if (domains.length === 0) { setTargetFormError('At least one domain is required'); return; }
+                        if (editingTargetId) {
+                          updateInterceptTarget(editingTargetId, name, agent, domains, urlPattern);
+                        } else {
+                          addInterceptTarget(name, agent, domains, urlPattern);
+                        }
+                        setIsEditingTarget(false);
+                        setEditingTargetId(null);
+                      }}
+                      className={btnSave}
+                    >
+                      <Save size={12} />
+                      Save
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsEditingTarget(false);
+                        setEditingTargetId(null);
+                        setTargetFormError(null);
+                      }}
+                      className="px-2.5 py-1 text-xs text-muted hover:text-highlight transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {confirmDeleteTargetId && (
+                <Modal
+                  isOpen={true}
+                  onClose={() => setConfirmDeleteTargetId(null)}
+                  title="Delete intercept target"
+                  size="sm"
+                >
+                  <div className="space-y-3">
+                    <p className="text-xs">
+                      Delete{' '}
+                      <span className="text-highlight font-medium">
+                        {state.interceptTargets.find(t => t.id === confirmDeleteTargetId)?.name ?? '?'}
+                      </span>
+                      ? This stops capturing the listed domains until you re-add the target.
+                    </p>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => setConfirmDeleteTargetId(null)}
+                        className="px-2.5 py-1 text-xs text-muted hover:text-highlight"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (confirmDeleteTargetId) {
+                            deleteInterceptTarget(confirmDeleteTargetId);
+                          }
+                          setConfirmDeleteTargetId(null);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-[var(--accent-error)]/10 text-[var(--accent-error)] border border-[var(--accent-error)]/30 hover:bg-[var(--accent-error)]/20 transition-colors"
+                      >
+                        <Trash2 size={12} />
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </Modal>
+              )}
             </div>
           )}
 

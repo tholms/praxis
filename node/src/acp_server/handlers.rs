@@ -7,9 +7,10 @@ use acp::schema::{
     CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
     Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
     ListSessionsResponse, NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion,
-    SessionInfo, SessionUpdate, StopReason, TextContent,
+    SessionInfo, SessionUpdate, StopReason, TextContent, ToolCall as AcpToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
-use common::SessionContext;
+use common::{SessionContext, SessionUpdateKind};
 use serde_json::{json, Value};
 
 use super::extensions::{
@@ -31,10 +32,17 @@ pub async fn handle_initialize(
 
     let connectors: Vec<Value> = {
         let reg = server.registry().read().await;
-        reg.list_lua_agents()
+        let mut connectors = reg
+            .get_all()
             .into_iter()
-            .map(|info| json!({ "shortName": info.short_name, "name": info.name }))
-            .collect()
+            .map(|agent| json!({ "shortName": agent.short_name(), "name": agent.name() }))
+            .collect::<Vec<_>>();
+        connectors.sort_by(|a, b| {
+            let a = a.get("shortName").and_then(|v| v.as_str()).unwrap_or_default();
+            let b = b.get("shortName").and_then(|v| v.as_str()).unwrap_or_default();
+            a.cmp(b)
+        });
+        connectors
     };
 
     let meta_value = json!({
@@ -144,6 +152,16 @@ pub async fn handle_session_new(
         context,
         cancel_flag: Arc::new(AtomicBool::new(false)),
     });
+
+    //
+    // Hand the session our cancellation flag so a single AtomicBool drives
+    // both `session/cancel` and any in-loop cancellation polls. Sessions
+    // that don't care no-op the default.
+    //
+    node_session
+        .session
+        .set_cancel_flag(Arc::clone(&node_session.cancel_flag));
+
     server.store().insert(Arc::clone(&node_session));
 
     if let Some(id) = id {
@@ -203,14 +221,46 @@ pub async fn handle_session_prompt(
     }
 
     //
+    // Streaming sessions (ACP-backed Lua sessions, native Praxis agent, etc.)
+    // expose an `acp_handle` they own. We register a SessionUpdateKind sender
+    // against that handle before calling transact, then spawn a forwarder that
+    // drains every event and emits it as a JSON-RPC `session/update`
+    // notification back to the originating external client. When transact
+    // returns, all sender clones drop and the forwarder exits naturally.
+    //
+
+    let acp_handle = node_session.session.acp_handle();
+
+    let forwarder = if let Some(handle) = acp_handle.clone() {
+        let (update_tx, update_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SessionUpdateKind>();
+        crate::acp::register_update_sender(&handle, update_tx);
+
+        let server_for_fwd = Arc::clone(&server);
+        let client_id_for_fwd = client_id.to_string();
+        let session_id_for_fwd = session_id_str.clone();
+        Some(tokio::spawn(async move {
+            forward_updates(
+                server_for_fwd,
+                client_id_for_fwd,
+                session_id_for_fwd,
+                update_rx,
+            )
+            .await;
+        }))
+    } else {
+        None
+    };
+
+    //
     // Run transact on a blocking thread so the async runtime isn't held by
-    // the synchronous Lua VM call. Stream a single AgentMessageChunk with
-    // the full response; fine-grained streaming can be added later by
-    // plumbing an update channel through the Lua acp_prompt path.
+    // a synchronous Lua VM call. Non-streaming sessions emit a single
+    // AgentMessageChunk with the full response after transact returns.
     //
 
     let session_for_task = Arc::clone(&node_session.session);
     let cancel = Arc::clone(&node_session.cancel_flag);
+
     let result = tokio::task::spawn_blocking(move || {
         if cancel.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("cancelled before start"));
@@ -219,15 +269,37 @@ pub async fn handle_session_prompt(
     })
     .await;
 
+    //
+    // Wait for the forwarder to drain any in-flight updates. The senders
+    // owned by the transact path drop when transact returns, which closes
+    // the channel and lets the forwarder finish.
+    //
+
+    if let Some(fwd) = forwarder {
+        let _ = fwd.await;
+    }
+
+    let streaming = acp_handle.is_some();
+
     match result {
         Ok(Ok(response)) => {
-            server.send_session_notification(
-                client_id,
-                &session_id_str,
-                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(response),
-                ))),
-            );
+            //
+            // Only echo the full response for non-streaming agents. Streaming
+            // agents already pushed every chunk through one of the forwarders
+            // above, so re-sending the assembled text would duplicate it.
+            //
+
+            if !streaming {
+                server.send_session_notification(
+                    client_id,
+                    &session_id_str,
+                    SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                        TextContent::new(response),
+                    ))),
+                );
+            } else {
+                let _ = response;
+            }
             if let Some(id) = id {
                 let stop = if node_session.cancel_flag.load(Ordering::SeqCst) {
                     StopReason::Cancelled
@@ -305,6 +377,78 @@ pub async fn handle_session_close(
             id,
             serde_json::to_value(CloseSessionResponse::default()).unwrap_or(Value::Null),
         );
+    }
+}
+
+//
+// Drain SessionUpdateKind events emitted by the underlying ACP client and
+// translate each one into a JSON-RPC `session/update` notification destined
+// for the originating external client. Returns when the channel closes,
+// which happens once the prompt's Lua call has dropped its sender clones.
+//
+
+async fn forward_updates(
+    server: Arc<NodeAcpServer>,
+    client_id: String,
+    session_id: String,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<SessionUpdateKind>,
+) {
+    while let Some(kind) = rx.recv().await {
+        let Some(update) = session_update_to_acp(kind) else {
+            continue;
+        };
+        server.send_session_notification(&client_id, &session_id, update);
+    }
+}
+
+fn session_update_to_acp(kind: SessionUpdateKind) -> Option<SessionUpdate> {
+    match kind {
+        SessionUpdateKind::TextChunk { text } => Some(SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new(text))),
+        )),
+
+        SessionUpdateKind::ToolCall {
+            tool_name,
+            tool_id,
+            input,
+        } => {
+            let mut tc = AcpToolCall::new(tool_id, tool_name);
+            if !input.is_empty() && input != "{}" {
+                if let Ok(v) = serde_json::from_str::<Value>(&input) {
+                    tc = tc.raw_input(v);
+                }
+            }
+            Some(SessionUpdate::ToolCall(tc))
+        }
+
+        SessionUpdateKind::ToolResult {
+            tool_id,
+            output,
+            is_error,
+        } => {
+            let mut fields = ToolCallUpdateFields::new().status(if is_error {
+                ToolCallStatus::Failed
+            } else {
+                ToolCallStatus::Completed
+            });
+            if !output.is_empty() {
+                fields = fields.content(vec![ToolCallContent::Content(
+                    acp::schema::Content::new(output),
+                )]);
+            }
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                tool_id, fields,
+            )))
+        }
+
+        //
+        // PermissionRequest, AgentStatus and Error are not currently surfaced
+        // through the ACP wire — see follow-up work to bridge these via the
+        // proper session/request_permission RPC.
+        //
+        SessionUpdateKind::PermissionRequest { .. }
+        | SessionUpdateKind::AgentStatus { .. }
+        | SessionUpdateKind::Error { .. } => None,
     }
 }
 

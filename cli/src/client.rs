@@ -71,6 +71,7 @@ struct ClientState {
     pending_acp: HashMap<String, PendingAcp>,
     pending_terminal_creates: HashMap<String, oneshot::Sender<Result<String, String>>>,
     cached_project_paths: Vec<String>,
+    recon_cache: HashMap<(String, String), common::ReconResult>,
     operations: Vec<SemanticOpUpdate>,
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
@@ -79,7 +80,7 @@ struct ClientState {
     current_chain: Option<ChainDefinitionFull>,
     pending_semantic_op: Option<String>,
     lua_agent_scripts: Vec<LuaAgentScriptInfo>,
-    session_update_tx: Option<tokio::sync::mpsc::UnboundedSender<common::SessionUpdate>>,
+    intercept_targets: Vec<common::InterceptTargetInfo>,
 
     //
     // Intercept traffic: per-request one-shot senders and live streaming
@@ -291,12 +292,19 @@ impl Client {
             // Operation and chain responses.
             //
             ClientDirectMessage::ReconGetResponse {
-                recon_result: Some(recon),
+                node_id,
+                agent_short_name,
+                recon_result,
                 ..
             } => {
-                state.cached_project_paths = recon.project_paths.clone();
+                if let Some(ref recon) = recon_result {
+                    state.cached_project_paths = recon.project_paths.clone();
+                    state.recon_cache.insert(
+                        (node_id.clone(), agent_short_name.clone()),
+                        recon.clone(),
+                    );
+                }
             }
-            ClientDirectMessage::ReconGetResponse { .. } => {}
             ClientDirectMessage::SemanticOpQueued { operation_id, .. } => {
                 state.pending_semantic_op = Some(operation_id);
             }
@@ -401,11 +409,24 @@ impl Client {
                 // Trigger a re-fetch handled by the app layer.
             }
 
-            ClientDirectMessage::SessionUpdate(update) => {
-                if let Some(ref tx) = state.session_update_tx {
-                    let _ = tx.send(update);
-                }
+            ClientDirectMessage::InterceptTargetListResponse { targets } => {
+                state.intercept_targets = targets;
             }
+            ClientDirectMessage::InterceptTargetAdded { .. }
+            | ClientDirectMessage::InterceptTargetUpdated { .. }
+            | ClientDirectMessage::InterceptTargetDeleted { .. }
+            | ClientDirectMessage::InterceptTargetDisabledToggled { .. }
+            | ClientDirectMessage::InterceptTargetError { .. } => {
+                // Re-fetch handled by the app layer.
+            }
+
+            //
+            // ClientDirectMessage::SessionUpdate is the legacy NodeCommand
+            // streaming path; node sessions now stream via ACP `session/update`
+            // notifications carried in `ClientDirectMessage::AcpMessage`. The
+            // variant is still defined for the web client; ignore it here.
+            //
+            ClientDirectMessage::SessionUpdate(_) => {}
 
             //
             // Intercept traffic responses.
@@ -868,6 +889,19 @@ impl Client {
         self.state.lock().await.cached_project_paths.clone()
     }
 
+    pub async fn get_cached_recon(
+        &self,
+        node_id: &str,
+        agent_short_name: &str,
+    ) -> Option<common::ReconResult> {
+        self.state
+            .lock()
+            .await
+            .recon_cache
+            .get(&(node_id.to_string(), agent_short_name.to_string()))
+            .cloned()
+    }
+
     //
     // Node management.
     //
@@ -987,17 +1021,6 @@ impl Client {
         let state = self.state.clone();
         tokio::spawn(async move {
             state.lock().await.terminal_output_tx = Some(tx);
-        });
-        rx
-    }
-
-    pub fn subscribe_session_updates(
-        &self,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<common::SessionUpdate> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            state.lock().await.session_update_tx = Some(tx);
         });
         rx
     }
@@ -1283,6 +1306,78 @@ impl Client {
     pub async fn reset_lua_agent_script_defaults(&self) -> Result<()> {
         let message = ClientSignalMessage::LuaAgentScriptResetDefaults {
             client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    //
+    // Intercept target methods.
+    //
+
+    pub async fn request_intercept_targets(&self) -> Result<()> {
+        let message = ClientSignalMessage::InterceptTargetList {
+            client_id: self.client_id.clone(),
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn get_intercept_targets(&self) -> Vec<common::InterceptTargetInfo> {
+        self.state.lock().await.intercept_targets.clone()
+    }
+
+    pub async fn add_intercept_target(
+        &self,
+        name: String,
+        agent_short_name: String,
+        domains: Vec<String>,
+        url_pattern: Option<String>,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::InterceptTargetAdd {
+            client_id: self.client_id.clone(),
+            name,
+            agent_short_name,
+            domains,
+            url_pattern,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn update_intercept_target(
+        &self,
+        target_id: String,
+        name: String,
+        agent_short_name: String,
+        domains: Vec<String>,
+        url_pattern: Option<String>,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::InterceptTargetUpdate {
+            client_id: self.client_id.clone(),
+            target_id,
+            name,
+            agent_short_name,
+            domains,
+            url_pattern,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn delete_intercept_target(&self, target_id: String) -> Result<()> {
+        let message = ClientSignalMessage::InterceptTargetDelete {
+            client_id: self.client_id.clone(),
+            target_id,
+        };
+        self.publish_signal(message).await
+    }
+
+    pub async fn toggle_intercept_target_disabled(
+        &self,
+        target_id: String,
+        disabled: bool,
+    ) -> Result<()> {
+        let message = ClientSignalMessage::InterceptTargetToggleDisabled {
+            client_id: self.client_id.clone(),
+            target_id,
+            disabled,
         };
         self.publish_signal(message).await
     }

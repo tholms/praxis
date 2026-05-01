@@ -49,10 +49,49 @@ pub async fn handle(ctx: &ServiceContext, message: NodeSignalMessage) -> Result<
                 config.get_bool(APPLICATION_LOGS_ENABLED, false)
             };
 
+            //
+            // Load enabled intercept targets so the node has its
+            // capture configuration before it processes any commands.
+            //
+
+            let intercept_targets = match ctx.database.get_enabled_intercept_targets().await {
+                Ok(targets) => targets,
+                Err(e) => {
+                    common::log_error!("Failed to load intercept targets for registration ack: {}", e);
+                    Vec::new()
+                }
+            };
+
+            //
+            // Resolve current Praxis agent state and include it in the ack so
+            // the node has its config in hand before any session/new arrives.
+            // No separate broadcast is needed at registration time.
+            //
+            let (praxis_agent_enabled, praxis_agent_config) = {
+                let config = ctx.service_config.read().await;
+                let enabled = config
+                    .get_praxis_agent_settings()
+                    .map(|s| s.enabled)
+                    .unwrap_or(false);
+                let resolved = if enabled {
+                    config.resolve_praxis_agent_config()
+                } else {
+                    None
+                };
+                (enabled, resolved)
+            };
+
             let reg_node_id = registration.node_id.clone();
             if let Err(e) = ctx
                 .node_handler
-                .handle_node_registration(registration, lua_scripts, event_logging_enabled)
+                .handle_node_registration(
+                    registration,
+                    lua_scripts,
+                    event_logging_enabled,
+                    intercept_targets,
+                    praxis_agent_enabled,
+                    praxis_agent_config,
+                )
                 .await
             {
                 common::log_error!("Failed to handle NodeRegistration: {}", e);
