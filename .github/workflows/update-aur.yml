@@ -38,6 +38,20 @@ jobs:
           echo "SHA256: ${SHA256}"
 
           cd pkg/aur/praxis
+
+          #
+          # Reset pkgrel to 1 when pkgver changes (per AUR convention) but
+          # leave it alone for same-version reruns (so packaging-only bumps
+          # like adding a file or fixing a symlink retain their pkgrel
+          # increment).
+          #
+          CURRENT_VER=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          if [ "$CURRENT_VER" != "$VERSION" ]; then
+            echo "pkgver bump (${CURRENT_VER} -> ${VERSION}); resetting pkgrel=1"
+            sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+            sed -i "s/pkgrel = .*/pkgrel = 1/" .SRCINFO
+          fi
+
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
           sed -i "0,/^    '[a-f0-9]\{64\}'/{s/^    '[a-f0-9]\{64\}'/    '${SHA256}'/}" PKGBUILD
           sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
