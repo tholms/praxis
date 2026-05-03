@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout praxis
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout praxis_site
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: originsec/praxis_site
           token: ${{ secrets.SITE_DEPLOY_TOKEN }}

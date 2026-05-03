@@ -2,12 +2,20 @@ name: Update AUR Package
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
 
 permissions:
   contents: write
 
 jobs:
   update-aur:
+    # Run on a successful Release workflow completion or on manual dispatch.
+    # Skip when Release failed/was cancelled so we don't push a stale AUR
+    # update on top of a broken release.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     container:
       image: archlinux
@@ -17,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: pacman -Sy --noconfirm git curl openssh
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
