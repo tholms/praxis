@@ -30,6 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Update AUR files
+        id: update_aur
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           SHA256=$(curl -sL "https://github.com/originsec/praxis/archive/v${VERSION}.tar.gz" | sha256sum | cut -d' ' -f1)
@@ -39,24 +40,59 @@ jobs:
 
           cd pkg/aur/praxis
 
-          #
-          # Reset pkgrel to 1 when pkgver changes (per AUR convention) but
-          # leave it alone for same-version reruns (so packaging-only bumps
-          # like adding a file or fixing a symlink retain their pkgrel
-          # increment).
-          #
           CURRENT_VER=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
-          if [ "$CURRENT_VER" != "$VERSION" ]; then
-            echo "pkgver bump (${CURRENT_VER} -> ${VERSION}); resetting pkgrel=1"
-            sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
-            sed -i "s/pkgrel = .*/pkgrel = 1/" .SRCINFO
+          CURRENT_REL=$(grep '^pkgrel=' PKGBUILD | cut -d= -f2)
+
+          #
+          # Temporarily revert PKGBUILD/.SRCINFO to check whether other
+          # packaging files (e.g. .install, .env, .service) changed.
+          #
+          cp PKGBUILD PKGBUILD.stash
+          cp .SRCINFO .SRCINFO.stash
+          git checkout HEAD -- PKGBUILD .SRCINFO
+
+          if ! git diff --quiet HEAD -- .; then
+            PACKAGING_CHANGED=true
+          else
+            PACKAGING_CHANGED=false
           fi
 
+          mv PKGBUILD.stash PKGBUILD
+          mv .SRCINFO.stash .SRCINFO
+
+          #
+          # Update pkgver and source tarball sha256sum unconditionally.
+          # When the values are unchanged these sed calls are no-ops.
+          #
           sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
           sed -i "0,/^    '[a-f0-9]\{64\}'/{s/^    '[a-f0-9]\{64\}'/    '${SHA256}'/}" PKGBUILD
           sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
           sed -i "s|source = praxis-.*\.tar\.gz::.*|source = praxis-${VERSION}.tar.gz::https://github.com/originsec/praxis/archive/v${VERSION}.tar.gz|" .SRCINFO
           sed -i "0,/sha256sums = [a-f0-9]\{64\}/{s/sha256sums = [a-f0-9]\{64\}/sha256sums = ${SHA256}/}" .SRCINFO
+
+          #
+          # If nothing changed (version, checksum and packaging files all
+          # identical), there is nothing to publish.
+          #
+          if [ "$PACKAGING_CHANGED" = false ] && git diff --quiet HEAD -- PKGBUILD .SRCINFO; then
+            echo "No AUR packaging changes to publish"
+            exit 0
+          fi
+
+          #
+          # New upstream version  -> pkgrel = 1
+          # Same version          -> bump pkgrel
+          #
+          if [ "$CURRENT_VER" != "$VERSION" ]; then
+            NEW_REL=1
+            echo "pkgver bump (${CURRENT_VER} -> ${VERSION}); pkgrel=${NEW_REL}"
+          else
+            NEW_REL=$((CURRENT_REL + 1))
+            echo "Packaging changes detected; pkgrel ${CURRENT_REL} -> ${NEW_REL}"
+          fi
+
+          sed -i "s/^pkgrel=.*/pkgrel=${NEW_REL}/" PKGBUILD
+          sed -i "s/pkgrel = .*/pkgrel = ${NEW_REL}/" .SRCINFO
 
       - name: Commit to praxis repo
         run: |
