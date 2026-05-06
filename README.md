@@ -36,9 +36,9 @@ Launch the TUI:
 praxis
 ```
 
-Configure LLM providers and everything else from the TUI. On a native Linux install, control the service itself with `praxisctl status` / `praxisctl start | stop | restart`.
+Configure LLM providers and everything else from the TUI.
 
-> Detailed install options, cross-compile recipes, and deployment patterns: [full documentation](https://originsec.github.io/praxis/).
+On a native Linux install, control the service itself with `praxisctl status` / `praxisctl start | stop | restart`.
 
 ### Deploy a node
 
