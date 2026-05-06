@@ -63,7 +63,7 @@ Nodes are standalone binaries that run on target systems. After install, find th
 Copy the binary to the target system and run it pointed at your RabbitMQ:
 
 ```bash
-PRAXIS_RABBITMQ_URL=amqp://user:pass@your-server:5672 ./praxis_node
+PRAXIS_RABBITMQ_URL=amqp://praxis:praxis@your-server:5672 ./praxis_node
 ```
 
 ## Documentation
