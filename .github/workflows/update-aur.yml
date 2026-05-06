@@ -237,7 +237,20 @@ jobs:
         run: |
           export GIT_SSH_COMMAND="ssh -F /github/home/.ssh/config -vvv"
 
-          git clone ssh://aur@aur.archlinux.org/praxis-bin.git /tmp/aur-push-bin
+          #
+          # Try to clone the existing repo.  If it does not exist yet (first
+          # time publishing this package), create a fresh repo and push.
+          #
+          if git clone ssh://aur@aur.archlinux.org/praxis-bin.git /tmp/aur-push-bin 2>/dev/null; then
+            echo "Cloned existing praxis-bin repo"
+          else
+            echo "praxis-bin repo does not exist; creating initial package"
+            mkdir -p /tmp/aur-push-bin
+            cd /tmp/aur-push-bin
+            git init
+            git remote add origin ssh://aur@aur.archlinux.org/praxis-bin.git
+          fi
+
           cp pkg/aur/praxis-bin/PKGBUILD pkg/aur/praxis-bin/.SRCINFO /tmp/aur-push-bin/
           cp pkg/aur/praxis-bin/*.service pkg/aur/praxis-bin/*.conf /tmp/aur-push-bin/
           cp pkg/aur/praxis-bin/*.env pkg/aur/praxis-bin/*.install /tmp/aur-push-bin/
@@ -250,7 +263,7 @@ jobs:
           VERSION=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
           git commit -m "Update to v${VERSION}"
           for i in 1 2 3 4 5; do
-            git push && echo "Pushed to AUR bin" && exit 0
+            git push -u origin master && echo "Pushed to AUR bin" && exit 0
             echo "AUR bin push failed, retry $i"
             sleep $((i * 15))
           done
