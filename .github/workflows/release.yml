@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-node:
     strategy:
       matrix:
         include:
@@ -41,8 +41,41 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
+  build-server:
+    #
+    # Build on ubuntu-20.04 for maximum glibc compatibility (glibc 2.31).
+    # This is the oldest standard GitHub Actions runner available, producing
+    # binaries that run on Ubuntu 20.04+, Debian 11+, Fedora 33+, etc.
+    #
+    runs-on: ubuntu-20.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build server binaries
+        run: cargo build --release -p praxis_service -p praxis_web -p praxis_cli -p praxis_node
+
+      - name: Package binaries
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p "praxis-${VERSION}-x86_64-linux"
+          cp target/release/praxis_service target/release/praxis_web \
+             target/release/praxis_cli target/release/praxis_node \
+             "praxis-${VERSION}-x86_64-linux/"
+          cp LICENSE "praxis-${VERSION}-x86_64-linux/"
+          tar czf "praxis-${VERSION}-x86_64-linux.tar.gz" "praxis-${VERSION}-x86_64-linux"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: praxis-server-linux-x86_64
+          path: praxis-*-x86_64-linux.tar.gz
+
   release:
-    needs: build
+    needs: [build-node, build-server]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,6 +91,7 @@ jobs:
           mv artifacts/praxis_node-linux-x86_64/praxis_node praxis_node-linux-x86_64
           mv artifacts/praxis_node-windows-x86_64.exe/praxis_node.exe praxis_node-windows-x86_64.exe
           chmod +x praxis_node-linux-x86_64
+          cp artifacts/praxis-server-linux-x86_64/praxis-*-x86_64-linux.tar.gz .
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -66,3 +100,4 @@ jobs:
           files: |
             praxis_node-linux-x86_64
             praxis_node-windows-x86_64.exe
+            praxis-*-x86_64-linux.tar.gz

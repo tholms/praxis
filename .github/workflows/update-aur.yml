@@ -158,3 +158,100 @@ jobs:
             sleep $((i * 15))
           done
           exit 1
+
+      - name: Update AUR bin files
+        id: update_aur_bin
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          cd pkg/aur/praxis-bin
+
+          CURRENT_VER=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          CURRENT_REL=$(grep '^pkgrel=' PKGBUILD | cut -d= -f2)
+
+          #
+          # Temporarily revert PKGBUILD/.SRCINFO to check whether other
+          # packaging files (e.g. .install, .env, .service) changed.
+          #
+          cp PKGBUILD PKGBUILD.stash
+          cp .SRCINFO .SRCINFO.stash
+          git checkout HEAD -- PKGBUILD .SRCINFO
+
+          if ! git diff --quiet HEAD -- .; then
+            PACKAGING_CHANGED=true
+          else
+            PACKAGING_CHANGED=false
+          fi
+
+          mv PKGBUILD.stash PKGBUILD
+          mv .SRCINFO.stash .SRCINFO
+
+          #
+          # Update pkgver and binary download URL unconditionally.
+          #
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s|https://github.com/originsec/praxis/releases/download/v[^/]*/praxis-[^-]*-x86_64-linux.tar.gz|https://github.com/originsec/praxis/releases/download/v${VERSION}/praxis-${VERSION}-x86_64-linux.tar.gz|" PKGBUILD
+          sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
+          sed -i "s|source = praxis-.*-x86_64-linux.tar.gz::.*|source = praxis-${VERSION}-x86_64-linux.tar.gz::https://github.com/originsec/praxis/releases/download/v${VERSION}/praxis-${VERSION}-x86_64-linux.tar.gz|" .SRCINFO
+
+          #
+          # If nothing changed, there is nothing to publish.
+          #
+          if [ "$PACKAGING_CHANGED" = false ] && git diff --quiet HEAD -- PKGBUILD .SRCINFO; then
+            echo "No AUR bin packaging changes to publish"
+            exit 0
+          fi
+
+          #
+          # New upstream version  -> pkgrel = 1
+          # Same version          -> bump pkgrel
+          #
+          if [ "$CURRENT_VER" != "$VERSION" ]; then
+            NEW_REL=1
+            echo "pkgver bump (${CURRENT_VER} -> ${VERSION}); pkgrel=${NEW_REL}"
+          else
+            NEW_REL=$((CURRENT_REL + 1))
+            echo "Packaging changes detected; pkgrel ${CURRENT_REL} -> ${NEW_REL}"
+          fi
+
+          sed -i "s/^pkgrel=.*/pkgrel=${NEW_REL}/" PKGBUILD
+          sed -i "s/pkgrel = .*/pkgrel = ${NEW_REL}/" .SRCINFO
+
+      - name: Commit bin to praxis repo
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          git config --global --add safe.directory "$PWD"
+          git config user.name "David Kaplan"
+          git config user.email "davkaplan@gmail.com"
+          git add pkg/aur/praxis-bin/PKGBUILD pkg/aur/praxis-bin/.SRCINFO
+          if git diff --cached --quiet; then
+            echo "No bin changes to commit"
+          else
+            git commit -m "Update AUR praxis-bin package to v${VERSION}"
+            git push
+          fi
+
+      - name: Push bin to AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          export GIT_SSH_COMMAND="ssh -F /github/home/.ssh/config -vvv"
+
+          git clone ssh://aur@aur.archlinux.org/praxis-bin.git /tmp/aur-push-bin
+          cp pkg/aur/praxis-bin/PKGBUILD pkg/aur/praxis-bin/.SRCINFO /tmp/aur-push-bin/
+          cp pkg/aur/praxis-bin/*.service pkg/aur/praxis-bin/*.conf /tmp/aur-push-bin/
+          cp pkg/aur/praxis-bin/*.env pkg/aur/praxis-bin/*.install /tmp/aur-push-bin/
+          cd /tmp/aur-push-bin
+          git add -A
+          if git diff --cached --quiet; then
+            echo "AUR bin already up to date"
+            exit 0
+          fi
+          VERSION=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          git commit -m "Update to v${VERSION}"
+          for i in 1 2 3 4 5; do
+            git push && echo "Pushed to AUR bin" && exit 0
+            echo "AUR bin push failed, retry $i"
+            sleep $((i * 15))
+          done
+          exit 1
