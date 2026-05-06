@@ -1,12 +1,11 @@
 [Unit]
-Description=Praxis Service
-After=rabbitmq.service network.target
-Wants=network.target
-Requires=rabbitmq.service
+Description=Praxis Web
+After=network.target praxis-service.service
+Wants=praxis-service.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/praxis_service
+ExecStart=/usr/local/bin/praxis_web
 EnvironmentFile=-/etc/praxis/env
 User=praxis
 Group=praxis

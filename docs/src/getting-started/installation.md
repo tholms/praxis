@@ -1,332 +1,219 @@
 # Installation
 
-There are a few ways to get Praxis running. The one-liner scripts are the easiest for getting started; building from source gives you more control.
+The Praxis service runs only on Linux — natively (systemd) or inside a Docker container. The CLI (TUI) runs natively on every supported platform. The one-liner installers walk you through how you want the service deployed; the CLI is always built natively.
+
+> The Praxis service is **Linux-only**. **Windows and macOS** can only run it in **Docker** — there is no native service path on either. **Linux** can run it natively (systemd) or in Docker; Docker is offered there as an alternative when you'd rather not install RabbitMQ + systemd units on the host.
 
 ## Quick Install (One-Liner)
 
-These scripts automatically fetch the **latest release** and set everything up.
-
-### Docker (Recommended)
-
-```bash
-# Linux/macOS
-curl -fsSL https://praxis.originhq.com/docker.sh | bash
-```
-
-```powershell
-# Windows
-irm https://praxis.originhq.com/docker.ps1 | iex
-```
-
-This clones the latest release, builds with Docker Compose, and starts everything.
-
-### Prerequisites
-
-RabbitMQ must be running before starting Praxis. If you're not using Docker (which includes RabbitMQ), install and start it separately:
-
-```bash
-# Linux
-sudo systemctl start rabbitmq-server
-
-# macOS (Homebrew)
-brew services start rabbitmq
-```
-
-### Arch Linux (AUR)
-
-```bash
-yay -S praxis
-```
-
-Or with `makepkg`:
-
-```bash
-git clone https://aur.archlinux.org/praxis.git
-cd praxis
-makepkg -si
-```
-
-This installs:
-- `/usr/bin/praxis_service`, `/usr/bin/praxis_web`, `/usr/bin/praxis_cli` - binaries
-- `/usr/share/praxis/nodes/praxis_node_linux` - node agent for deployment to targets
-- Systemd system services (runs as dedicated `praxis` user)
-- `/etc/praxis/env` - configuration
-
-After installing:
-
-```bash
-sudo systemctl enable --now rabbitmq
-sudo systemctl enable --now praxis
-```
-
-### Native Install (Linux/macOS)
+### Linux / macOS
 
 ```bash
 curl -fsSL https://praxis.originhq.com/install.sh | bash
 ```
 
-This installs Rust if needed, builds from source, and sets up:
-- `~/.praxis/bin/praxis_service` - backend service
-- `~/.praxis/bin/praxis_web` - web server + frontend
-- `~/.praxis/bin/praxis_cli` - command-line interface
-- `~/.praxis/bin/nodes/<platform>/praxis_node` - node agent
-- Systemd user services (Linux) for automatic startup
-- PATH is configured automatically
+The installer asks how to install the service:
 
-### Native Install (Windows)
+- **Native install** *(Linux only)* — installs the binaries to `/usr/local/bin`, the `praxis-service.service` systemd unit to `/etc/systemd/system`, config to `/etc/praxis/env`, and data to `/var/lib/praxis`. Requires a running RabbitMQ broker; the installer creates the `praxis` RabbitMQ user automatically.
+- **Docker install** *(Linux + macOS)* — clones the repo into `~/.praxis-docker` and runs `docker compose up --build -d`. The Praxis container runs systemd as PID 1, so `praxisctl` works the same inside the container as on a native install. Pick this on macOS because there's no native option, or on Linux if you don't want to install RabbitMQ + systemd units on the host.
+- **Client only** — only installs the `praxis` CLI (TUI); no service is deployed.
+
+The CLI is always installed natively regardless of the choice.
+
+For non-interactive use:
+
+```bash
+curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --service native
+curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --service docker
+curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --cli
+```
+
+#### Cross-compiling the Windows node binary (optional)
+
+Add `--with-win-node` to a native install to also cross-compile the Windows
+`praxis_node.exe` and stage it next to the Linux node binary at
+`/usr/local/share/praxis/nodes/praxis_node_windows.exe`. Useful when the
+service needs to deploy nodes to Windows targets without pulling them from
+a release.
+
+```bash
+curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --service native --with-win-node
+```
+
+Requires `mingw-w64` and `rustup` (the rust target `x86_64-pc-windows-gnu`
+is installed automatically). Install mingw-w64 with your distribution's
+package manager:
+
+- Debian/Ubuntu: `sudo apt-get install mingw-w64`
+- Fedora/RHEL:   `sudo dnf install mingw64-gcc`
+- Arch:          `sudo pacman -S mingw-w64-gcc`
+- macOS:         `brew install mingw-w64`
+
+The flag has no effect with `--cli`, `--service docker`, or interactive
+mode — for those, use `praxis-bin` (AUR) or download the Windows node
+binary from the GitHub release if you need it.
+
+### Windows
+
+The Praxis service is Linux-only, so on Windows the installer runs the service in **Docker** — that's the only option for the service on Windows. The CLI (TUI) is always installed natively (compiled from source, requires Rust + git).
 
 ```powershell
 irm https://praxis.originhq.com/install.ps1 | iex
 ```
 
-### Removing
+The installer asks how you want to install the service:
 
-To uninstall Praxis (stops services, removes binaries, config, and PATH entries):
+- **Docker install** — runs the Praxis container alongside RabbitMQ
+- **Client only** — only installs the `praxis.exe` CLI; no service
+
+Non-interactive:
+
+```powershell
+.\install.ps1 -Service docker
+.\install.ps1 -Cli
+.\install.ps1 -Remove
+```
+
+If Docker is not installed, install [Docker Desktop](https://www.docker.com/products/docker-desktop/) first. If Rust is missing, install it via [rustup](https://rustup.rs).
+
+### Native install — RabbitMQ prerequisite
+
+Native installs require RabbitMQ to be installed and running before the installer runs. The installer detects this and aborts with instructions if it can't find RabbitMQ.
 
 ```bash
-# Linux/macOS
+# Debian/Ubuntu
+sudo apt-get install rabbitmq-server
+sudo systemctl enable --now rabbitmq-server
+
+# Fedora/RHEL
+sudo dnf install rabbitmq-server
+sudo systemctl enable --now rabbitmq-server
+
+# Arch
+sudo pacman -S rabbitmq
+sudo systemctl enable --now rabbitmq-server
+```
+
+The installer creates the `praxis` RabbitMQ user and grants it permissions automatically.
+
+### What native install lays down (Linux)
+
+- `/usr/local/bin/praxis_service` — backend service
+- `/usr/local/bin/praxis_cli` — CLI binary
+- `/usr/local/bin/praxis` — symlink to `praxis_cli` (preferred command name)
+- `/usr/local/bin/praxisctl` — service control utility
+- `/usr/local/share/praxis/nodes/praxis_node_linux` — node agent
+- `/etc/systemd/system/praxis-service.service` — system-wide systemd unit
+- `/etc/praxis/env` — service config (`PRAXIS_RABBITMQ_URL`, etc.)
+- `/var/lib/praxis/` — data directory (SQLite database lives here by default)
+- A dedicated `praxis` system user runs the service
+
+The web UI is **not** installed by either the script or the docker image — manage and use Praxis through the `praxis` TUI.
+
+### What docker install lays down
+
+The repo is cloned into `~/.praxis-docker`. `docker compose` brings up two services:
+
+- **rabbitmq** — `rabbitmq:3-management` with the `praxis` user pre-created
+- **praxis** — Praxis container running systemd as PID 1; `praxisctl` works inside the container
+
+The MCP server and Claude bridges are exposed on ports 8585, 8586, and 8587. There is no web UI in the docker image.
+
+### Removing
+
+```bash
+# Linux/macOS — removes native install + docker install
 curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --remove
+
+# also wipes /etc/praxis and /var/lib/praxis
+PRAXIS_REMOVE_DATA=1 curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --remove
 ```
 
 ```powershell
 # Windows
-irm https://praxis.originhq.com/install.ps1 | iex -- --remove
+iex "& { $(irm https://praxis.originhq.com/install.ps1) } -Remove"
 ```
 
 ### Pinning a Specific Version
 
-To install a specific version instead of latest:
-
 ```bash
-# Docker (Linux/macOS)
-PRAXIS_VERSION=v0.1.0 curl -fsSL https://praxis.originhq.com/docker.sh | bash
-
-# Native (Linux/macOS)
-PRAXIS_VERSION=v0.1.0 curl -fsSL https://praxis.originhq.com/install.sh | bash
+# Linux/macOS
+PRAXIS_VERSION=v0.10.0 curl -fsSL https://praxis.originhq.com/install.sh | bash
 ```
 
 ```powershell
-# Docker (Windows)
-$env:PRAXIS_VERSION = "v0.1.0"; irm https://praxis.originhq.com/docker.ps1 | iex
-
-# Native (Windows)
-$env:PRAXIS_VERSION = "v0.1.0"; irm https://praxis.originhq.com/install.ps1 | iex
+# Windows
+$env:PRAXIS_VERSION = "v0.10.0"; irm https://praxis.originhq.com/install.ps1 | iex
 ```
 
-## Manual Docker Setup
+## Controlling the service — `praxisctl`
 
-If you prefer to clone and run Docker manually:
+After a native (or docker) install, `praxisctl` is the single entry point for service lifecycle and configuration. It wraps `systemctl` and edits `/etc/praxis/env`.
 
 ```bash
-git clone https://github.com/originsec/praxis.git
-cd praxis
-docker compose up --build
+# Service (praxis-service.service)
+praxisctl start
+praxisctl stop
+praxisctl restart
+praxisctl enable      # auto-start at boot
+praxisctl disable
+praxisctl status
+
+# Configuration
+praxisctl set-rabbitmqurl amqp://praxis:praxis@localhost:5672
+praxisctl get-rabbitmqurl
+praxisctl config show
+praxisctl config edit       # opens /etc/praxis/env in $EDITOR
 ```
 
-This starts:
-- **Praxis** (service + web) on port 8080
-- **RabbitMQ** on ports 5672 (AMQP) and 15672 (management UI)
-- **MCP server** on port 8585 (when enabled in Settings > MCP Server)
-- **Claude Bridge CCRv1** on port 8586 (when enabled in Settings > Claude Bridge)
-- **Claude Bridge CCRv2** on port 8587 (when enabled in Settings > Claude Bridge)
+`praxisctl` re-execs itself under `sudo` when run by an unprivileged user.
 
-Open **http://localhost:8080** and you're in.
-
-To run without the web UI (headless mode for CLI-only usage):
+Inside the docker install, the same commands work via `docker compose`:
 
 ```bash
-PRAXIS_HEADLESS=1 docker compose up --build
+cd ~/.praxis-docker
+docker compose exec praxis praxisctl status
+docker compose exec praxis praxisctl set-rabbitmqurl amqp://praxis:praxis@rabbitmq:5672
 ```
 
-### Getting the CLI from Docker
+## Configuring the CLI — `praxis set-rabbitmqurl`
 
-The CLI binary is built into the Docker image and copied to the data volume on startup. Extract it with:
+The `praxis` CLI reads its RabbitMQ URL from `~/.config/praxis/config` (key `PRAXIS_RABBITMQ_URL`) and falls back to `amqp://praxis:praxis@localhost:5672` if no config is set.
 
 ```bash
-docker cp $(docker compose ps -q praxis):/app/praxis_cli ./praxis_cli
-chmod +x ./praxis_cli
-./praxis_cli
+praxis set-rabbitmqurl amqp://praxis:praxis@my-server:5672
+praxis config         # show effective URL and config file path
+praxis                # launch the interactive TUI
+praxis --status       # one-shot connection check
+praxis -C "node list" # one-shot command
 ```
 
-> **Note:** Run this from the directory containing your `docker-compose.yml`. The container name varies by project directory.
-
-To add a macOS node binary to Docker downloads, provide it explicitly (optional):
-
-```bash
-# Build macOS node binary on macOS
-cargo build --release -p praxis_node
-
-# Put it in a local directory
-mkdir -p ~/.praxis/bin/nodes/macos-arm64
-cp target/release/praxis_node ~/.praxis/bin/nodes/macos-arm64/praxis_node
-```
-
-Then mount it and enable multi-directory lookup:
-
-```yaml
-# docker-compose.override.yml
-services:
-  praxis:
-    environment:
-      PRAXIS_NODES_DIRS: /app/nodes,/app/nodes-host
-    volumes:
-      - ~/.praxis/bin/nodes:/app/nodes-host:ro
-
-  praxis-postgres:
-    environment:
-      PRAXIS_NODES_DIRS: /app/nodes,/app/nodes-host
-    volumes:
-      - ~/.praxis/bin/nodes:/app/nodes-host:ro
-```
-
-This keeps Linux/Windows defaults unchanged while adding macOS as an opt-in download.
-
-The RabbitMQ management UI at **http://localhost:15672** uses credentials `praxis/praxis`.
-
-### Useful Docker Commands
-
-```bash
-# Run in background
-docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Stop everything
-docker compose down
-
-# Rebuild after code changes
-docker compose up --build
-```
-
-## Building from Source
-
-If you want to build natively or contribute to development:
-
-### Prerequisites
-
-- **Rust** 1.75+ (install via [rustup](https://rustup.rs/))
-- **Node.js** 18+ (for the web frontend)
-- **Docker** (for RabbitMQ, or install it separately)
-
-### Build Steps
-
-```bash
-# Clone the repo
-git clone https://github.com/originsec/praxis.git
-cd praxis
-
-# Build everything
-cargo build --release
-```
-
-This produces four binaries in `target/release/`:
-- `praxis_service` - the backend service
-- `praxis_web` - the HTTP/WebSocket server + frontend
-- `praxis_node` - the node agent
-- `praxis_cli` - the command-line interface
-
-### Running
-
-You'll need RabbitMQ running first:
-
-```bash
-docker run -d --name rabbitmq \
-  -p 5672:5672 -p 15672:15672 \
-  -e RABBITMQ_DEFAULT_USER=praxis \
-  -e RABBITMQ_DEFAULT_PASS=praxis \
-  rabbitmq:3-management
-```
-
-Then start the service and web components:
-
-```bash
-./target/release/praxis_service &
-./target/release/praxis_web &
-```
-
-If you used the install script on Linux, the service and web components are managed via systemd user services:
-
-```bash
-# Start/stop
-systemctl --user start praxis
-systemctl --user stop praxis
-
-# Check status
-systemctl --user status praxis
-
-# View logs
-journalctl --user -u praxis-service
-journalctl --user -u praxis-web
-```
-
-Praxis starts automatically on login. Edit `~/.config/praxis/env` to configure the RabbitMQ URL and other environment variables.
+There is no `--rabbitmq` flag and no `PRAXIS_RABBITMQ_URL` environment variable on the CLI — point users at `praxis set-rabbitmqurl` instead.
 
 ## Getting Node Binaries
 
-Nodes need to run on target systems. You have a few options:
+A native install lays down `praxis_node_linux` at `/usr/local/share/praxis/nodes/`. To also stage the Windows node binary alongside it, use `--with-win-node` (see above).
 
-### From the Web UI
-
-If you're using Docker, precompiled node binaries are bundled with the image. Go to **Settings** → **Service** and download the Linux or Windows binary.
-
-### From GitHub Releases
-
-Each tagged release publishes node binaries for Linux and Windows:
-
-- [Latest Release](https://github.com/originsec/praxis/releases/latest)
-- `praxis_node-linux-x86_64` - Linux binary
-- `praxis_node-windows-x86_64.exe` - Windows binary
-- `praxis_node-macos-arm64` - macOS (Apple Silicon) binary
-
-### Building Yourself
-
-```bash
-# Linux (native)
-cargo build --release -p praxis_node
-
-# macOS (Apple Silicon, native)
-cargo build --release -p praxis_node
-
-# Windows (cross-compile from Linux)
-# Requires: rustup target add x86_64-pc-windows-gnu
-# Requires: mingw-w64 toolchain
-cargo build --release -p praxis_node --target x86_64-pc-windows-gnu
-```
+The `praxis-bin` AUR package ships both `praxis_node_linux` and `praxis_node_windows.exe` automatically. The same two binaries are available as standalone assets on every [GitHub Release](https://github.com/originsec/praxis/releases/latest).
 
 ## Running Nodes
 
-Once you have a node binary, run it on the target system:
-
 ```bash
-# Linux
 chmod +x praxis_node
 ./praxis_node
-
-# Windows
-praxis_node.exe
 ```
 
-By default, nodes connect to RabbitMQ at `localhost:5672`. To connect to a remote service:
+By default, nodes connect to RabbitMQ at `localhost:5672`. Override per-node via the env var:
 
 ```bash
-# Linux
 PRAXIS_RABBITMQ_URL=amqp://praxis:praxis@your-server:5672 ./praxis_node
-
-# Windows (PowerShell)
-$env:PRAXIS_RABBITMQ_URL = "amqp://praxis:praxis@your-server:5672"
-.\praxis_node.exe
 ```
 
 ## Version Compatibility
 
-**Nodes must match the service version.** The RabbitMQ message format can change between versions, so a v0.2 node talking to a v0.1 service might not work correctly.
-
-If you're getting strange errors or nodes aren't showing up, check that versions match.
+Nodes must match the service version. The RabbitMQ message format can change between versions, so a v0.2 node talking to a v0.1 service might not work correctly.
 
 ## Next Steps
 
-Once you have the service running and at least one node connected:
-
-1. [Configure LLM providers](./configuration.md) - needed for semantic features
-2. [Walk through the Quick Start](./quick-start.md) - see the basic workflow
+1. [Configure LLM providers](./configuration.md)
+2. [Walk through the Quick Start](./quick-start.md)

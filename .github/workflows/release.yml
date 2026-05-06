@@ -49,6 +49,7 @@ jobs:
     # producing binaries that run on Ubuntu 22.04+, Debian 12+,
     # Fedora 36+, etc.
     #
+    needs: [build-node]
     runs-on: ubuntu-22.04
 
     steps:
@@ -58,15 +59,29 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build server binaries
-        run: cargo build --release -p praxis_service -p praxis_web -p praxis_cli -p praxis_node
+        #
+        # `praxis_web` is intentionally not built — the installer and
+        # AUR packages no longer ship the web server.
+        #
+        run: cargo build --release -p praxis_service -p praxis_cli -p praxis_node
+
+      - name: Download Windows node binary
+        uses: actions/download-artifact@v4
+        with:
+          name: praxis_node-windows-x86_64.exe
+          path: artifacts/windows-node
 
       - name: Package binaries
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           mkdir -p "praxis-${VERSION}-x86_64-linux"
-          cp target/release/praxis_service target/release/praxis_web \
-             target/release/praxis_cli target/release/praxis_node \
+          cp target/release/praxis_service \
+             target/release/praxis_cli \
+             target/release/praxis_node \
              "praxis-${VERSION}-x86_64-linux/"
+          cp artifacts/windows-node/praxis_node.exe \
+             "praxis-${VERSION}-x86_64-linux/praxis_node_windows.exe"
+          cp pkg/praxisctl/praxisctl "praxis-${VERSION}-x86_64-linux/"
           cp LICENSE "praxis-${VERSION}-x86_64-linux/"
           tar czf "praxis-${VERSION}-x86_64-linux.tar.gz" "praxis-${VERSION}-x86_64-linux"
 

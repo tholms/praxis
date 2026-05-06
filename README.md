@@ -1,4 +1,4 @@
-<p align="center"><code>curl -fsSL https://praxis.originhq.com/install.sh | bash</code><br />or <code>docker run originsec/praxis</code><br />or <code>yay -S praxis</code></p>
+<p align="center"><code>curl -fsSL https://praxis.originhq.com/install.sh | bash</code><br />or <code>irm https://praxis.originhq.com/install.ps1 | iex</code> (Windows)<br />or <code>yay -S praxis</code> (Arch)</p>
 
 <p align="center"><strong>Praxis</strong> is an open-source research platform for discovering, controlling, and orchestrating AI agents on endpoints.</p>
 
@@ -10,41 +10,61 @@
 
 ### Install
 
-**Linux/macOS:**
+**Linux / macOS:**
 ```bash
 curl -fsSL https://praxis.originhq.com/install.sh | bash
 ```
 
-**Arch Linux (AUR):**
-```bash
-yay -S praxis
-```
+Launches an interactive menu:
 
-**Windows:**
+- **Native install** *(Linux only)* — system-wide systemd service, requires RabbitMQ
+- **Docker install** *(Linux + macOS)* — RabbitMQ + the praxis container
+- **Client only** — just installs the `praxis` TUI
+
+The CLI is always installed natively. Skip the menu with `--service native`, `--service docker`, `--cli`, or `--remove`.
+
+**Windows / macOS:**
 ```powershell
-irm https://praxis.originhq.com/install.ps1 | iex
+irm https://praxis.originhq.com/install.ps1 | iex     # Windows
+curl -fsSL https://praxis.originhq.com/install.sh | bash   # macOS, then pick Docker
 ```
 
-**Docker:**
+The Praxis service is Linux-only, so Windows and macOS run it in **Docker**. The CLI is always built natively (`praxis` / `praxis.exe`).
+
+**Arch Linux:**
 ```bash
-curl -fsSL https://praxis.originhq.com/docker.sh | bash
+yay -S praxis        # builds from source
+yay -S praxis-bin    # prebuilt release
 ```
 
-Then open <http://localhost:8080> in your browser.
+### Use it
 
-> For detailed install options (cross-compilation, deployment patterns), see the [full documentation](https://originsec.github.io/praxis/).
+Launch the TUI:
+
+```bash
+praxis
+```
+
+Configure LLM providers and everything else from the TUI. On a native Linux install, control the service itself with `praxisctl status` / `praxisctl start | stop | restart`.
+
+> Detailed install options, cross-compile recipes, and deployment patterns: [full documentation](https://originsec.github.io/praxis/).
 
 ### Deploy a node
 
-1. In the web UI, go to **Settings** → **Service** and download a node binary
-2. Run it on the target system:
+Nodes are standalone binaries that run on target systems. After install, find them at:
+
+| Install method | Linux node | Windows node |
+|---|---|---|
+| Native (Linux) | `/usr/local/share/praxis/nodes/praxis_node_linux` | `/usr/local/share/praxis/nodes/praxis_node_windows.exe` *(use `--with-win-node`)* |
+| Docker         | `docker compose exec praxis ls /usr/local/share/praxis/nodes/` (both shipped) | same |
+| AUR (`praxis-bin`) | `/usr/share/praxis/nodes/praxis_node_linux` | `/usr/share/praxis/nodes/praxis_node_windows.exe` |
+| GitHub release | [`praxis_node-linux-x86_64`](https://github.com/originsec/praxis/releases/latest) | [`praxis_node-windows-x86_64.exe`](https://github.com/originsec/praxis/releases/latest) |
+
+Copy the binary to the target system and run it pointed at your RabbitMQ:
+
 ```bash
 PRAXIS_RABBITMQ_URL=amqp://user:pass@your-server:5672 ./praxis_node
 ```
-
-### Configure an LLM provider
-
-Go to **Settings** → **LLM Providers** in the web UI, add a model, and assign it to the features you want (semantic operations, recon, traffic parsing, orchestrator).
 
 ## Documentation
 
