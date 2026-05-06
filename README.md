@@ -15,10 +15,9 @@
 curl -fsSL https://praxis.originhq.com/install.sh | bash
 ```
 
-**Windows / macOS:**
+**Windows:**
 ```powershell
-irm https://praxis.originhq.com/install.ps1 | iex     # Windows
-curl -fsSL https://praxis.originhq.com/install.sh | bash   # macOS, then pick Docker
+irm https://praxis.originhq.com/install.ps1 | iex
 ```
 
 The Praxis service is Linux-only, so Windows and macOS run it in **Docker**. The CLI is always built natively (`praxis` / `praxis.exe`).
