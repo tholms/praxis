@@ -15,14 +15,6 @@
 curl -fsSL https://praxis.originhq.com/install.sh | bash
 ```
 
-Launches an interactive menu:
-
-- **Native install** *(Linux only)* — system-wide systemd service, requires RabbitMQ
-- **Docker install** *(Linux + macOS)* — RabbitMQ + the praxis container
-- **Client only** — just installs the `praxis` TUI
-
-The CLI is always installed natively. Skip the menu with `--service native`, `--service docker`, `--cli`, or `--remove`.
-
 **Windows / macOS:**
 ```powershell
 irm https://praxis.originhq.com/install.ps1 | iex     # Windows
