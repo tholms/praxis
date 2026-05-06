@@ -29,6 +29,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Update AUR files
         id: update_aur
         run: |
@@ -97,7 +100,6 @@ jobs:
       - name: Commit to praxis repo
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          git config --global --add safe.directory "$PWD"
           git config user.name "David Kaplan"
           git config user.email "davkaplan@gmail.com"
           git add pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO
@@ -136,7 +138,6 @@ jobs:
 
           git config --global user.name "David Kaplan"
           git config --global user.email "davkaplan@gmail.com"
-          git config --global --add safe.directory "$PWD"
 
           export GIT_SSH_COMMAND="ssh -F /github/home/.ssh/config -vvv"
 
@@ -220,7 +221,6 @@ jobs:
       - name: Commit bin to praxis repo
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          git config --global --add safe.directory "$PWD"
           git config user.name "David Kaplan"
           git config user.email "davkaplan@gmail.com"
           git add pkg/aur/praxis-bin/PKGBUILD pkg/aur/praxis-bin/.SRCINFO
