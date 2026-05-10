@@ -24,11 +24,6 @@ COPY common ./common
 COPY node ./node
 COPY semantic_parser ./semantic_parser
 COPY service ./service
-#
-# `web` is a workspace member so cargo metadata needs it, even though
-# we never build the praxis_web binary. Copy the manifest only.
-#
-COPY web ./web
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ==============================================================================
@@ -38,7 +33,7 @@ FROM chef AS builder
 ARG SKIP_NODE_BUILD=0
 ARG CARGO_PROFILE=release
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev \
+RUN apt-get update && apt-get install -y pkg-config libssl-dev make \
     && if [ "$SKIP_NODE_BUILD" = "0" ]; then apt-get install -y mingw-w64; fi \
     && rm -rf /var/lib/apt/lists/*
 
@@ -73,7 +68,6 @@ COPY common ./common
 COPY node ./node
 COPY semantic_parser ./semantic_parser
 COPY service ./service
-COPY web ./web
 
 RUN if [ "$SKIP_NODE_BUILD" = "0" ]; then \
         cargo build --profile "$CARGO_PROFILE" -p praxis_node && \
@@ -84,6 +78,15 @@ RUN if [ "$SKIP_NODE_BUILD" = "0" ]; then \
     fi
 
 RUN cargo build --profile "$CARGO_PROFILE" -p praxis_service
+
+# Build the pure-C tiny node for both Linux (host) and Windows (mingw).
+# Output binaries land in node/tiny_c/.
+RUN if [ "$SKIP_NODE_BUILD" = "0" ]; then \
+        make -C node/tiny_c release && \
+        make -C node/tiny_c windows; \
+    else \
+        touch node/tiny_c/praxis_node_tiny_c node/tiny_c/praxis_node_tiny_c.exe; \
+    fi
 
 # ==============================================================================
 # Stage 6: Runtime image (systemd as PID 1)
@@ -148,6 +151,8 @@ COPY --from=builder /build/target/${CARGO_PROFILE}/praxis_service /usr/local/bin
 
 COPY --from=builder /build/target/${CARGO_PROFILE}/praxis_node                              /usr/local/share/praxis/nodes/praxis_node_linux
 COPY --from=builder /build/target/x86_64-pc-windows-gnu/${CARGO_PROFILE}/praxis_node.exe    /usr/local/share/praxis/nodes/praxis_node_windows.exe
+COPY --from=builder /build/node/tiny_c/praxis_node_tiny_c                                   /usr/local/share/praxis/nodes/praxis_node_tiny_c_linux
+COPY --from=builder /build/node/tiny_c/praxis_node_tiny_c.exe                               /usr/local/share/praxis/nodes/praxis_node_tiny_c_windows.exe
 
 #
 # systemd units, env file, praxisctl.

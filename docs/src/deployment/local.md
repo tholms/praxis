@@ -13,7 +13,6 @@ See [Installation](../getting-started/installation.md) for all install options.
 ### Prerequisites
 
 - Rust 1.70+ with cargo
-- Node.js 18+ with npm
 - RabbitMQ running locally
 
 ### Build Steps
@@ -24,30 +23,13 @@ git clone https://github.com/originsec/praxis.git
 cd praxis
 ```
 
-2. Build everything:
+2. Build the default workspace members:
 ```bash
 cargo build --release
 ```
 
-This builds the service, web, and node components. The frontend is built automatically during `cargo build`.
-
-### Skip Frontend Build
-
-During development, you can skip the frontend build:
-
-```bash
-PRAXIS_SKIP_FRONTEND=1 cargo build
-```
-
-Then run the frontend dev server separately for hot reload:
-
-```bash
-cd web/frontend
-npm install
-npm run dev
-```
-
-The dev server proxies to the backend.
+This builds the service, node, and CLI components. The web component is
+not part of the default build; use the TUI (`praxis`) as the client.
 
 ## Running Locally
 
@@ -74,14 +56,6 @@ cargo run --release --bin praxis_service
 
 The service starts and connects to RabbitMQ, creating necessary queues.
 
-### Start the Web Component
-
-```bash
-cargo run --release --bin praxis_web
-```
-
-The web component serves the UI on http://localhost:8080.
-
 ### Start a Node
 
 For testing locally, run a node on your own machine:
@@ -99,7 +73,7 @@ Configure via environment or `.env` file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PRAXIS_RABBITMQ_URL` | `amqp://praxis:praxis@localhost:5672` | RabbitMQ connection |
-| `PRAXIS_DATABASE_URL` | `~/.praxis_operations.db` | Database path |
+| `PRAXIS_DATABASE_URL` | `~/.praxis/operations.db` | Database path |
 | `RUST_LOG` | `info` | Log level |
 
 ## Database Options
@@ -115,8 +89,6 @@ For PostgreSQL or advanced configuration, see [Database Configuration](./databas
 1. Make changes to Rust code
 2. Rebuild: `cargo build`
 3. Restart affected component
-
-For frontend changes with the dev server running, changes hot-reload automatically.
 
 ### Testing
 
@@ -142,12 +114,6 @@ RUST_LOG=praxis_node::intercept=trace cargo run --bin praxis_node
 - Check credentials match
 - Ensure the `PRAXIS_RABBITMQ_URL` is correct
 
-### Frontend not building
-
-- Ensure Node.js is installed
-- Run `npm install` in `web/frontend`
-- Check for build errors
-
 ### Database errors
 
 - Check file permissions for SQLite
@@ -172,7 +138,7 @@ cargo run --bin praxis_node
 cargo run --bin praxis_node
 ```
 
-Each node gets a unique ID and appears separately in the UI.
+Each node gets a unique ID and appears separately in the TUI.
 
 ## Debugging
 
@@ -185,7 +151,3 @@ RUST_LOG=debug cargo run --bin praxis_service
 ### Check RabbitMQ queues
 
 Open http://localhost:15672 (praxis/praxis) to see queue activity.
-
-### Frontend debugging
-
-Open browser dev tools. The React app logs useful debug information to the console.

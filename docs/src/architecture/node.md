@@ -47,8 +47,9 @@ where a fanout broadcast could arrive before the node's exchange consumer is
 ready. On re-registration (e.g. after connection loss), scripts are also
 delivered via the ack.
 
-Subsequent script changes (add/edit/delete via the web UI) are broadcast to
-nodes via `AgentRegistryUpdate` on the fanout exchange.
+Subsequent script changes (add/edit/delete via the praxis TUI Settings →
+Agents tab) are broadcast to nodes via `AgentRegistryUpdate` on the
+fanout exchange.
 
 Updates are session-gated: if a session is open when an update arrives, it is
 queued and applied after the session closes. If multiple updates arrive while a
@@ -191,7 +192,7 @@ The connection runs on a dedicated thread with a `LocalSet` (since `ClientSideCo
 Sessions are created with:
 - **Working directory** - where the agent operates
 - **YOLO mode** - auto-approve tool calls
-- **Interactive** - whether permission requests should be forwarded to the user (TUI/web) or auto-denied (MCP/orchestrator)
+- **Interactive** - whether permission requests should be forwarded to the user (TUI) or auto-denied (MCP/orchestrator)
 
 ## Terminal Manager
 
@@ -199,7 +200,7 @@ Provides PTY terminal access to the target system:
 
 1. Shell spawned (bash/zsh/powershell)
 2. PTY handles input/output
-3. Terminal data streamed to web UI
+3. Terminal data streamed to the praxis TUI
 4. Supports resize, Ctrl+C, etc.
 
 ## Message Handling
@@ -281,8 +282,8 @@ pub enum NodeCommand {
 Agent and session interaction have moved off `NodeCommand` entirely. The
 legacy `NodeCommand::Agent` and `NodeCommand::Session` variants — along
 with `NodeSignalMessage::ReconResultUpdate` and `::SessionUpdate` — were
-removed once the CLI, web frontend, service orchestrator, and MCP server
-had all been ported to ACP.
+removed once the CLI, service orchestrator, and MCP server had all been
+ported to ACP.
 
 ### Intercept Commands
 
@@ -338,3 +339,41 @@ When the node starts:
 5. Begins processing commands
 
 Periodic updates report current state to the service.
+
+## Minimal C Node (`node/tiny_c`)
+
+Alongside the full Rust node, the repo ships a pure-C minimal node at
+`node/tiny_c/`. It is parity-equivalent in scope with the Praxis ACP
+session path only — useful when you need a tiny, dependency-free agent
+that registers as a node and serves ACP sessions against an
+OpenAI-compatible API.
+
+- **Runtime deps:** libc + libpthread only. AMQP 0-9-1, JSON, HTTP/1.1
+  and the ACP JSON-RPC framing are hand-rolled. TLS comes from
+  [BearSSL](https://www.bearssl.org/) (MIT), downloaded and statically
+  linked at build time.
+- **Size:** `make release` produces a stripped binary around ~230 KB
+  on x86\_64 glibc (~50 KB node code + ~180 KB BearSSL + trust
+  anchors).
+- **Build:** `make` (debug) or `make release` from `node/tiny_c/`.
+  First build fetches and compiles BearSSL into `vendor/` and
+  generates `src/trust_anchors.inc` from the system CA bundle.
+- **Run:** `PRAXIS_RABBITMQ_URL=amqp://praxis:praxis@host:5672/
+  ./praxis_node_tiny_c`. The node id is persisted to
+  `~/.local/share/praxis/node_id`.
+
+Limitations versus the full node:
+
+- **Linux only.** Uses `/dev/urandom`, `gethostname(2)`, `sigaction`,
+  `select(2)`.
+- **OpenAI-compatible chat-completions only.** No Anthropic / Gemini
+  provider plumbing, no Lua connectors, no MCP, no intercept, no
+  terminal capability, no event-log forwarder, no semantic-parser
+  integration.
+- **Single in-flight prompt per session** — concurrent prompts on the
+  same session return JSON-RPC error `-32603` until the active worker
+  finishes.
+- Advertises only the `Session` capability to the service.
+
+See `node/tiny_c/README.md` for the full layout, wire-protocol notes,
+and build details.

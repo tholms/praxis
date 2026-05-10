@@ -1,11 +1,12 @@
 use super::EDIT_FG;
 use crate::app::{ModelEditForm, SettingsState};
-use crate::ui::theme::{ACCENT, BG, DIM, MUTED, POPUP_HIGHLIGHT_BG, SETTINGS_HIGHLIGHT_BG, TEXT};
+use crate::ui::chrome;
+use crate::ui::theme::{ACCENT, BG_MENU, BG_SELECTED, MUTED, TEXT_BRIGHT};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 pub(super) fn render_model_dropdown(f: &mut Frame, area: Rect, state: &SettingsState) {
     let items = &state.model_definitions;
@@ -13,45 +14,63 @@ pub(super) fn render_model_dropdown(f: &mut Frame, area: Rect, state: &SettingsS
         return;
     }
 
-    let height = (items.len() as u16 + 2).min(area.height.saturating_sub(4));
-    let width = items.iter().map(|d| d.name.len()).max().unwrap_or(20) as u16 + 6;
-    let width = width.min(area.width.saturating_sub(4));
+    //
+    // Resolve the visible label for each entry the same way the main
+    // settings list does — falling back to `provider::model` when the
+    // user-facing `name` field is empty.
+    //
+    let labels: Vec<String> = items
+        .iter()
+        .map(|d| {
+            if d.name.is_empty() {
+                format!("{}::{}", d.provider, d.model)
+            } else {
+                d.name.clone()
+            }
+        })
+        .collect();
 
     //
-    // Center the dropdown in the area.
+    // Popup chrome: 1 top pad + 1 title + 1 divider + 1 bottom pad = 4
+    // rows that don't render items, so reserve them in the height
+    // budget. Without this, 1–2 model entries get clipped entirely.
     //
+    let height = (items.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let max_label = labels.iter().map(|l| l.chars().count()).max().unwrap_or(20) as u16;
+    let width = (max_label + 6).max(20);
+    let width = width.min(area.width.saturating_sub(4));
 
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(" Select Model ")
-        .style(Style::default().bg(BG));
-
-    let inner = block.inner(popup_area);
-    f.render_widget(Clear, popup_area);
-    f.render_widget(block, popup_area);
+    let body = chrome::modal_panel(f, popup_area, "Select model", "");
 
     let mut lines: Vec<Line> = Vec::new();
-    for (i, def) in items.iter().enumerate() {
+    for (i, label) in labels.iter().enumerate() {
         let selected = i == state.dropdown_selected;
+        let row_bg = if selected { BG_SELECTED } else { BG_MENU };
         let style = if selected {
-            Style::default().fg(ACCENT).bg(SETTINGS_HIGHLIGHT_BG)
+            Style::default()
+                .fg(TEXT_BRIGHT)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(TEXT)
+            Style::default().fg(TEXT_BRIGHT).bg(row_bg)
         };
-        let prefix = if selected { "\u{25b8} " } else { "  " };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, def.name),
-            style,
-        )));
+        let marker = if selected { "\u{276f} " } else { "  " };
+        let marker_style = Style::default()
+            .fg(if selected { ACCENT } else { MUTED })
+            .bg(row_bg);
+        lines.push(Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(label.clone(), style),
+        ]));
     }
 
-    let paragraph = Paragraph::new(lines);
-    f.render_widget(paragraph, inner);
+    let paragraph = Paragraph::new(lines).style(Style::default().bg(BG_MENU));
+    f.render_widget(paragraph, body);
+    let _ = chrome::sep();
 }
 
 //
@@ -111,7 +130,11 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
 
     let show_base_url = form.shows_base_url();
     let field_count: u16 = if show_base_url { 4 } else { 3 }; // provider + apikey + [baseurl] + model
-    let base_lines: u16 = field_count + 2 + 2; // fields + blank + hints + border top/bottom
+    //
+    // Popup chrome: 1 top pad + 1 title + 1 divider + 1 bottom pad = 4.
+    // Content: field_count + 1 blank + 1 hints.
+    //
+    let base_lines: u16 = field_count + 6;
     let dropdown_extra = if form.model_dropdown_open {
         1 + form.available_models.len() as u16 // blank + model list
     } else if form.loading_models {
@@ -126,22 +149,14 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
 
-    let title = if form.edit_index.is_some() {
-        " Edit Model "
+    let title_text = if form.edit_index.is_some() {
+        "Edit model"
     } else {
-        " Add Model "
+        "Add model"
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
-        .title(title)
-        .style(Style::default().bg(BG));
-
-    let inner = block.inner(popup_area);
+    let inner = chrome::modal_panel(f, popup_area, title_text, "");
     form.model_dropdown_inner_h.set(inner.height as usize);
-    f.render_widget(Clear, popup_area);
-    f.render_widget(block, popup_area);
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -152,19 +167,19 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
     let prov_sel = form.focused_field == 0;
     lines.push(Line::from(vec![
         Span::styled(
-            if prov_sel { "\u{25b8} " } else { "  " },
-            Style::default().fg(if prov_sel { ACCENT } else { TEXT }),
+            if prov_sel { "\u{276f} " } else { "  " },
+            Style::default().fg(if prov_sel { ACCENT } else { MUTED }),
         ),
         Span::styled(
-            "Provider    ",
-            Style::default().fg(if prov_sel { ACCENT } else { TEXT }),
+            "provider    ",
+            Style::default().fg(if prov_sel { ACCENT } else { MUTED }),
         ),
         Span::styled(
-            format!("\u{25c2} {} \u{25b8}", provider_name),
+            format!("\u{25c0} {} \u{25b6}", provider_name),
             if prov_sel {
-                Style::default().fg(EDIT_FG)
+                Style::default().fg(EDIT_FG).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(MUTED)
+                Style::default().fg(TEXT_BRIGHT)
             },
         ),
     ]));
@@ -183,8 +198,8 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
 
     let build_field =
         |label: &str, text: &str, selected: bool, editing: bool, cursor_pos: usize| -> Line {
-            let sel_fg = if selected { ACCENT } else { TEXT };
-            let prefix = if selected { "\u{25b8} " } else { "  " };
+            let sel_fg = if selected { ACCENT } else { MUTED };
+            let prefix = if selected { "\u{276f} " } else { "  " };
 
             if editing && selected {
                 let (before, after) = scroll_field_parts(text, cursor_pos, field_max);
@@ -192,7 +207,7 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
                     Span::styled(prefix, Style::default().fg(sel_fg)),
                     Span::styled(label.to_string(), Style::default().fg(sel_fg)),
                     Span::styled(before, edit_style),
-                    Span::styled("\u{258f}", cursor_style),
+                    Span::styled("\u{2588}", cursor_style),
                     Span::styled(after, edit_style),
                 ];
                 Line::from(spans)
@@ -202,7 +217,7 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
                 Line::from(vec![
                     Span::styled(prefix, Style::default().fg(sel_fg)),
                     Span::styled(label.to_string(), Style::default().fg(sel_fg)),
-                    Span::styled(display, Style::default().fg(MUTED)),
+                    Span::styled(display, Style::default().fg(TEXT_BRIGHT)),
                 ])
             }
         };
@@ -218,9 +233,9 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
         .map(|p| p.api_key_optional())
         .unwrap_or(false);
     let key_label = if api_key_optional {
-        "API Key (opt)"
+        "api key (opt)"
     } else {
-        "API Key     "
+        "api key      "
     };
     let key_display = if key_sel && form.editing_text {
         &form.api_key
@@ -252,7 +267,7 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
     if show_base_url {
         let url_sel = form.focused_field == 2;
         lines.push(build_field(
-            "Base URL    ",
+            "base url     ",
             &form.base_url,
             url_sel,
             form.editing_text,
@@ -267,7 +282,7 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
     let model_field_idx = if show_base_url { 3 } else { 2 };
     let mod_sel = form.focused_field == model_field_idx;
     lines.push(build_field(
-        "Model       ",
+        "model        ",
         &form.model_name,
         mod_sel,
         form.editing_text,
@@ -281,21 +296,25 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
     //
 
     let mut hints = vec![
-        Span::styled("  ^s", Style::default().fg(DIM)),
-        Span::styled(" save  ", Style::default().fg(MUTED)),
-        Span::styled("esc", Style::default().fg(DIM)),
+        Span::styled("^s", Style::default().fg(TEXT_BRIGHT)),
+        Span::styled(" save", Style::default().fg(MUTED)),
+        Span::raw("    "),
+        Span::styled("esc", Style::default().fg(TEXT_BRIGHT)),
         Span::styled(" cancel", Style::default().fg(MUTED)),
     ];
     if form.logical_field() == 3 && form.editing_text {
-        hints.push(Span::styled("  enter", Style::default().fg(DIM)));
+        hints.push(Span::raw("    "));
+        hints.push(Span::styled("\u{21B5}", Style::default().fg(TEXT_BRIGHT)));
         hints.push(Span::styled(" load models", Style::default().fg(MUTED)));
     }
     lines.push(Line::from(hints));
 
     if form.loading_models {
         lines.push(Line::from(Span::styled(
-            "  Loading models...",
-            Style::default().fg(MUTED),
+            "  Loading models…",
+            Style::default()
+                .fg(MUTED)
+                .add_modifier(Modifier::ITALIC),
         )));
     }
 
@@ -326,16 +345,23 @@ pub(super) fn render_model_form(f: &mut Frame, area: Rect, form: &ModelEditForm)
         let mut dropdown_lines: Vec<Line> = Vec::new();
         for (i, name) in form.available_models.iter().enumerate() {
             let selected = i == form.model_dropdown_selected;
+            let row_bg = if selected { BG_SELECTED } else { BG_MENU };
             let style = if selected {
-                Style::default().fg(ACCENT).bg(POPUP_HIGHLIGHT_BG)
+                Style::default()
+                    .fg(TEXT_BRIGHT)
+                    .bg(row_bg)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(TEXT)
+                Style::default().fg(TEXT_BRIGHT).bg(row_bg)
             };
-            let prefix = if selected { "  \u{25b8} " } else { "    " };
-            dropdown_lines.push(Line::from(Span::styled(
-                format!("{}{}", prefix, name),
-                style,
-            )));
+            let prefix = if selected { "  \u{276f} " } else { "    " };
+            let prefix_style = Style::default()
+                .fg(if selected { ACCENT } else { MUTED })
+                .bg(row_bg);
+            dropdown_lines.push(Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(name.clone(), style),
+            ]));
         }
 
         let scroll_y = form.model_dropdown_scroll as u16;

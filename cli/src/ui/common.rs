@@ -1,8 +1,9 @@
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Padding};
 
-use super::theme::{ACCENT, DIM, MUTED};
+use super::theme::{ACCENT, BG, BG_PANEL, BORDER, DIM, TEXT_BRIGHT};
 
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -16,16 +17,55 @@ pub fn short_id(value: &str) -> &str {
     common::short_id(value)
 }
 
-pub fn titled_panel<'a>(title: &'a str) -> Block<'a> {
+//
+// Default panel chrome: title + light padding. No borders or bar; the
+// selected pane is signalled by an accent title and a slight bg tint.
+//
+
+pub fn titled_panel(title: &str) -> Block<'static> {
+    let title_line = Line::from(Span::styled(
+        format!("  {}", title.trim()),
+        Style::default()
+            .fg(TEXT_BRIGHT)
+            .add_modifier(Modifier::BOLD),
+    ));
+
     Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIM))
-        .title_style(Style::default().fg(MUTED))
-        .title(title)
+        .style(Style::default().bg(BG))
+        .padding(Padding::new(2, 1, 0, 0))
+        .title(title_line)
 }
 
-pub fn focused_titled_panel<'a>(title: &'a str, focused: bool) -> Block<'a> {
-    titled_panel(title).border_style(Style::default().fg(if focused { ACCENT } else { DIM }))
+pub fn focused_titled_panel(title: &str, focused: bool) -> Block<'static> {
+    let (bg, title_color) = if focused {
+        (BG_PANEL, ACCENT)
+    } else {
+        (BG, TEXT_BRIGHT)
+    };
+    let title_line = Line::from(Span::styled(
+        format!("  {}", title.trim()),
+        Style::default()
+            .fg(title_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    Block::default()
+        .style(Style::default().bg(bg))
+        .padding(Padding::new(2, 1, 0, 0))
+        .title(title_line)
+}
+
+//
+// Title-less variant of `focused_titled_panel`. Keeps the same top
+// spacer row that the title would otherwise occupy so the inner
+// content lines up with neighbouring titled panes.
+//
+
+pub fn focused_panel(focused: bool) -> Block<'static> {
+    let bg = if focused { BG_PANEL } else { BG };
+    Block::default()
+        .style(Style::default().bg(bg))
+        .padding(Padding::new(2, 1, 1, 0))
 }
 
 //
@@ -63,4 +103,18 @@ pub fn spinner_char() -> char {
         / 100) as usize
         % SPINNER_FRAMES.len();
     SPINNER_FRAMES[frame_idx]
+}
+
+#[allow(dead_code)]
+pub fn border_color_for(focused: bool) -> ratatui::style::Color {
+    if focused {
+        ACCENT
+    } else {
+        BORDER
+    }
+}
+
+#[allow(dead_code)]
+pub fn dim_color() -> ratatui::style::Color {
+    DIM
 }

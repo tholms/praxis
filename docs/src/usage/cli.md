@@ -4,10 +4,11 @@ The Praxis CLI (`praxis_cli`) provides both an interactive terminal UI and a non
 
 ## Purpose
 
-The CLI is the primary terminal interface for Praxis. It provides:
+The CLI is the **first-party** and only first-class supported client for
+Praxis. It provides:
 - Full-featured interactive terminal UI for hands-on control
 - Non-interactive commands for scripting and automation
-- Headless environments without browser access
+- Works equally well over SSH and in headless environments
 
 ## Installation
 
@@ -45,8 +46,8 @@ LLM-powered conversation interface for coordinating operations across the Praxis
 - Plan tracking with step visualization
 - Token usage statistics
 - Command history and conversation scrolling
-- Multiple concurrent orchestrator sessions — `Ctrl+N` opens a new one; `Ctrl+W` closes the current one; `Ctrl+Alt+W` saves the transcript
-- `Ctrl+C` cancels the in-flight prompt in the active session
+- Single orchestrator session per TUI run — the conversation lifetime equals the TUI process lifetime. Use `praxis --continue` or `praxis --resume` on the next launch to bring it back. `Ctrl+Alt+W` exports the transcript to markdown.
+- `Ctrl+C` cancels the in-flight prompt
 - `Ctrl+E` toggles the tools panel; `Ctrl+Alt+E` expands it fully
 
 ### Nodes (`Ctrl+L`)
@@ -70,8 +71,8 @@ sessions left alive from previous runs or other clients.
 #### Recon Overlay
 
 The recon overlay opens as a full-screen modal from the Nodes detail
-pane. It shows the same data as the web UI ReconModal — config files,
-tools, and sessions — in a tabbed terminal interface.
+pane. It shows config files, tools, and sessions in a tabbed terminal
+interface.
 
 | Key | Action |
 |-----|--------|
@@ -199,7 +200,7 @@ Operation and chain management with three tabs (`Tab` / `Shift+Tab` to switch):
 
 - **Executions** — live tracking of running/queued/completed operations and chains with duration timers
 - **Library** — browse operation and chain definitions with search filtering and detail view
-- **Triggers** — automated chain firing rules, same feature set as the web UI
+- **Triggers** — automated chain firing rules
 
 Common actions:
 - Create new operations inline
@@ -319,6 +320,8 @@ sessions and does not share state with the non-interactive subcommands.
 | `--acp` | Run as an ACP bridge (stdin/stdout proxy) | - |
 | `--clear` | Clear local state and exit | - |
 | `--status` | Check service connection status | - |
+| `--continue` | Resume the most recent saved orchestrator session | - |
+| `--resume` | List saved orchestrator sessions and pick one to resume | - |
 
 The RabbitMQ URL can also be set via the `PRAXIS_RABBITMQ_URL` environment variable.
 

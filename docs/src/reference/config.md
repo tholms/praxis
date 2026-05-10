@@ -14,7 +14,7 @@ This reference documents all configuration options for Praxis components.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PRAXIS_DATABASE_URL` | `~/.praxis_operations.db` | Database connection |
+| `PRAXIS_DATABASE_URL` | `~/.praxis/operations.db` | Database connection |
 
 **Formats**:
 - `postgresql://user:pass@host:5432/dbname` - PostgreSQL
@@ -23,7 +23,7 @@ This reference documents all configuration options for Praxis components.
 
 See [Database Configuration](../deployment/database.md) for detailed setup.
 
-### Web Component
+### Service
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -33,9 +33,8 @@ See [Database Configuration](../deployment/database.md) for detailed setup.
 
 | Variable | Effect |
 |----------|--------|
-| `PRAXIS_SKIP_FRONTEND` | Skip frontend build during `cargo build` |
 | `PRAXIS_NOT_HIDDEN` | Disable hidden desktop for DevTools agents. Defaults to `1` in debug builds (visible for development) and `0` in release builds (hidden for production). Set to `1` to make the browser window visible for debugging. |
-| `SKIP_NODE_BUILD` | Docker build arg. Set to `1` to skip building praxis_node binaries (Linux and Windows cross-compile). Defaults to `0`. Significantly speeds up Docker builds when only service/web changes are needed. Usage: `SKIP_NODE_BUILD=1 docker compose up --build` |
+| `SKIP_NODE_BUILD` | Docker build arg. Set to `1` to skip building praxis_node binaries (Linux and Windows cross-compile). Defaults to `0`. Significantly speeds up Docker builds when only service changes are needed. Usage: `SKIP_NODE_BUILD=1 docker compose up --build` |
 | `CARGO_PROFILE` | Docker build arg. Cargo build profile to use. Defaults to `release` (thin LTO, 16 codegen units). Set to `release-optimized` for fully optimized production builds (full LTO, single codegen unit). Usage: `CARGO_PROFILE=release-optimized docker compose up --build` |
 
 ### Logging
@@ -48,20 +47,20 @@ See [Database Configuration](../deployment/database.md) for detailed setup.
 
 ## Service Configuration
 
-Service configuration is stored in the database and managed via the web UI.
+Service configuration is stored in the database and managed via the praxis TUI.
 
 ### Application Logging
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `application_logs_enabled` | `false` | Enable centralized application/event logging from service, web, and nodes |
+| `application_logs_enabled` | `false` | Enable centralized application/event logging from service and nodes |
 
 When disabled or missing, logging is off by default. The service broadcasts the
-current setting to nodes and web clients at startup and on registration.
+current setting to nodes and clients at startup and on registration.
 
 ### LLM Provider Settings
 
-Access via **Settings** > **LLM Providers** in the web UI.
+Access via **Settings** (`Ctrl+S`) > **LLM Providers** in the praxis TUI.
 
 | Key | Format | Description |
 |-----|--------|-------------|
@@ -86,7 +85,7 @@ Access via **Settings** > **LLM Providers** in the web UI.
 
 ### Claude Bridge Settings
 
-Access via **Settings** > **Claude Bridge** in the web UI.
+Access via **Settings** (`Ctrl+S`) > **Claude Bridge** in the praxis TUI.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -95,13 +94,13 @@ Access via **Settings** > **Claude Bridge** in the web UI.
 | `claude_ccrv2_enabled` | `false` | Enable the CCRv2 (HTTP+SSE) bridge listener |
 | `claude_ccrv2_port` | `8587` | Port for CCRv2 HTTP connections |
 
-TLS is always on for both bridges; CCRv1 only accepts `wss://` and CCRv2 only accepts `https://`. Leaf certs are minted per SNI on the fly and signed by a self-signed CA at `~/.praxis_bridge_ca_cert.pem`.
+TLS is always on for both bridges; CCRv1 only accepts `wss://` and CCRv2 only accepts `https://`. Leaf certs are minted per SNI on the fly and signed by a self-signed CA at `~/.praxis/bridge/ca_cert.pem`.
 
 The Claude Bridge allows Claude Code to connect directly to the service as a virtual node, without deploying a full Praxis node. See [Claude Bridge](../connectors/claude-bridge.md) for protocol details and setup instructions.
 
 ### MCP Server Settings
 
-Access via **Settings** > **MCP Server** in the web UI.
+Access via **Settings** (`Ctrl+S`) > **MCP Server** in the praxis TUI.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -311,7 +310,7 @@ Rules for matching and processing intercepted traffic.
 
 ### SQLite (Default)
 
-Default location: `~/.praxis_operations.db`
+Default location: `~/.praxis/operations.db`
 
 Tables:
 - `config` - Key-value configuration
@@ -333,8 +332,6 @@ For production and multi-instance deployments, use PostgreSQL. See [Database Con
 
 | Service | Port | Protocol |
 |---------|------|----------|
-| Web UI | 8080 | HTTP |
-| WebSocket | 8080 | WS |
 | MCP SSE Server | 8585 | HTTP |
 | Claude Bridge CCRv1 | 8586 | WS |
 | Claude Bridge CCRv2 | 8587 | HTTP |
@@ -377,7 +374,7 @@ Contents:
 
 | File | Path |
 |------|------|
-| Database | `~/.praxis_operations.db` |
+| Database | `~/.praxis/operations.db` |
 | CLI State | `~/.praxis/cli.json` |
 | CLI Binary | `~/.praxis/bin/praxis_cli` |
 | Claude Config | `~/.claude.json` or `~/.config/claude/config.json` |
@@ -387,7 +384,7 @@ Contents:
 
 | File | Path |
 |------|------|
-| Database | `~/.praxis_operations.db` |
+| Database | `~/.praxis/operations.db` |
 | CLI State | `~/.praxis/cli.json` |
 | CLI Binary | `~/.praxis/bin/praxis_cli` |
 | Claude Config | `~/.claude.json` or `~/.config/claude/config.json` |
@@ -397,7 +394,7 @@ Contents:
 
 | File | Path |
 |------|------|
-| Database | `%USERPROFILE%\.praxis_operations.db` |
+| Database | `%USERPROFILE%\.praxis\operations.db` |
 | CLI State | `%USERPROFILE%\.praxis\cli.json` |
 | CLI Binary | `%USERPROFILE%\.praxis\bin\praxis_cli.exe` |
 | Claude Config | `%USERPROFILE%\.claude.json` |

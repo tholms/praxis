@@ -36,7 +36,6 @@ pub enum ConfirmKind {
     DeleteInterceptTarget(String), // target_id
     ResetNode(String), // node_id
     DeleteNode(String), // node_id — service handles whether it's local or remote
-    CloseOrchestratorSession,
     ClearAllTraffic,
     DeleteInterceptRule(i64),
     ToggleIntercept {
@@ -216,9 +215,6 @@ impl App {
                     self.nodes.active_session_id = None;
                 }
             }
-            ConfirmKind::CloseOrchestratorSession => {
-                self.close_active_orchestrator_session().await;
-            }
             ConfirmKind::ClearAllTraffic => {
                 self.clear_intercept_traffic().await;
             }
@@ -276,7 +272,7 @@ impl App {
             PopupItem {
                 label: "clear".to_string(),
                 value: "clear".to_string(),
-                description: "Start a new orchestrator session".to_string(),
+                description: "Clear the current orchestrator session".to_string(),
             },
             PopupItem {
                 label: "model".to_string(),
@@ -422,7 +418,7 @@ impl App {
     pub(crate) async fn select_model(&mut self, model_name: &str) {
         self.close_active_orchestrator_session().await;
 
-        if let Err(e) = self.acp.create_session(".", Some(model_name)).await {
+        if let Err(e) = self.acp.create_session(".", Some(model_name), Vec::new()).await {
             if let Some(session) = self.orchestrator.active_session_mut() {
                 session
                     .messages
@@ -518,15 +514,13 @@ impl App {
                         md.push_str(&format!("\n{}\n", trimmed));
                     }
                 }
-                ConversationEntry::ToolGroup(tools) => {
-                    if !tools.is_empty() {
-                        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-                        md.push_str(&format!(
-                            "\n\u{2713} {} tool calls ({})\n",
-                            tools.len(),
-                            names.join(", ")
-                        ));
-                    }
+                ConversationEntry::Tool { name, outcome, .. } => {
+                    let icon = match outcome {
+                        None => "\u{2192}",
+                        Some(o) if o.success => "\u{2713}",
+                        Some(_) => "\u{2717}",
+                    };
+                    md.push_str(&format!("\n{} {}\n", icon, name));
                 }
                 ConversationEntry::Info(msg) => {
                     md.push_str(&format!("\n*{}*\n", msg));

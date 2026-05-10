@@ -28,10 +28,23 @@ curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --service docker
 curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --cli
 ```
 
+#### Prebuilt binaries vs. building from source
+
+By default, the native install (`--service native`, `--cli`, or the corresponding interactive choices) downloads prebuilt x86_64 binaries from the latest [GitHub Release](https://github.com/originsec/praxis/releases/latest). This is fast and requires no Rust toolchain. In the interactive flow, a follow-up prompt asks which method to use.
+
+Pass `--src` to build the binaries from source instead (requires `cargo` + `git`; the installer will install Rust via `rustup` if missing):
+
+```bash
+curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --service native --src
+curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --cli --src
+```
+
+`--src` has no effect on `--service docker`, which always builds from source inside the container. The flag is also auto-enabled on non-x86_64 architectures, since prebuilt binaries are only published for `x86_64`.
+
 #### Cross-compiling the Windows node binary (optional)
 
-Add `--with-win-node` to a native install to also cross-compile the Windows
-`praxis_node.exe` and stage it next to the Linux node binary at
+Add `--with-win-node` to a native install to also stage the Windows
+`praxis_node.exe` next to the Linux node binary at
 `/usr/local/share/praxis/nodes/praxis_node_windows.exe`. Useful when the
 service needs to deploy nodes to Windows targets without pulling them from
 a release.
@@ -40,8 +53,10 @@ a release.
 curl -fsSL https://praxis.originhq.com/install.sh | bash -s -- --service native --with-win-node
 ```
 
-Requires `mingw-w64` and `rustup` (the rust target `x86_64-pc-windows-gnu`
-is installed automatically). Install mingw-w64 with your distribution's
+By default this downloads `praxis_node-windows-x86_64.exe` from the GitHub
+release. Combined with `--src` it cross-compiles instead, which requires
+`mingw-w64` and `rustup` (the rust target `x86_64-pc-windows-gnu` is
+installed automatically). Install mingw-w64 with your distribution's
 package manager:
 
 - Debian/Ubuntu: `sudo apt-get install mingw-w64`
@@ -55,7 +70,7 @@ binary from the GitHub release if you need it.
 
 ### Windows
 
-The Praxis service is Linux-only, so on Windows the installer runs the service in **Docker** — that's the only option for the service on Windows. The CLI (TUI) is always installed natively (compiled from source, requires Rust + git).
+The Praxis service is Linux-only, so on Windows the installer runs the service in **Docker** — that's the only option for the service on Windows. The CLI (TUI) is always installed natively. By default it's downloaded from the latest GitHub release; pass `-Src` to build from source (requires Rust + git).
 
 ```powershell
 irm https://praxis.originhq.com/install.ps1 | iex
@@ -71,10 +86,11 @@ Non-interactive:
 ```powershell
 .\install.ps1 -Service docker
 .\install.ps1 -Cli
+.\install.ps1 -Cli -Src      # build praxis.exe from source instead of downloading
 .\install.ps1 -Remove
 ```
 
-If Docker is not installed, install [Docker Desktop](https://www.docker.com/products/docker-desktop/) first. If Rust is missing, install it via [rustup](https://rustup.rs).
+If Docker is not installed, install [Docker Desktop](https://www.docker.com/products/docker-desktop/) first. If you use `-Src` and Rust is missing, install it via [rustup](https://rustup.rs).
 
 ### Native install — RabbitMQ prerequisite
 
@@ -108,7 +124,7 @@ The installer creates the `praxis` RabbitMQ user and grants it permissions autom
 - `/var/lib/praxis/` — data directory (SQLite database lives here by default)
 - A dedicated `praxis` system user runs the service
 
-The web UI is **not** installed by either the script or the docker image — manage and use Praxis through the `praxis` TUI.
+Manage and use Praxis through the `praxis` TUI — it's the only first-party supported client.
 
 ### What docker install lays down
 
@@ -117,7 +133,7 @@ The repo is cloned into `~/.praxis-docker`. `docker compose` brings up two servi
 - **rabbitmq** — `rabbitmq:3-management` with the `praxis` user pre-created
 - **praxis** — Praxis container running systemd as PID 1; `praxisctl` works inside the container
 
-The MCP server and Claude bridges are exposed on ports 8585, 8586, and 8587. There is no web UI in the docker image.
+The MCP server and Claude bridges are exposed on ports 8585, 8586, and 8587.
 
 ### Removing
 

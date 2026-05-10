@@ -53,7 +53,7 @@ CCRv2 uses HTTP POST for client-to-server messages and Server-Sent Events (SSE) 
 
 ## Enabling the Bridge
 
-Both bridge versions are disabled by default. Enable them in the web UI under **Settings** > **Claude Bridge**, or in the CLI TUI under **Settings** (`Ctrl+S`) > **Service** tab.
+Both bridge versions are disabled by default. Enable them in the praxis TUI under **Settings** (`Ctrl+S`) > **Service** tab.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -66,11 +66,11 @@ Changes take effect immediately -- the bridges restart in place when any of thes
 
 ### Per-SNI certificate issuance
 
-The service installs a dynamic certificate resolver. For every TLS handshake it inspects the client's SNI hostname and mints a leaf certificate for that exact name on the fly, signed by a self-signed CA. The CA is generated on first start and persisted to `~/.praxis_bridge_ca_cert.pem` and `~/.praxis_bridge_ca_key.pem`; leaves are cached in memory only. There is **no domain to configure** -- whatever hostname the client requests is what gets a cert.
+The service installs a dynamic certificate resolver. For every TLS handshake it inspects the client's SNI hostname and mints a leaf certificate for that exact name on the fly, signed by a self-signed CA. The CA is generated on first start and persisted to `~/.praxis/bridge/ca_cert.pem` and `~/.praxis/bridge/ca_key.pem`; leaves are cached in memory only. There is **no domain to configure** -- whatever hostname the client requests is what gets a cert.
 
 To make the connecting Claude Code instance trust the bridge, either:
 
-- point `NODE_EXTRA_CA_CERTS` at `~/.praxis_bridge_ca_cert.pem`, or
+- point `NODE_EXTRA_CA_CERTS` at `~/.praxis/bridge/ca_cert.pem`, or
 - launch Claude with `NODE_TLS_REJECT_UNAUTHORIZED=0` to disable verification (development only).
 
 ### Picking an `--sdk-url` hostname (Claude's allowlist)
@@ -152,22 +152,22 @@ If all return null, V2 crashes and V1 proceeds with empty headers.
 
 ## How Bridge Nodes Appear
 
-When Claude connects, the bridge registers a virtual node with the service. This node appears in the web UI and CLI just like a deployed node, with some differences:
+When Claude connects, the bridge registers a virtual node with the service. This node appears in the praxis TUI just like a deployed node, with some differences:
 
-- **Node type**: `claude-ccrv1` or `claude-ccrv2` (shown in the UI)
+- **Node type**: `claude-ccrv1` or `claude-ccrv2` (shown in the TUI)
 - **Machine name**: Same as the node type
 - **Capabilities**: Session only (no interception, recon, or terminal)
 - **Agent**: Claude Code (auto-selected, with version reported from the `system/init` message)
 - **Session**: Automatically active in YOLO mode (bypassPermissions)
 - **Working directory**: Reported by Claude's `system/init` message (the cwd where Claude was launched)
 
-Bridge nodes are ephemeral -- they exist only while Claude is connected. When Claude disconnects, the node is automatically deregistered and disappears from the UI.
+Bridge nodes are ephemeral -- they exist only while Claude is connected. When Claude disconnects, the node is automatically deregistered and disappears from the TUI.
 
 ## Using Bridge Sessions
 
 Once connected, a bridge session works like any other Praxis session. You can:
 
-- Send prompts from the web UI or CLI
+- Send prompts from the praxis TUI
 - Run semantic operations against the bridge node
 - Include bridge nodes in chain workflows
 - Use the orchestrator with bridge nodes
