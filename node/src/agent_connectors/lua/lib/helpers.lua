@@ -110,6 +110,12 @@ function M.parse_toml(content)
   return parsed
 end
 
+--
+-- Working recon-collection buffer used internally by helpers. Agent .lua
+-- scripts should not need to construct one directly — use the higher-level
+-- run_standard_recon entrypoint.
+--
+
 function M.new_recon_result()
   return {
     config_items = {},
@@ -117,6 +123,7 @@ function M.new_recon_result()
     context_filenames = {},
     project_paths = {},
     sessions = {},
+    skills = {},
   }
 end
 
@@ -135,6 +142,9 @@ function M.merge_recon_result(dest, source)
   end
   for _, s in ipairs(source.sessions or {}) do
     table.insert(dest.sessions, s)
+  end
+  for _, s in ipairs(source.skills or {}) do
+    table.insert(dest.skills, s)
   end
 end
 
@@ -207,6 +217,7 @@ end
 -- to list its tools, then parsing the response with the semantic parser.
 -- session_fns = { create = fn, transact = fn, close = fn }
 --
+
 function M.discover_internal_tools(session_opts, session_fns)
   local prompts = {
     "What tools do you have that you can use to help me? High level overview. "
@@ -244,10 +255,6 @@ function M.discover_internal_tools(session_opts, session_fns)
   end
 
   return {}
-end
-
-function M.extract_metadata(config_items)
-  return praxis.semantic_extract_metadata(config_items)
 end
 
 --
@@ -359,6 +366,281 @@ function M.find_executable(cfg)
   end
 
   return nil, nil
+end
+
+--
+-- Build a fingerprint verifier that runs `<path> <args>` (default `--version`)
+-- and returns (ok, version). The optional `name_match` is a lowercase
+-- substring that must appear in stdout for the candidate to be accepted;
+-- the optional `version_pattern` overrides the default semver-ish capture.
+--
+-- Usage:
+--   verify = helpers.make_verify_version_flag({ name_match = "claude" })
+--
+function M.make_verify_version_flag(opts)
+  opts = opts or {}
+  local args = opts.args or { "--version" }
+  local name_match = opts.name_match
+  local version_pattern = opts.version_pattern or "(%d[%d%.%-a-zA-Z]*)"
+  local timeout_secs = opts.timeout_secs or 10
+
+  return function(path)
+    local result = praxis.command_run({
+      program = path,
+      args = args,
+      timeout_secs = timeout_secs,
+    })
+    if not result.success then
+      return false, nil
+    end
+    local stdout = result.stdout or ""
+    if name_match and not string.lower(stdout):find(name_match, 1, true) then
+      return false, nil
+    end
+    local version = stdout:match(version_pattern)
+    return true, version
+  end
+end
+
+--
+-- Build a path-level auth predicate that allows a path if any of:
+--   - an env var in `env_vars` is set anywhere we look,
+--   - a file under the agent's dot-dir matches `file_check` (called as
+--     fn(absolute_path) -> bool); the relative path is opts.auth_files (a
+--     list of paths relative to a user home).
+--
+-- The returned function has the
+-- `(path, user_homes, process_path) -> bool` signature run_standard_recon
+-- expects. process_path is unused by the default flow but kept for parity.
+--
+function M.auth_via_env_or_files(opts)
+  local env_vars = opts.env_vars or {}
+  local auth_files = opts.auth_files or {}
+  local file_check = opts.file_check or function(_p) return true end
+
+  return function(path, user_homes, _process_path)
+    if M.has_any_env_var(env_vars, {}) then
+      return true
+    end
+
+    local function check_home(home)
+      for _, rel in ipairs(auth_files) do
+        local full = praxis.path_join({ home, rel })
+        if praxis.path_exists(full) and file_check(full) then
+          return true
+        end
+      end
+      return false
+    end
+
+    --
+    -- A project path inherits the auth of the user home that owns it. If
+    -- path itself is a user home (or no match found), fall through and
+    -- check it directly as well.
+    --
+    for _, home in ipairs(user_homes or {}) do
+      if M.starts_with(path, home) then
+        if check_home(home) then
+          return true
+        end
+      end
+    end
+    return check_home(path)
+  end
+end
+
+--
+-- Default a session/recon context's working_dir to the first user home that
+-- contains the agent's dot-dir. Returns the working_dir to use.
+--
+function M.resolve_working_dir(ctx, home_dir)
+  local wd = ctx and ctx.working_dir
+  if type(wd) == "string" and wd ~= "" then
+    return wd
+  end
+  local homes = M.user_homes_with_dir(home_dir)
+  return homes[1]
+end
+
+--
+-- Generic JSONL session enumeration. Walks <home>/<sessions_relpath>/ and
+-- collects every .jsonl file as a session entry, optionally calling
+-- opts.parse_session(file_path, content) -> { session_id, message_count,
+-- last_modified } to override the defaults (session_id derived from
+-- filename, message_count from line count, last_modified from mtime).
+-- opts.skip_dir(name) -> bool can mark whole project subdirectories to skip.
+-- opts.context_path(home, project_dir_name) -> string controls the
+-- context_path written to each SessionItem.
+--
+function M.discover_jsonl_sessions(home, opts)
+  local sessions_relpath = opts.sessions_relpath
+  if type(sessions_relpath) ~= "string" or sessions_relpath == "" then
+    return {}
+  end
+
+  local base = praxis.path_join({ home, sessions_relpath })
+  if not praxis.path_is_dir(base) then
+    return {}
+  end
+
+  local context_path_fn = opts.context_path or function(_home, dirname)
+    return dirname or ""
+  end
+  local skip_dir = opts.skip_dir or function(_name) return false end
+  local parse_session = opts.parse_session
+
+  local sessions = {}
+
+  local project_dirs = praxis.read_dir(base) or {}
+  for _, proj in ipairs(project_dirs) do
+    if proj.is_dir and not skip_dir(proj.name or "") then
+      local ctx = context_path_fn(home, proj.name or "")
+      local entries = praxis.read_dir(proj.path) or {}
+      for _, entry in ipairs(entries) do
+        if entry.is_file and M.ends_with(entry.name, ".jsonl") then
+          local session_id = string.sub(entry.name, 1, #entry.name - 6)
+          local message_count = praxis.count_file_lines(entry.path)
+          local last_modified = ""
+          if entry.modified_unix then
+            last_modified = praxis.format_unix_timestamp(entry.modified_unix)
+          end
+
+          if parse_session then
+            local overrides = parse_session(entry.path) or {}
+            if overrides.session_id ~= nil then session_id = overrides.session_id end
+            if overrides.message_count ~= nil then message_count = overrides.message_count end
+            if overrides.last_modified ~= nil then last_modified = overrides.last_modified end
+          end
+
+          table.insert(sessions, {
+            session_id = session_id,
+            context_path = ctx,
+            session_file = entry.path,
+            last_modified = last_modified,
+            message_count = message_count,
+            content = nil,
+          })
+        end
+      end
+    end
+  end
+
+  return sessions
+end
+
+--
+-- Find the most recently modified .jsonl file under a directory. Returns
+-- nil if the directory does not exist or has no matching files. opts.suffix
+-- defaults to ".jsonl".
+--
+function M.find_latest_session_file(dir, opts)
+  opts = opts or {}
+  local suffix = opts.suffix or ".jsonl"
+
+  if type(dir) ~= "string" or dir == "" or not praxis.path_is_dir(dir) then
+    return nil
+  end
+
+  local best_path = nil
+  local best_modified = -1
+  for _, entry in ipairs(praxis.read_dir(dir) or {}) do
+    if entry.is_file and M.ends_with(entry.name, suffix) then
+      local m = entry.modified_unix or 0
+      if m > best_modified then
+        best_modified = m
+        best_path = entry.path
+      end
+    end
+  end
+  return best_path
+end
+
+--
+-- Build a subprocess-style session triple (create/transact/close) shared
+-- by the majority of CLI agents. Each agent provides a single closure that
+-- maps the session state plus the inbound prompt to an arg list and any
+-- stdin payload; the helper handles spawning, stdout capture, error
+-- propagation, and timeout defaults.
+--
+-- opts:
+--   home_dir       (string)        agent dot-dir for resolve_working_dir
+--   build_invocation (fn)          fn(state, prompt) -> {
+--                                    args             = {...},
+--                                    stdin            = "...",   -- optional
+--                                  }
+--   initial_state  (fn?)           fn(ctx) -> table | nil
+--   on_response    (fn?)           fn(state, prompt, stdout) -> nil
+--   close          (fn?)           fn(state) -> nil
+--   error_label    (string?)       used in error messages ("Codex command failed: ...")
+--   default_timeout_secs (number?) defaults to 1800
+--
+function M.subprocess_session(opts)
+  local home_dir = opts.home_dir
+  local build_invocation = opts.build_invocation
+  local initial_state = opts.initial_state
+  local on_response = opts.on_response
+  local close_fn = opts.close
+  local error_label = opts.error_label or "Subprocess agent"
+  local default_timeout = opts.default_timeout_secs or 1800
+
+  if type(build_invocation) ~= "function" then
+    error("subprocess_session: build_invocation is required")
+  end
+
+  local function create(ctx)
+    local state = {
+      handle = praxis.uuid_v4(),
+      process_path = ctx.process_path,
+      working_dir = M.resolve_working_dir(ctx, home_dir),
+      yolo_mode = ctx.yolo_mode == true,
+      prompt_timeout_secs = ctx.prompt_timeout_secs,
+    }
+    if initial_state then
+      local extra = initial_state(ctx) or {}
+      for k, v in pairs(extra) do
+        state[k] = v
+      end
+    end
+    return state
+  end
+
+  local function transact(state, prompt)
+    local invocation = build_invocation(state, prompt) or {}
+    local spec = {
+      program = state.process_path,
+      args = invocation.args or {},
+      timeout_secs = state.prompt_timeout_secs or default_timeout,
+    }
+    if type(state.working_dir) == "string" and state.working_dir ~= "" then
+      spec.cwd = state.working_dir
+    end
+    if invocation.stdin ~= nil then
+      spec.stdin = invocation.stdin
+    end
+
+    local result = praxis.command_run_handle(spec, state.handle)
+    if not result.success then
+      error(error_label .. ": " .. tostring(result.stderr or "unknown error"))
+    end
+
+    local stdout = result.stdout or ""
+    if on_response then
+      on_response(state, prompt, stdout)
+    end
+    return { response = stdout, state = state }
+  end
+
+  local function close(state)
+    if close_fn then
+      close_fn(state)
+    end
+  end
+
+  return {
+    create = create,
+    transact = transact,
+    close = close,
+  }
 end
 
 --
@@ -604,10 +886,10 @@ end
 --   - home: config_type used as-is, MCP context_path is nil
 --   - project: config_type becomes "type:base_path", MCP context_path is base_path
 --
--- opts.include_contents: whether to read file contents into config items
---
 -- When mcp is truthy, the config's content is tracked in raw_configs_for_mcp
 -- with an mcp_key field (true becomes "default", a string is used directly).
+-- Recon never carries file contents in its output — contents are fetched
+-- on-demand by the consumer.
 --
 
 function M.collect_configs(base_path, templates, opts)
@@ -696,24 +978,247 @@ function M.extract_mcp_servers(raw_configs, parsers)
 end
 
 --
+-- Parse a YAML-ish key from a markdown frontmatter block. Supports plain,
+-- single-quoted, double-quoted scalars and `|` / `>` block scalars (with
+-- optional chomping indicators). No nesting. Returns the value string or
+-- nil if the key is not found or no frontmatter delimiters are present.
+--
+
+function M.parse_frontmatter_field(content, field)
+  if type(content) ~= "string" or content == "" then
+    return nil
+  end
+  local fm = content:match("^%-%-%-\r?\n(.-)\r?\n%-%-%-")
+  if not fm then
+    return nil
+  end
+
+  --
+  -- Split frontmatter into lines (keeps empties).
+  --
+
+  local lines = {}
+  for line in (fm .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+    table.insert(lines, line)
+  end
+
+  local key_pattern = "^(%s*)" .. field .. "%s*:%s*(.-)%s*$"
+  for i, line in ipairs(lines) do
+    local indent, value = line:match(key_pattern)
+    if indent then
+      --
+      -- Block scalar: collect subsequent lines indented further than the
+      -- key itself, joining with spaces (folded `>`) or newlines (literal
+      -- `|`). Strip trailing whitespace; treat blank lines as paragraph
+      -- separators.
+      --
+
+      local style = value:match("^([|>])[%+%-]?%s*$")
+      if style then
+        local key_indent_len = #indent
+        local block = {}
+        for j = i + 1, #lines do
+          local l = lines[j]
+          if l:match("^%s*$") then
+            table.insert(block, "")
+          else
+            local lead = l:match("^(%s*)")
+            if #lead > key_indent_len then
+              table.insert(block, l:sub(#lead + 1))
+            else
+              break
+            end
+          end
+        end
+        --
+        -- Trim trailing empties and join according to style.
+        --
+
+        while #block > 0 and block[#block] == "" do
+          table.remove(block)
+        end
+        local sep = style == ">" and " " or "\n"
+        local joined = table.concat(block, sep)
+        joined = joined:gsub("^%s+", ""):gsub("%s+$", "")
+        return joined
+      end
+
+      --
+      -- Inline scalar: strip quotes if wrapping the whole value.
+      --
+
+      local stripped = value:match('^"(.*)"$') or value:match("^'(.*)'$")
+      local final = stripped or value
+      if final == "" then
+        return nil
+      end
+      return final
+    end
+  end
+  return nil
+end
+
+--
+-- Return the first non-empty, non-frontmatter line of a markdown document.
+-- Strips leading "# " markers so headings collapse to their text.
+--
+
+function M.first_meaningful_line(content)
+  if type(content) ~= "string" or content == "" then
+    return nil
+  end
+  local body = content
+  local _, fm_end = body:find("^%-%-%-\r?\n.-\r?\n%-%-%-\r?\n")
+  if fm_end then
+    body = body:sub(fm_end + 1)
+  end
+  for line in body:gmatch("[^\r\n]+") do
+    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if trimmed ~= "" then
+      return (trimmed:gsub("^#+%s*", ""))
+    end
+  end
+  return nil
+end
+
+--
+-- Strip a path extension. "foo.md" -> "foo", "foo.bar.toml" -> "foo.bar".
+--
+
+function M.strip_extension(name)
+  return (tostring(name or ""):gsub("%.[^.]+$", ""))
+end
+
+--
+-- Discover slash-command style skills under base_path/dir. Each file matching
+-- pattern becomes one skill, with name derived from the path (sub-paths
+-- become "parent/leaf" so namespace nesting is preserved). The description
+-- is taken from the frontmatter `description:` field if present, otherwise
+-- the first meaningful line of the file. Set context_path to mark project
+-- skills.
+--
+-- opts: {
+--   dir          = "commands",       -- subdirectory under base_path
+--   pattern      = "%.md$",          -- lua pattern (anchored to end of name)
+--   name_prefix  = "/",              -- prepended to derived names
+--   parse        = "markdown"|"toml",-- how to extract description
+--   context_path = nil | "<path>",   -- nil for global, base for project
+-- }
+--
+
+function M.discover_command_skills(base_path, opts)
+  local dir = praxis.path_join({ base_path, opts.dir })
+  if not praxis.path_is_dir(dir) then
+    return {}
+  end
+
+  local files = praxis.walk_files(dir, 8) or {}
+  local skills = {}
+  for _, file in ipairs(files) do
+    local nf = M.norm(file)
+    if nf:match(opts.pattern) then
+      local rel = nf:sub(#M.norm(dir) + 2)
+      local name_path = M.strip_extension(rel)
+      local name = (opts.name_prefix or "") .. name_path
+
+      local content = praxis.read_file(file)
+      local description = nil
+      if opts.parse == "toml" then
+        local parsed = M.parse_toml(content or "")
+        if parsed and type(parsed.description) == "string" then
+          description = parsed.description
+        elseif parsed and type(parsed.prompt) == "string" then
+          description = parsed.prompt:sub(1, 200)
+        end
+      else
+        description = M.parse_frontmatter_field(content or "", "description")
+        if description == nil then
+          description = M.first_meaningful_line(content or "")
+        end
+      end
+
+      table.insert(skills, {
+        name = name,
+        description = description or "",
+        context_path = opts.context_path,
+      })
+    end
+  end
+  return skills
+end
+
+--
+-- Discover Anthropic-style "SKILL.md" skills under base_path/dir. Each
+-- subdirectory containing a SKILL.md becomes one skill. The name comes from
+-- the frontmatter `name:` (falling back to the directory name) and the
+-- description from frontmatter `description:`.
+--
+
+function M.discover_skill_md_skills(base_path, opts)
+  local dir = praxis.path_join({ base_path, opts.dir or "skills" })
+  if not praxis.path_is_dir(dir) then
+    return {}
+  end
+
+  local skills = {}
+  local entries = praxis.read_dir(dir) or {}
+  for _, entry in ipairs(entries) do
+    if entry.is_dir then
+      local skill_md = praxis.path_join({ entry.path, "SKILL.md" })
+      if praxis.path_exists(skill_md) then
+        local content = praxis.read_file(skill_md) or ""
+        local name = M.parse_frontmatter_field(content, "name") or entry.name
+        local description = M.parse_frontmatter_field(content, "description") or ""
+        table.insert(skills, {
+          name = name,
+          description = description,
+          context_path = opts.context_path,
+        })
+      end
+    end
+  end
+  return skills
+end
+
+--
+-- Deduplicate a list of skills by name+context_path, preserving first seen.
+--
+
+function M.dedup_skills(skills)
+  local seen = {}
+  local out = {}
+  for _, s in ipairs(skills or {}) do
+    local key = (s.name or "") .. "::" .. (s.context_path or "")
+    if not seen[key] then
+      seen[key] = true
+      table.insert(out, s)
+    end
+  end
+  return out
+end
+
+--
 -- Standard recon orchestration. Takes a declarative config table describing
 -- where to find configs, how to discover projects, and how to parse MCP
--- servers. Handles the full system → home → project → auth → MCP → semantic
--- pipeline that all agent connectors share.
+-- servers. Handles the full system → home → project → auth → MCP pipeline
+-- that all agent connectors share, and shapes the return into the three
+-- ReconResult categories (config, tools, sessions) the Rust side expects.
 --
 -- Config fields:
 --   home_dir          (string)   dot-dir name for user_homes_with_dir, e.g. ".claude"
---   system_configs    (fn?)      fn(include_contents) -> recon_result
+--   system_configs    (fn?)      fn(is_semantic) -> recon_buffer for system files
 --   home_configs      (table)    array of { path, type, mcp } templates
 --   project_configs   (table)    array of { path, type, mcp } templates
 --   project_markers   (table?)   array of path suffixes for walk_files discovery
 --   project_discovery (fn?)      fn(home) -> {paths} for custom project discovery
 --   mcp_parsers       (table)    { default = fn, [key] = fn, ... }
 --   auth_check        (fn)       fn(path, user_homes, process_path) -> bool
---   session_discovery  (fn?)     fn(home) -> {sessions}
---   session_fns       (table)    { create, transact, close } for semantic enrichment
+--   session_discovery (fn?)      fn(home) -> {sessions}
+--   skill_discovery   (fn?)      fn(home, project_paths) -> {skills}
+--   session_fns       (table?)   { create, transact, close } used by semantic
+--                                internal-tools discovery
 --   context_filenames (table?)   initial context filenames to include
---   post_collect      (fn?)      fn(result, ctx) -> result, called after collection
+--   post_collect      (fn?)      fn(buffer, ctx) -> nil, called after collection
 --
 
 function M.run_standard_recon(ctx, config)
@@ -736,7 +1241,7 @@ function M.run_standard_recon(ctx, config)
 
   --
   -- Per-home collection: home configs, project discovery, project configs,
-  -- and session discovery.
+  -- session discovery, and skill discovery.
   --
 
   local homes = praxis.user_homes() or {}
@@ -749,10 +1254,6 @@ function M.run_standard_recon(ctx, config)
         scope = "home",
         include_contents = is_semantic,
       }))
-
-    --
-    -- Discover projects via marker files and/or custom discovery.
-    --
 
     local projects = {}
 
@@ -788,6 +1289,17 @@ function M.run_standard_recon(ctx, config)
       end
     end
 
+    if config.skill_discovery then
+      local ok, skills = pcall(config.skill_discovery, home, home_result.project_paths)
+      if ok and type(skills) == "table" then
+        for _, s in ipairs(skills) do
+          table.insert(home_result.skills, s)
+        end
+      elseif not ok then
+        praxis.log_warn("skill_discovery failed for " .. tostring(home) .. ": " .. tostring(skills))
+      end
+    end
+
     return home_result
   end
 
@@ -799,18 +1311,13 @@ function M.run_standard_recon(ctx, config)
   result.project_paths = M.dedup(result.project_paths)
   result.context_filenames = M.dedup(result.context_filenames)
 
-  --
-  -- Post-collection hook for agent-specific processing (e.g. env vars,
-  -- custom context file discovery).
-  --
-
   if config.post_collect then
     config.post_collect(result, ctx)
   end
 
   --
-  -- Build candidate paths (user homes with dot-dir + project paths),
-  -- then filter by auth.
+  -- Build candidate paths (user homes with dot-dir + project paths), then
+  -- filter by auth.
   --
 
   local user_homes_with_dir = M.user_homes_with_dir(config.home_dir)
@@ -825,48 +1332,67 @@ function M.run_standard_recon(ctx, config)
 
   local filtered_paths = {}
   for _, p in ipairs(all_paths) do
-    if config.auth_check(p, homes, ctx.process_path) then
+    if config.auth_check(p, homes, ctx and ctx.process_path or nil) then
       table.insert(filtered_paths, p)
     end
   end
   filtered_paths = M.dedup(filtered_paths)
   M.sort_strings(filtered_paths)
 
-  --
-  -- Extract and deduplicate MCP servers.
-  --
-
   local mcp_unique = M.extract_mcp_servers(result.raw_configs_for_mcp, config.mcp_parsers)
 
   --
-  -- Semantic enrichment: discover internal tools and extract metadata.
+  -- Filter discovered skills to those whose context_path passes auth (or
+  -- is global, which is implicitly authorised by any authed home).
   --
 
-  local internal_tools = {}
-  local metadata = nil
-
-  if is_semantic then
-    internal_tools = M.discover_internal_tools({
-      process_path = ctx.process_path,
-      working_dir = filtered_paths[1],
-    }, config.session_fns)
-    metadata = M.extract_metadata(result.config_items)
-
-    for _, item in ipairs(result.config_items) do
-      item.contents = nil
+  local authed_set = {}
+  for _, p in ipairs(filtered_paths) do
+    authed_set[p] = true
+  end
+  local skills_filtered = {}
+  for _, s in ipairs(M.dedup_skills(result.skills or {})) do
+    if s.context_path == nil or authed_set[s.context_path] then
+      table.insert(skills_filtered, s)
     end
   end
 
+  --
+  -- Semantic enrichment: discover internal/built-in tools by interrogating
+  -- the agent. Only runs in semantic mode and only when session_fns are
+  -- provided.
+  --
+
+  local internal_tools = {}
+  if is_semantic and config.session_fns then
+    internal_tools = M.discover_internal_tools({
+      process_path = ctx and ctx.process_path or nil,
+      working_dir = filtered_paths[1],
+    }, config.session_fns)
+  end
+
+  --
+  -- Drop config contents from the output now that downstream semantic
+  -- helpers have had their chance to consume them.
+  --
+
+  for _, item in ipairs(result.config_items) do
+    item.contents = nil
+  end
+
   return {
+    config = {
+      items = result.config_items,
+      project_paths = filtered_paths,
+    },
     tools = {
       mcp_servers = mcp_unique,
-      skills = {},
+      skills = skills_filtered,
       internal_tools = internal_tools,
     },
-    config = result.config_items,
-    sessions = result.sessions,
-    project_paths = filtered_paths,
-    metadata = metadata,
+    sessions = {
+      items = result.sessions,
+    },
   }
 end
 

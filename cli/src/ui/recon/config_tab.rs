@@ -1,7 +1,7 @@
 use crate::app::{ReconOverlay, ReconTab};
 use crate::ui::common::focused_titled_panel;
 use crate::ui::theme::{
-    ACCENT, BG_MENU, BG_SELECTED, DIM, MUTED, STATUS_FAIL, STATUS_RUNNING, TEXT, TEXT_BRIGHT,
+    ACCENT, BG_SELECTED, DIM, MUTED, STATUS_FAIL, STATUS_RUNNING, TEXT, TEXT_BRIGHT,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -36,24 +36,18 @@ pub fn render(f: &mut Frame, area: Rect, overlay: &ReconOverlay) {
 
     render_left_pane(f, left, overlay, result);
     render_right_pane(f, right, overlay, result);
-
-    if let Some(ref metadata) = result.metadata {
-        if !metadata.is_empty() {
-            render_metadata_line(f, area, metadata);
-        }
-    }
 }
 
 fn render_left_pane(f: &mut Frame, area: Rect, overlay: &ReconOverlay, result: &common::ReconResult) {
     let block = focused_titled_panel(
-        &format!(" Config Files ({}) ", result.config.len()),
+        &format!(" Config Files ({}) ", result.config.items.len()),
         !overlay.right_pane_focused,
     );
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if result.config.is_empty() {
+    if result.config.items.is_empty() {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(" No config files", Style::default().fg(DIM)))),
             inner,
@@ -61,47 +55,86 @@ fn render_left_pane(f: &mut Frame, area: Rect, overlay: &ReconOverlay, result: &
         return;
     }
 
-    let visible_items = (inner.height as usize / 2).max(1);
-    let scroll_offset = if overlay.selected_left >= visible_items {
-        overlay.selected_left.saturating_sub(visible_items - 1)
-    } else {
-        0
-    };
+    //
+    // Each item renders as two logical lines (path + type), but either can wrap
+    // depending on inner.width, so a fixed "2 rows per item" assumption is wrong
+    // and lets the selection walk off-screen. Use Paragraph::line_count to get
+    // exact wrapped heights, then pick the largest scroll_offset such that the
+    // selected item still fits.
+    //
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (idx, item) in result.config.iter().enumerate().skip(scroll_offset).take(visible_items) {
-        let is_selected = overlay.active_tab == ReconTab::Config && overlay.selected_left == idx;
-        let bg = if is_selected { BG_SELECTED } else { BG_MENU };
+    let inner_h = inner.height as usize;
 
-        let name_style = if is_selected {
-            Style::default()
-                .fg(TEXT_BRIGHT)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(TEXT_BRIGHT).bg(bg)
-        };
-        let path_style = Style::default().fg(MUTED).bg(bg);
-        let type_style = Style::default().fg(DIM).bg(bg);
-
-        let prefix = if is_selected { "\u{276f} " } else { "  " };
-        let prefix_style = Style::default()
-            .fg(if is_selected { ACCENT } else { MUTED })
-            .bg(bg);
-        let path_display = if item.path.len() > 40 {
-            format!("…{}", &item.path[item.path.len().saturating_sub(39)..])
+    let path_display = |item: &common::ConfigItem| -> String {
+        let total = item.path.chars().count();
+        if total > 40 {
+            let skip = total - 39;
+            let suffix: String = item.path.chars().skip(skip).collect();
+            format!("…{}", suffix)
         } else {
             item.path.clone()
-        };
+        }
+    };
+
+    let item_height = |item: &common::ConfigItem| -> usize {
+        let lines = vec![
+            Line::from(vec![Span::raw("  "), Span::raw(path_display(item))]),
+            Line::from(vec![
+                Span::raw("    "),
+                Span::raw(format!("[{}]", item.config_type)),
+            ]),
+        ];
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .line_count(inner.width)
+    };
+
+    let selected = overlay
+        .selected_left
+        .min(result.config.items.len().saturating_sub(1));
+
+    let mut scroll_offset = selected;
+    let mut consumed = item_height(&result.config.items[selected]);
+    while scroll_offset > 0 {
+        let prev = scroll_offset - 1;
+        let h = item_height(&result.config.items[prev]);
+        if consumed + h > inner_h {
+            break;
+        }
+        consumed += h;
+        scroll_offset = prev;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut rendered_rows: usize = 0;
+    for (idx, item) in result.config.items.iter().enumerate().skip(scroll_offset) {
+        if rendered_rows >= inner_h {
+            break;
+        }
+        let is_selected = overlay.active_tab == ReconTab::Config && overlay.selected_left == idx;
+
+        let mut name_style = Style::default().fg(TEXT_BRIGHT);
+        let mut path_style = Style::default().fg(MUTED);
+        let mut type_style = Style::default().fg(DIM);
+        let mut prefix_style = Style::default().fg(if is_selected { ACCENT } else { MUTED });
+        if is_selected {
+            name_style = name_style.bg(BG_SELECTED).add_modifier(Modifier::BOLD);
+            path_style = path_style.bg(BG_SELECTED);
+            type_style = type_style.bg(BG_SELECTED);
+            prefix_style = prefix_style.bg(BG_SELECTED);
+        }
+
+        let prefix = if is_selected { "\u{276f} " } else { "  " };
 
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), prefix_style),
-            Span::styled(path_display, name_style),
+            Span::styled(path_display(item), name_style),
         ]));
         lines.push(Line::from(vec![
             Span::styled("    ", path_style),
             Span::styled(format!("[{}]", item.config_type), type_style),
         ]));
+        rendered_rows += item_height(item);
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -109,7 +142,7 @@ fn render_left_pane(f: &mut Frame, area: Rect, overlay: &ReconOverlay, result: &
 
 fn render_right_pane(f: &mut Frame, area: Rect, overlay: &ReconOverlay, result: &common::ReconResult) {
     let selected_idx = overlay.selected_left;
-    let Some(item) = result.config.get(selected_idx) else {
+    let Some(item) = result.config.items.get(selected_idx) else {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(" Select a file", Style::default().fg(DIM)))),
             area,
@@ -143,12 +176,12 @@ fn render_right_pane(f: &mut Frame, area: Rect, overlay: &ReconOverlay, result: 
         for line in content.lines() {
             lines.push(Line::from(Span::styled(line.to_string(), Style::default().fg(TEXT))));
         }
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((overlay.selected_right_scroll, 0)),
-            inner,
-        );
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let total_visual_lines = paragraph.line_count(inner.width) as u16;
+        let max_scroll = total_visual_lines.saturating_sub(inner.height);
+        overlay.right_pane_max_scroll.set(max_scroll);
+        let effective = overlay.selected_right_scroll.min(max_scroll);
+        f.render_widget(paragraph.scroll((effective, 0)), inner);
     } else {
         f.render_widget(
             Paragraph::new(Line::from(vec![
@@ -159,43 +192,3 @@ fn render_right_pane(f: &mut Frame, area: Rect, overlay: &ReconOverlay, result: 
     }
 }
 
-fn render_metadata_line(f: &mut Frame, area: Rect, metadata: &common::ReconMetadata) {
-    let mut spans: Vec<Span> = Vec::new();
-
-    if let Some(ref ids) = metadata.user_identities {
-        if !ids.is_empty() {
-            spans.push(Span::styled("Identities: ", Style::default().fg(MUTED)));
-            for (i, id) in ids.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled(", ", Style::default().fg(DIM)));
-                }
-                spans.push(Span::styled(id.clone(), Style::default().fg(ACCENT)));
-            }
-        }
-    }
-
-    if let Some(ref keys) = metadata.api_keys {
-        if !keys.is_empty() {
-            if !spans.is_empty() {
-                spans.push(Span::styled("  |  ", Style::default().fg(DIM)));
-            }
-            spans.push(Span::styled("API Keys: ", Style::default().fg(MUTED)));
-            for (i, key) in keys.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled(", ", Style::default().fg(DIM)));
-                }
-                let masked = if key.len() > 12 {
-                    format!("{}...", &key[..12])
-                } else {
-                    key.clone()
-                };
-                spans.push(Span::styled(masked, Style::default().fg(STATUS_FAIL)));
-            }
-        }
-    }
-
-    if !spans.is_empty() {
-        let line = Line::from(spans);
-        f.render_widget(Paragraph::new(line), area);
-    }
-}
