@@ -1,6 +1,5 @@
 use crate::app::{
-    AddRemoteNodeForm, Popup, PopupKind, ScheduleKind, TriggerForm, TriggerFormSection,
-    TriggerKind,
+    AddRemoteNodeForm, Popup, PopupKind, ScheduleKind, TriggerForm, TriggerFormSection, TriggerKind,
 };
 use crate::ui::chrome;
 use crate::ui::common::centered_rect_fixed;
@@ -24,8 +23,6 @@ pub fn render(f: &mut Frame, popup: &Popup) {
         PopupKind::ModelSelect => render_list_select(f, popup, "Select Model"),
         PopupKind::CommandPalette => render_command_palette(f, popup),
         PopupKind::SaveSession => render_save_session(f, popup),
-        PopupKind::NewOp => {}   // rendered separately via new_op_form
-        PopupKind::Confirm => {} // rendered separately via confirm
     }
 }
 
@@ -56,10 +53,7 @@ pub fn render_confirm(f: &mut Frame, confirm: &crate::app::ConfirmAction) {
         Paragraph::new(Line::from(vec![
             lead,
             Span::raw(" "),
-            Span::styled(
-                confirm.message.clone(),
-                Style::default().fg(TEXT_BRIGHT),
-            ),
+            Span::styled(confirm.message.clone(), Style::default().fg(TEXT_BRIGHT)),
         ]))
         .style(Style::default().bg(BG_MENU)),
         body_chunks[0],
@@ -172,10 +166,7 @@ pub fn render_new_op_form(f: &mut Frame, area: Rect, form: &crate::app::NewOpFor
                 let indicator = if form.yolo {
                     chrome::pill("ON", STATUS_RUNNING)
                 } else {
-                    Span::styled(
-                        " off ",
-                        Style::default().fg(DIM).bg(BG_ELEMENT),
-                    )
+                    Span::styled(" off ", Style::default().fg(DIM).bg(BG_ELEMENT))
                 };
                 let spans = vec![
                     Span::styled(format!("{:<14}", label), label_style),
@@ -190,10 +181,7 @@ pub fn render_new_op_form(f: &mut Frame, area: Rect, form: &crate::app::NewOpFor
 
         if i == 8 {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                format!("{}:", label),
-                label_style,
-            )));
+            lines.push(Line::from(Span::styled(format!("{}:", label), label_style)));
             if value.is_empty() && is_focused {
                 lines.push(Line::from(Span::styled(
                     cursor,
@@ -269,7 +257,9 @@ pub fn render_add_remote_node_form(f: &mut Frame, area: Rect, form: &AddRemoteNo
     .split(body);
 
     let mut lines: Vec<Line> = Vec::new();
-    let edit_style = Style::default().fg(TEXT_BRIGHT).add_modifier(Modifier::BOLD);
+    let edit_style = Style::default()
+        .fg(TEXT_BRIGHT)
+        .add_modifier(Modifier::BOLD);
     let cursor_style = Style::default().fg(ACCENT);
 
     let kind_sel = form.focused_field == AddRemoteNodeForm::KIND_FIELD;
@@ -290,10 +280,7 @@ pub fn render_add_remote_node_form(f: &mut Frame, area: Rect, form: &AddRemoteNo
             format!("{:<14}", AddRemoteNodeForm::field_label(0)),
             label_style,
         ),
-        Span::styled(
-            format!("\u{25c0} {} \u{25b6}", kind_name),
-            value_style,
-        ),
+        Span::styled(format!("\u{25c0} {} \u{25b6}", kind_name), value_style),
     ]));
 
     let build_field = |idx: usize, text: &str, cursor_pos: usize| -> Line {
@@ -311,8 +298,18 @@ pub fn render_add_remote_node_form(f: &mut Frame, area: Rect, form: &AddRemoteNo
                 .unwrap_or(text.len());
             let (before, after) = text.split_at(cursor_byte.min(text.len()));
             Line::from(vec![
-                Span::styled(prefix, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
-                Span::styled(label, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    prefix,
+                    Style::default()
+                        .fg(label_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(label_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(before.to_string(), edit_style),
                 Span::styled("\u{2588}", cursor_style),
                 Span::styled(after.to_string(), edit_style),
@@ -431,9 +428,7 @@ fn render_save_session(f: &mut Frame, popup: &Popup) {
     let input_line = Line::from(vec![
         Span::styled(
             "\u{276f} ",
-            Style::default()
-                .fg(ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(&popup.filter, Style::default().fg(TEXT_BRIGHT)),
         Span::styled("\u{2588}", Style::default().fg(ACCENT)),
@@ -455,10 +450,7 @@ fn render_list(
         .map(|(_, item)| {
             let line = Line::from(vec![
                 Span::raw("  "),
-                Span::styled(
-                    item.label.clone(),
-                    Style::default().fg(TEXT_BRIGHT),
-                ),
+                Span::styled(item.label.clone(), Style::default().fg(TEXT_BRIGHT)),
                 Span::styled(
                     format!("    {}", item.description),
                     Style::default().fg(DIM),
@@ -686,9 +678,7 @@ pub fn render_trigger_form(f: &mut Frame, area: Rect, form: &TriggerForm) {
     f.render_widget(Paragraph::new(hints), chunks[3]);
 }
 
-pub fn trigger_form_section_rows(
-    form: &TriggerForm,
-) -> Vec<(usize, TriggerFormSection, usize)> {
+pub fn trigger_form_section_rows(form: &TriggerForm) -> Vec<(usize, TriggerFormSection, usize)> {
     let mut rows = Vec::new();
     let mut row: usize = 0;
 
@@ -750,8 +740,7 @@ pub fn trigger_form_section_rows(
 fn trigger_form_lines(form: &TriggerForm) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let section_focus =
-        |section: TriggerFormSection| -> bool { form.focused_section == section };
+    let section_focus = |section: TriggerFormSection| -> bool { form.focused_section == section };
 
     lines.push(chain_line(form, section_focus(TriggerFormSection::Chain)));
     lines.push(Line::from(""));
@@ -823,10 +812,7 @@ fn trigger_form_lines(form: &TriggerForm) -> Vec<Line<'static>> {
                 Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
             )
         } else {
-            Span::styled(
-                form.os_filter.clone(),
-                Style::default().fg(TEXT_BRIGHT),
-            )
+            Span::styled(form.os_filter.clone(), Style::default().fg(TEXT_BRIGHT))
         };
         let cursor = if focus { "\u{2588}" } else { "" };
         lines.push(Line::from(vec![
@@ -1035,7 +1021,6 @@ fn toggle_line(label: &str, value: bool, focused: bool) -> Line<'static> {
     ])
 }
 
-#[allow(dead_code)]
 fn _silence_unused() {
     let _ = (OK, STATUS_FAIL, BG_MENU, TEXT);
 }

@@ -86,7 +86,10 @@ fn render_filter_bar(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" ", Style::default()),
         search_span,
         Span::raw("    "),
-        chrome::pill_two_tone("node", &node_label, MUTED).into_iter().next().unwrap(),
+        chrome::pill_two_tone("node", &node_label, MUTED)
+            .into_iter()
+            .next()
+            .unwrap(),
     ];
 
     //
@@ -172,11 +175,7 @@ fn build_row(state: &InterceptState, row: &DisplayRow) -> Row<'static> {
                 Cell::from(Span::styled(url, Style::default().fg(TEXT))),
             ])
         }
-        DisplayRow::Group {
-            node_id: _,
-            url,
-            indices,
-        } => {
+        DisplayRow::Group { url, indices } => {
             let first = indices
                 .iter()
                 .filter_map(|i| state.buffer.get(*i))
@@ -249,11 +248,7 @@ fn render_detail(f: &mut Frame, area: Rect, state: &InterceptState) {
             .get(*idx)
             .map(|e| http_detail_lines(state, e))
             .unwrap_or_default(),
-        DisplayRow::Group {
-            node_id: _,
-            url,
-            indices,
-        } => group_detail_lines(state, url, indices),
+        DisplayRow::Group { url, indices } => group_detail_lines(state, url, indices),
     };
 
     let inner_h = block.inner(area).height as usize;
@@ -268,7 +263,10 @@ fn render_detail(f: &mut Frame, area: Rect, state: &InterceptState) {
     f.render_widget(para, area);
 }
 
-fn http_detail_lines(state: &InterceptState, entry: &InterceptedTrafficEntry) -> Vec<Line<'static>> {
+fn http_detail_lines(
+    state: &InterceptState,
+    entry: &InterceptedTrafficEntry,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
 
     out.push(Line::from(vec![
@@ -279,10 +277,7 @@ fn http_detail_lines(state: &InterceptState, entry: &InterceptedTrafficEntry) ->
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(
-            entry.url.clone(),
-            Style::default().fg(TEXT_BRIGHT),
-        ),
+        Span::styled(entry.url.clone(), Style::default().fg(TEXT_BRIGHT)),
     ]));
     out.push(Line::raw(""));
 
@@ -346,19 +341,12 @@ fn http_detail_lines(state: &InterceptState, entry: &InterceptedTrafficEntry) ->
     out
 }
 
-fn group_detail_lines(
-    state: &InterceptState,
-    url: &str,
-    indices: &[usize],
-) -> Vec<Line<'static>> {
+fn group_detail_lines(state: &InterceptState, url: &str, indices: &[usize]) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(vec![
         chrome::pill("GRP", PROTO_WS),
         Span::raw(" "),
-        Span::styled(
-            url.to_string(),
-            Style::default().fg(TEXT_BRIGHT),
-        ),
+        Span::styled(url.to_string(), Style::default().fg(TEXT_BRIGHT)),
     ]));
     out.push(Line::raw(""));
     out.push(section_heading(&format!("{} FRAMES", indices.len())));
@@ -491,7 +479,11 @@ pub fn hints(app: &App) -> Line<'static> {
         Span::raw("    "),
         Span::styled("p", key),
         Span::styled(
-            if app.intercept.paused { " resume" } else { " pause" },
+            if app.intercept.paused {
+                " resume"
+            } else {
+                " pause"
+            },
             label,
         ),
         Span::raw("    "),

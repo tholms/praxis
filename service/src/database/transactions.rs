@@ -1,12 +1,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::Row;
 
-use super::{Database, DatabasePool, MAX_TRANSACTIONS};
+use super::exec::{DbRow, db_args};
+use super::{Database, MAX_TRANSACTIONS};
 
 /// Status of a session transaction
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum TransactionStatus {
     Pending,
     Completed,
@@ -16,7 +15,6 @@ pub enum TransactionStatus {
 
 /// Database record for a session transaction
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TransactionRecord {
     pub transaction_id: String,
     pub node_id: String,
@@ -29,37 +27,23 @@ pub struct TransactionRecord {
 
 impl Database {
     /// Insert a new session transaction record (when request is sent)
-    #[allow(dead_code)]
     pub async fn insert_transaction(&self, record: &TransactionRecord) -> Result<()> {
         let sql = "INSERT INTO session_transactions (transaction_id, node_id, prompt_text, request_sent_at, response_received_at, response_text, status)
              VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
-        match &self.pool {
-            DatabasePool::Sqlite(pool) => {
-                sqlx::query(sql)
-                    .bind(&record.transaction_id)
-                    .bind(&record.node_id)
-                    .bind(&record.prompt_text)
-                    .bind(record.request_sent_at.to_rfc3339())
-                    .bind(record.response_received_at.map(|dt| dt.to_rfc3339()))
-                    .bind(&record.response_text)
-                    .bind(transaction_status_to_string(&record.status))
-                    .execute(pool)
-                    .await?;
-            }
-            DatabasePool::Postgres(pool) => {
-                sqlx::query(sql)
-                    .bind(&record.transaction_id)
-                    .bind(&record.node_id)
-                    .bind(&record.prompt_text)
-                    .bind(record.request_sent_at.to_rfc3339())
-                    .bind(record.response_received_at.map(|dt| dt.to_rfc3339()))
-                    .bind(&record.response_text)
-                    .bind(transaction_status_to_string(&record.status))
-                    .execute(pool)
-                    .await?;
-            }
-        }
+        self.db_execute(
+            sql,
+            db_args![
+                &record.transaction_id,
+                &record.node_id,
+                &record.prompt_text,
+                record.request_sent_at,
+                record.response_received_at.map(|dt| dt.to_rfc3339()),
+                record.response_text.as_deref(),
+                transaction_status_to_string(&record.status),
+            ],
+        )
+        .await?;
 
         self.prune_old_transactions().await?;
 
@@ -67,7 +51,6 @@ impl Database {
     }
 
     /// Update a transaction when response is received
-    #[allow(dead_code)]
     pub async fn update_transaction_response(
         &self,
         transaction_id: &str,
@@ -77,62 +60,32 @@ impl Database {
     ) -> Result<()> {
         let sql = "UPDATE session_transactions SET response_received_at = $1, response_text = $2, status = $3 WHERE transaction_id = $4";
 
-        match &self.pool {
-            DatabasePool::Sqlite(pool) => {
-                sqlx::query(sql)
-                    .bind(response_received_at.to_rfc3339())
-                    .bind(&response_text)
-                    .bind(transaction_status_to_string(&status))
-                    .bind(transaction_id)
-                    .execute(pool)
-                    .await?;
-            }
-            DatabasePool::Postgres(pool) => {
-                sqlx::query(sql)
-                    .bind(response_received_at.to_rfc3339())
-                    .bind(&response_text)
-                    .bind(transaction_status_to_string(&status))
-                    .bind(transaction_id)
-                    .execute(pool)
-                    .await?;
-            }
-        }
+        self.db_execute(
+            sql,
+            db_args![
+                response_received_at,
+                response_text,
+                transaction_status_to_string(&status),
+                transaction_id,
+            ],
+        )
+        .await?;
 
         Ok(())
     }
 
     /// Get a transaction by ID
-    #[allow(dead_code)]
     pub async fn get_transaction(&self, transaction_id: &str) -> Result<Option<TransactionRecord>> {
         let sql = "SELECT transaction_id, node_id, prompt_text, request_sent_at, response_received_at, response_text, status
              FROM session_transactions WHERE transaction_id = $1";
 
-        match &self.pool {
-            DatabasePool::Sqlite(pool) => {
-                let row = sqlx::query(sql)
-                    .bind(transaction_id)
-                    .fetch_optional(pool)
-                    .await?;
-                match row {
-                    Some(row) => Ok(Some(parse_transaction_row_sqlite(&row)?)),
-                    None => Ok(None),
-                }
-            }
-            DatabasePool::Postgres(pool) => {
-                let row = sqlx::query(sql)
-                    .bind(transaction_id)
-                    .fetch_optional(pool)
-                    .await?;
-                match row {
-                    Some(row) => Ok(Some(parse_transaction_row_postgres(&row)?)),
-                    None => Ok(None),
-                }
-            }
-        }
+        let row = self
+            .db_fetch_optional(sql, db_args![transaction_id])
+            .await?;
+        row.map(|row| parse_transaction_row(&row)).transpose()
     }
 
     /// List recent transactions for a node
-    #[allow(dead_code)]
     pub async fn list_transactions_by_node(
         &self,
         node_id: &str,
@@ -141,48 +94,17 @@ impl Database {
         let sql = "SELECT transaction_id, node_id, prompt_text, request_sent_at, response_received_at, response_text, status
              FROM session_transactions WHERE node_id = $1 ORDER BY request_sent_at DESC LIMIT $2";
 
-        match &self.pool {
-            DatabasePool::Sqlite(pool) => {
-                let rows = sqlx::query(sql)
-                    .bind(node_id)
-                    .bind(limit as i64)
-                    .fetch_all(pool)
-                    .await?;
-                let mut transactions = Vec::new();
-                for row in rows {
-                    transactions.push(parse_transaction_row_sqlite(&row)?);
-                }
-                Ok(transactions)
-            }
-            DatabasePool::Postgres(pool) => {
-                let rows = sqlx::query(sql)
-                    .bind(node_id)
-                    .bind(limit as i64)
-                    .fetch_all(pool)
-                    .await?;
-                let mut transactions = Vec::new();
-                for row in rows {
-                    transactions.push(parse_transaction_row_postgres(&row)?);
-                }
-                Ok(transactions)
-            }
-        }
+        let rows = self
+            .db_fetch_all(sql, db_args![node_id, limit as i64])
+            .await?;
+        rows.iter().map(parse_transaction_row).collect()
     }
 
     /// Prune old transactions to keep only the last MAX_TRANSACTIONS
     async fn prune_old_transactions(&self) -> Result<usize> {
         let count_sql = "SELECT COUNT(*) FROM session_transactions";
 
-        let count: i64 = match &self.pool {
-            DatabasePool::Sqlite(pool) => {
-                let row = sqlx::query(count_sql).fetch_one(pool).await?;
-                row.get(0)
-            }
-            DatabasePool::Postgres(pool) => {
-                let row = sqlx::query(count_sql).fetch_one(pool).await?;
-                row.get(0)
-            }
-        };
+        let count: i64 = self.db_fetch_one(count_sql, vec![]).await?.get(0);
 
         if count as usize <= MAX_TRANSACTIONS {
             return Ok(0);
@@ -195,24 +117,14 @@ impl Database {
                 ORDER BY request_sent_at ASC LIMIT $1
             )";
 
-        let deleted = match &self.pool {
-            DatabasePool::Sqlite(pool) => sqlx::query(delete_sql)
-                .bind(to_delete as i64)
-                .execute(pool)
-                .await?
-                .rows_affected(),
-            DatabasePool::Postgres(pool) => sqlx::query(delete_sql)
-                .bind(to_delete as i64)
-                .execute(pool)
-                .await?
-                .rows_affected(),
-        };
+        let deleted = self
+            .db_execute(delete_sql, db_args![to_delete as i64])
+            .await?;
 
         Ok(deleted as usize)
     }
 
     /// Mark all pending transactions as failed (used on service startup)
-    #[allow(dead_code)]
     pub async fn mark_pending_transactions_as_failed(&self) -> Result<usize> {
         let sql = "UPDATE session_transactions
              SET status = 'Error',
@@ -220,18 +132,7 @@ impl Database {
                  response_text = 'Service restarted'
              WHERE status = 'Pending'";
 
-        let count = match &self.pool {
-            DatabasePool::Sqlite(pool) => sqlx::query(sql)
-                .bind(Utc::now().to_rfc3339())
-                .execute(pool)
-                .await?
-                .rows_affected(),
-            DatabasePool::Postgres(pool) => sqlx::query(sql)
-                .bind(Utc::now().to_rfc3339())
-                .execute(pool)
-                .await?
-                .rows_affected(),
-        };
+        let count = self.db_execute(sql, db_args![Utc::now()]).await?;
 
         Ok(count as usize)
     }
@@ -241,42 +142,15 @@ impl Database {
 // Helper functions.
 //
 
-fn parse_transaction_row_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<TransactionRecord> {
+fn parse_transaction_row(row: &DbRow) -> Result<TransactionRecord> {
     let transaction_id: String = row.get(0);
     let node_id: String = row.get(1);
     let prompt_text: String = row.get(2);
-    let request_sent_at_str: String = row.get(3);
     let response_received_at_str: Option<String> = row.get(4);
     let response_text: Option<String> = row.get(5);
     let status_str: String = row.get(6);
 
-    let request_sent_at = DateTime::parse_from_rfc3339(&request_sent_at_str)?.with_timezone(&Utc);
-    let response_received_at = response_received_at_str
-        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-        .map(|dt| dt.with_timezone(&Utc));
-    let status = string_to_transaction_status(&status_str);
-
-    Ok(TransactionRecord {
-        transaction_id,
-        node_id,
-        prompt_text,
-        request_sent_at,
-        response_received_at,
-        response_text,
-        status,
-    })
-}
-
-fn parse_transaction_row_postgres(row: &sqlx::postgres::PgRow) -> Result<TransactionRecord> {
-    let transaction_id: String = row.get(0);
-    let node_id: String = row.get(1);
-    let prompt_text: String = row.get(2);
-    let request_sent_at_str: String = row.get(3);
-    let response_received_at_str: Option<String> = row.get(4);
-    let response_text: Option<String> = row.get(5);
-    let status_str: String = row.get(6);
-
-    let request_sent_at = DateTime::parse_from_rfc3339(&request_sent_at_str)?.with_timezone(&Utc);
+    let request_sent_at = row.get_timestamp(3)?;
     let response_received_at = response_received_at_str
         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
         .map(|dt| dt.with_timezone(&Utc));

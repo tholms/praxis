@@ -3,13 +3,11 @@ use common::SessionContext;
 use mlua::Lua;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 
-use crate::agent_connectors::traits::{AgentMode, AgentSession};
+use crate::agent_connectors::traits::AgentSession;
+use crate::utils::LockExt;
 
 pub struct LuaAgentSession {
-    #[allow(dead_code)]
-    internal_id: Uuid,
     vm: Arc<Mutex<Lua>>,
     context: SessionContext,
     state: Mutex<serde_json::Value>,
@@ -23,11 +21,10 @@ impl LuaAgentSession {
         process_path: Option<String>,
     ) -> Result<Self> {
         let state = {
-            let lua = vm.lock().unwrap();
+            let lua = vm.lock_safe();
             super::runtime::vm_create_session(&lua, context, process_path)?
         };
         Ok(Self {
-            internal_id: Uuid::new_v4(),
             vm,
             context: context.clone(),
             state: Mutex::new(state),
@@ -36,31 +33,7 @@ impl LuaAgentSession {
     }
 }
 
-impl LuaAgentSession {
-    #[allow(dead_code)]
-    fn is_acp(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .get("acp_handle")
-            .and_then(|v| v.as_str())
-            .is_some()
-    }
-}
-
 impl AgentSession for LuaAgentSession {
-    fn session_id(&self) -> &Uuid {
-        &self.internal_id
-    }
-
-    fn mode(&self) -> AgentMode {
-        if self.is_acp() {
-            AgentMode::Acp
-        } else {
-            AgentMode::Cli
-        }
-    }
-
     fn acp_handle(&self) -> Option<String> {
         self.state
             .lock()
@@ -71,12 +44,12 @@ impl AgentSession for LuaAgentSession {
     }
 
     fn transact(&self, prompt: &str) -> Result<String> {
-        let current_state = self.state.lock().unwrap().clone();
-        let lua = self.vm.lock().unwrap();
+        let current_state = self.state.lock_safe().clone();
+        let lua = self.vm.lock_safe();
         let (response, new_state) =
             super::runtime::vm_session_transact(&lua, &self.context, &current_state, prompt)?;
         drop(lua);
-        *self.state.lock().unwrap() = new_state;
+        *self.state.lock_safe() = new_state;
         Ok(response)
     }
 
@@ -84,7 +57,7 @@ impl AgentSession for LuaAgentSession {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
-        let state = self.state.lock().unwrap().clone();
+        let state = self.state.lock_safe().clone();
 
         //
         // Clean up ACP client if this is an ACP session.
@@ -109,7 +82,7 @@ impl AgentSession for LuaAgentSession {
             super::runtime::set_cancelled(handle);
         }
 
-        let lua = self.vm.lock().unwrap();
+        let lua = self.vm.lock_safe();
         if let Err(e) = super::runtime::vm_session_close(&lua, &self.context, &state) {
             common::log_warn!("Lua session close failed: {}", e);
         }
@@ -130,7 +103,7 @@ impl AgentSession for LuaAgentSession {
     }
 
     fn abort_transaction(&self) -> bool {
-        let state = self.state.lock().unwrap().clone();
+        let state = self.state.lock_safe().clone();
 
         //
         // ACP agents: signal cancellation via the shared flag (doesn't need
@@ -166,10 +139,6 @@ impl AgentSession for LuaAgentSession {
         }
 
         false
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
