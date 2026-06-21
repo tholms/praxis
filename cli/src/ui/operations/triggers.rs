@@ -1,9 +1,7 @@
 use crate::app::OperationsState;
-use crate::ui::common::focused_panel;
 use crate::ui::chrome;
-use crate::ui::theme::{
-    ACCENT, BG_SELECTED, DIM, MUTED, OK, STATUS_FAIL, TEXT, TEXT_BRIGHT,
-};
+use crate::ui::common::focused_panel;
+use crate::ui::theme::{ACCENT, BG_SELECTED, DIM, MUTED, OK, STATUS_FAIL, TEXT_BRIGHT};
 use common::{ChainTriggerInfo, ScheduleSpec, TriggerConfig};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -196,24 +194,16 @@ fn render_trigger_detail(f: &mut Frame, area: Rect, state: &OperationsState) {
     );
 }
 
-#[allow(dead_code)]
-fn kv(label: &str, value: String) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{}: ", label), Style::default().fg(MUTED)),
-        Span::styled(value, Style::default().fg(TEXT)),
-    ])
-}
-
 //
 // Human-readable type label and config summary for a trigger. Returned as
 // owned strings to keep call sites simple.
 //
-pub fn describe_trigger(
-    t: &ChainTriggerInfo,
-    rules: &[common::InterceptRule],
-) -> (String, String) {
+pub fn describe_trigger(t: &ChainTriggerInfo, rules: &[common::InterceptRule]) -> (String, String) {
     match &t.trigger_config {
-        TriggerConfig::Scheduled { schedule, recurring } => {
+        TriggerConfig::Scheduled {
+            schedule,
+            recurring,
+        } => {
             let sched_text = match schedule {
                 ScheduleSpec::DailyAt { hour, minute } => {
                     format!("daily @ {:02}:{:02}", hour, minute)

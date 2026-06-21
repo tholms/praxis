@@ -22,7 +22,9 @@ use crate::acp::{AcpBridgeHandle, AcpNotification};
 use crate::client::Client;
 use crate::event::AppEvent;
 use chrono::Utc;
-use common::{ChainTriggerInfo, InterceptRule, NodeState, OrchestratorPlan, SystemState, REMOTE_NODE_KINDS};
+use common::{
+    ChainTriggerInfo, InterceptRule, NodeState, OrchestratorPlan, REMOTE_NODE_KINDS, SystemState,
+};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -75,7 +77,6 @@ pub struct App {
     pub chain_form_hits: std::cell::RefCell<crate::ui::chain_form::ChainFormHitMap>,
 }
 
-
 pub struct NodesState {
     pub nodes: Vec<NodeState>,
     pub selected: usize,
@@ -89,7 +90,6 @@ pub struct NodesState {
     // sessionId is stored inside SessionChat.session_id once the
     // session/new response arrives.
     //
-
     pub sessions: HashMap<String, SessionChat>,
 
     //
@@ -97,7 +97,6 @@ pub struct NodesState {
     // the user is in the Nodes browse view (possibly with the sessions
     // list overlay open).
     //
-
     pub active_session_id: Option<String>,
 
     //
@@ -105,7 +104,6 @@ pub struct NodesState {
     // whether a chat is foregrounded — when the list is open it is
     // drawn on top.
     //
-
     pub sessions_list_open: bool,
     pub sessions_list_selected: usize,
 
@@ -141,7 +139,6 @@ pub struct ReconOverlay {
     // Transient status line for the Config tab editor flow (^e). Shown
     // in the recon header and auto-clears after a few seconds.
     //
-
     pub config_edit_status: Option<(String, std::time::Instant)>,
 }
 
@@ -215,7 +212,6 @@ pub struct SessionChat {
     pub tool_calls: Vec<ToolCallEntry>,
 }
 
-#[allow(dead_code)]
 pub struct PendingPermission {
     pub permission_id: String,
     pub tool_name: String,
@@ -228,10 +224,8 @@ pub struct PendingPermission {
 }
 
 pub struct ToolCallEntry {
-    #[allow(dead_code)]
     pub tool_name: String,
     pub tool_id: String,
-    #[allow(dead_code)]
     pub input: String,
     pub output: Option<String>,
     pub is_error: bool,
@@ -372,7 +366,6 @@ impl Default for OperationsState {
     }
 }
 
-
 impl App {
     pub fn new(
         client: Arc<Client>,
@@ -454,7 +447,6 @@ impl App {
             self.create_new_orchestrator_session().await;
         }
     }
-
 
     pub async fn handle_event(&mut self, event: AppEvent) -> bool {
         match event {
@@ -627,8 +619,7 @@ impl App {
                         let Some(session) = self.nodes.sessions.get_mut(&session_local_id) else {
                             return false;
                         };
-                        if session.active_transaction_id.as_deref()
-                            != Some(transaction_id.as_str())
+                        if session.active_transaction_id.as_deref() != Some(transaction_id.as_str())
                         {
                             return false;
                         }
@@ -673,8 +664,7 @@ impl App {
                         let Some(session) = self.nodes.sessions.get_mut(&session_local_id) else {
                             return false;
                         };
-                        if session.active_transaction_id.as_deref()
-                            != Some(transaction_id.as_str())
+                        if session.active_transaction_id.as_deref() != Some(transaction_id.as_str())
                         {
                             return false;
                         }
@@ -691,7 +681,9 @@ impl App {
                             let partial = std::mem::take(&mut session.streaming_content);
                             session.messages.push(ChatMessage::Agent(partial));
                         }
-                        session.messages.push(ChatMessage::System("Cancelled".to_string()));
+                        session
+                            .messages
+                            .push(ChatMessage::System("Cancelled".to_string()));
                         session.is_waiting = false;
                         session.active_transaction_id = None;
                         session.had_tool_call = false;
@@ -704,9 +696,9 @@ impl App {
                         message,
                     } => {
                         if let Some(session) = self.nodes.sessions.get_mut(&session_local_id) {
-                            session.messages.push(ChatMessage::System(
-                                format!("Error: {}", message),
-                            ));
+                            session
+                                .messages
+                                .push(ChatMessage::System(format!("Error: {}", message)));
                             session.is_waiting = false;
                             session.active_transaction_id = None;
                             session.last_activity_at = std::time::Instant::now();
@@ -800,9 +792,7 @@ impl App {
                             item.contents = content.clone();
                         }
                     }
-                    if recon.selected_left == target_idx
-                        && recon.active_tab == ReconTab::Config
-                    {
+                    if recon.selected_left == target_idx && recon.active_tab == ReconTab::Config {
                         recon.config_loading = false;
                         recon.config_content_error = error;
                     }
@@ -816,15 +806,11 @@ impl App {
             } => {
                 if let Some(ref mut recon) = self.nodes.recon {
                     if let Some(ref mut result) = recon.recon_result {
-                        if let Some(ref mut session) =
-                            result.sessions.items.get_mut(target_idx)
-                        {
+                        if let Some(ref mut session) = result.sessions.items.get_mut(target_idx) {
                             session.content = content.clone();
                         }
                     }
-                    if recon.selected_left == target_idx
-                        && recon.active_tab == ReconTab::Sessions
-                    {
+                    if recon.selected_left == target_idx && recon.active_tab == ReconTab::Sessions {
                         recon.session_loading = false;
                         recon.session_content_error = error;
                     }
@@ -973,9 +959,7 @@ impl App {
                     if !session.is_streaming {
                         continue;
                     }
-                    if let Some(ConversationEntry::AssistantText(text)) =
-                        session.messages.last()
-                    {
+                    if let Some(ConversationEntry::AssistantText(text)) = session.messages.last() {
                         let target = text.chars().count();
                         if advance(&mut session.revealed_chars, target) {
                             redraw = true;
@@ -997,7 +981,10 @@ impl App {
     }
 
     fn is_animating(&self) -> bool {
-        self.orchestrator.active_session().map(|s| s.is_streaming).unwrap_or(false)
+        self.orchestrator
+            .active_session()
+            .map(|s| s.is_streaming)
+            .unwrap_or(false)
             || self.nodes.sessions.values().any(|s| s.is_waiting)
     }
 
@@ -1287,7 +1274,9 @@ impl App {
     }
 
     async fn trigger_recon_refresh(&mut self, semantic: bool) {
-        let Some(ref mut recon) = self.nodes.recon else { return };
+        let Some(ref mut recon) = self.nodes.recon else {
+            return;
+        };
         recon.is_loading = true;
         recon.error = None;
         recon.recon_result = None;
@@ -1342,7 +1331,9 @@ impl App {
     }
 
     async fn handle_recon_key(&mut self, key: KeyEvent) {
-        let Some(ref mut recon) = self.nodes.recon else { return };
+        let Some(ref mut recon) = self.nodes.recon else {
+            return;
+        };
 
         let left_max = match recon.active_tab {
             ReconTab::Config => recon
@@ -1485,7 +1476,9 @@ impl App {
     }
 
     async fn handle_recon_enter(&mut self) {
-        let Some(ref mut recon) = self.nodes.recon else { return };
+        let Some(ref mut recon) = self.nodes.recon else {
+            return;
+        };
 
         match recon.active_tab {
             ReconTab::Config => {
@@ -1647,11 +1640,15 @@ impl App {
         use std::io::Write;
 
         let (node_id, agent_short_name, path) = {
-            let Some(ref recon) = self.nodes.recon else { return };
+            let Some(ref recon) = self.nodes.recon else {
+                return;
+            };
             if recon.active_tab != ReconTab::Config {
                 return;
             }
-            let Some(ref result) = recon.recon_result else { return };
+            let Some(ref result) = recon.recon_result else {
+                return;
+            };
             let Some(item) = result.config.items.get(recon.selected_left) else {
                 return;
             };
@@ -1830,17 +1827,14 @@ impl App {
                             //
 
                             if let Some(ref mut result) = recon.recon_result {
-                                if let Some(item) =
-                                    result.config.items.get_mut(recon.selected_left)
+                                if let Some(item) = result.config.items.get_mut(recon.selected_left)
                                 {
                                     item.contents = None;
                                 }
                             }
                         } else {
-                            recon.config_edit_status = Some((
-                                format!("Save failed: {}", err.unwrap_or_default()),
-                                now,
-                            ));
+                            recon.config_edit_status =
+                                Some((format!("Save failed: {}", err.unwrap_or_default()), now));
                         }
                     }
 
@@ -1850,15 +1844,13 @@ impl App {
                 }
                 Err(e) => {
                     if let Some(recon) = self.nodes.recon.as_mut() {
-                        recon.config_edit_status =
-                            Some((format!("Read back failed: {}", e), now));
+                        recon.config_edit_status = Some((format!("Read back failed: {}", e), now));
                     }
                 }
             },
             Ok(_) => {
                 if let Some(recon) = self.nodes.recon.as_mut() {
-                    recon.config_edit_status =
-                        Some(("Editor exited with error".to_string(), now));
+                    recon.config_edit_status = Some(("Editor exited with error".to_string(), now));
                 }
             }
             Err(e) => {
@@ -1904,7 +1896,9 @@ impl App {
         let tabs_area = areas.tabs;
         let content_area = areas.content;
 
-        let split_percent = self.nodes.recon.as_ref().unwrap().recon_split_percent;
+        let Some(split_percent) = self.nodes.recon.as_ref().map(|r| r.recon_split_percent) else {
+            return;
+        };
         let left_pct = split_percent.min(80).max(20);
         let right_pct = 100u16.saturating_sub(left_pct);
         let pane_chunks = Layout::horizontal([
@@ -1917,7 +1911,9 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                let recon = self.nodes.recon.as_mut().unwrap();
+                let Some(recon) = self.nodes.recon.as_mut() else {
+                    return;
+                };
                 if recon.right_pane_focused {
                     recon.selected_right_scroll = recon.selected_right_scroll.saturating_sub(3);
                 } else {
@@ -1928,7 +1924,9 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                let recon = self.nodes.recon.as_mut().unwrap();
+                let Some(recon) = self.nodes.recon.as_mut() else {
+                    return;
+                };
                 let left_max = match recon.active_tab {
                     ReconTab::Config => recon
                         .recon_result
@@ -1961,21 +1959,31 @@ impl App {
                     && mouse.column < tabs_area.x + tabs_area.width
                 {
                     let counts = {
-                        let recon = self.nodes.recon.as_ref().unwrap();
+                        let Some(recon) = self.nodes.recon.as_ref() else {
+                            return;
+                        };
                         [
-                            recon.recon_result.as_ref().map_or(0, |r| r.config.items.len()),
+                            recon
+                                .recon_result
+                                .as_ref()
+                                .map_or(0, |r| r.config.items.len()),
                             recon.recon_result.as_ref().map_or(0, |r| {
                                 r.tools.mcp_servers.len()
                                     + r.tools.skills.len()
                                     + r.tools.internal_tools.len()
                             }),
-                            recon.recon_result.as_ref().map_or(0, |r| r.sessions.items.len()),
+                            recon
+                                .recon_result
+                                .as_ref()
+                                .map_or(0, |r| r.sessions.items.len()),
                         ]
                     };
                     if let Some(new_tab) =
                         crate::ui::recon::tab_at(tabs_area.x, mouse.column, counts)
                     {
-                        let recon = self.nodes.recon.as_mut().unwrap();
+                        let Some(recon) = self.nodes.recon.as_mut() else {
+                            return;
+                        };
                         if recon.active_tab != new_tab {
                             recon.active_tab = new_tab;
                             recon.selected_left = 0;
@@ -1991,7 +1999,9 @@ impl App {
                 }
 
                 if crate::ui::common::hit_vertical_border(left_area, mouse.column, mouse.row) {
-                    self.nodes.recon.as_mut().unwrap().recon_dragging = true;
+                    if let Some(recon) = self.nodes.recon.as_mut() {
+                        recon.recon_dragging = true;
+                    }
                     return;
                 }
 
@@ -2016,19 +2026,27 @@ impl App {
 
                     let mut fetch = false;
                     {
-                        let recon = self.nodes.recon.as_mut().unwrap();
+                        let Some(recon) = self.nodes.recon.as_mut() else {
+                            return;
+                        };
                         recon.right_pane_focused = false;
 
                         if in_list {
                             let (lines_per_item, max_items) = match recon.active_tab {
                                 ReconTab::Config => (
                                     2usize,
-                                    recon.recon_result.as_ref().map_or(0, |r| r.config.items.len()),
+                                    recon
+                                        .recon_result
+                                        .as_ref()
+                                        .map_or(0, |r| r.config.items.len()),
                                 ),
                                 ReconTab::Tools => (1usize, 3usize),
                                 ReconTab::Sessions => (
                                     3usize,
-                                    recon.recon_result.as_ref().map_or(0, |r| r.sessions.items.len()),
+                                    recon
+                                        .recon_result
+                                        .as_ref()
+                                        .map_or(0, |r| r.sessions.items.len()),
                                 ),
                             };
                             let visible_items = (inner_h as usize / lines_per_item).max(1);
@@ -2059,12 +2077,16 @@ impl App {
                     && mouse.row >= right_area.y
                     && mouse.row < right_area.y + right_area.height
                 {
-                    self.nodes.recon.as_mut().unwrap().right_pane_focused = true;
+                    if let Some(recon) = self.nodes.recon.as_mut() {
+                        recon.right_pane_focused = true;
+                    }
                     return;
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let recon = self.nodes.recon.as_mut().unwrap();
+                let Some(recon) = self.nodes.recon.as_mut() else {
+                    return;
+                };
                 if recon.recon_dragging {
                     recon.recon_split_percent = crate::ui::common::drag_split_percent(
                         content_area.x,
@@ -2074,7 +2096,9 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.nodes.recon.as_mut().unwrap().recon_dragging = false;
+                if let Some(recon) = self.nodes.recon.as_mut() {
+                    recon.recon_dragging = false;
+                }
             }
             _ => {}
         }
@@ -2161,8 +2185,7 @@ impl App {
                             self.log_query.detail_scroll.saturating_sub(3);
                     }
                     Window::LogQuery => {
-                        self.log_query.selected_row =
-                            self.log_query.selected_row.saturating_sub(3);
+                        self.log_query.selected_row = self.log_query.selected_row.saturating_sub(3);
                     }
                     _ => {}
                 }
@@ -2615,7 +2638,8 @@ impl App {
         // Settings window mouse handling.
         //
         if self.active_window == Window::Settings {
-            self.handle_settings_mouse(mouse, content_area, terminal_area).await;
+            self.handle_settings_mouse(mouse, content_area, terminal_area)
+                .await;
             return;
         }
 
@@ -2628,7 +2652,6 @@ impl App {
         }
     }
 
-
     fn handle_state_update(&mut self, state: SystemState) {
         self.nodes.nodes = state.nodes;
         if self.nodes.selected >= self.nodes.nodes.len() && !self.nodes.nodes.is_empty() {
@@ -2636,11 +2659,7 @@ impl App {
         }
         self.connected = true;
     }
-
-
-
 }
-
 
 //
 // Extract visible content from a streaming chunk, properly handling

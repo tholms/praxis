@@ -9,19 +9,32 @@ impl App {
         tokio::spawn(async move {
             let Some(tx) = tx else { return };
 
-            let _ = client.request_op_def_list().await;
-            let _ = client.request_semantic_op_list().await;
-            let _ = client.request_chain_list().await;
-            let _ = client.request_chain_execution_list().await;
-            let _ = client.request_chain_triggers().await;
+            //
+            // Await each list response directly; on timeout fall back to the
+            // cached copy so a slow service degrades to stale data rather
+            // than an empty view.
+            //
 
-            tokio::time::sleep(Duration::from_millis(300)).await;
-
-            let op_definitions = client.get_operation_definitions().await;
-            let chain_definitions = client.get_chain_definitions().await;
-            let operations = client.get_operations().await;
-            let chain_executions = client.get_chain_executions().await;
-            let triggers = client.get_chain_triggers().await;
+            let op_definitions = match client.fetch_operation_definitions().await {
+                Ok(defs) => defs,
+                Err(_) => client.get_operation_definitions().await,
+            };
+            let operations = match client.fetch_operations().await {
+                Ok(ops) => ops,
+                Err(_) => client.get_operations().await,
+            };
+            let chain_definitions = match client.fetch_chain_definitions().await {
+                Ok(chains) => chains,
+                Err(_) => client.get_chain_definitions().await,
+            };
+            let chain_executions = match client.fetch_chain_executions().await {
+                Ok(execs) => execs,
+                Err(_) => client.get_chain_executions().await,
+            };
+            let triggers = match client.fetch_chain_triggers().await {
+                Ok(triggers) => triggers,
+                Err(_) => client.get_chain_triggers().await,
+            };
             let intercept_rules = client.list_intercept_rules().await.unwrap_or_default();
 
             let _ = tx.send(AppEvent::OperationsRefreshed {
@@ -48,10 +61,10 @@ impl App {
                 tokio::time::sleep(delay).await;
             }
 
-            let _ = client.request_chain_triggers().await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-
-            let triggers = client.get_chain_triggers().await;
+            let triggers = match client.fetch_chain_triggers().await {
+                Ok(triggers) => triggers,
+                Err(_) => client.get_chain_triggers().await,
+            };
             let intercept_rules = client.list_intercept_rules().await.unwrap_or_default();
             let _ = tx.send(AppEvent::TriggersRefreshed {
                 triggers,
@@ -71,12 +84,14 @@ impl App {
                 tokio::time::sleep(delay).await;
             }
 
-            let _ = client.request_op_def_list().await;
-            let _ = client.request_chain_list().await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
-
-            let op_definitions = client.get_operation_definitions().await;
-            let chain_definitions = client.get_chain_definitions().await;
+            let op_definitions = match client.fetch_operation_definitions().await {
+                Ok(defs) => defs,
+                Err(_) => client.get_operation_definitions().await,
+            };
+            let chain_definitions = match client.fetch_chain_definitions().await {
+                Ok(chains) => chains,
+                Err(_) => client.get_chain_definitions().await,
+            };
 
             let _ = tx.send(AppEvent::LibraryRefreshed {
                 op_definitions,
@@ -644,7 +659,9 @@ impl App {
 
         if let Err(e) = self.client.add_op_def(op_def.to_string()).await {
             if let Some(session) = self.orchestrator.active_session_mut() {
-                session.messages.push(ConversationEntry::Error(format!("Failed to add op: {}", e)));
+                session
+                    .messages
+                    .push(ConversationEntry::Error(format!("Failed to add op: {}", e)));
             }
         }
 
@@ -1046,7 +1063,8 @@ impl App {
                     // + "  │  " (5) + " Library " (9) + count + sep + ...
                     //
                     let exec_start = 2i32;
-                    let exec_width = (" Executions ".len() + format!("{} ", exec_count).len()) as i32;
+                    let exec_width =
+                        (" Executions ".len() + format!("{} ", exec_count).len()) as i32;
                     let sep = 5i32;
                     let lib_start = exec_start + exec_width + sep;
                     let lib_width = (" Library ".len() + format!("{} ", lib_count).len()) as i32;
@@ -1160,11 +1178,8 @@ impl App {
                         y: main_area.y,
                         ..list_area
                     };
-                    if crate::ui::common::hit_vertical_border(
-                        border_rect,
-                        mouse.column,
-                        mouse.row,
-                    ) {
+                    if crate::ui::common::hit_vertical_border(border_rect, mouse.column, mouse.row)
+                    {
                         self.operations.dragging = true;
                         return;
                     }
@@ -1252,15 +1267,11 @@ impl App {
                     }
                     return;
                 }
-
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.operations.dragging {
-                    self.operations.split_percent = crate::ui::common::drag_split_percent(
-                        0,
-                        self.terminal_width,
-                        mouse.column,
-                    );
+                    self.operations.split_percent =
+                        crate::ui::common::drag_split_percent(0, self.terminal_width, mouse.column);
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -1440,7 +1451,10 @@ impl App {
 
         let (kind, schedule_kind, hour, minute, interval_minutes, recurring, rule_cursor) =
             match &trigger.trigger_config {
-                TriggerConfig::Scheduled { schedule, recurring } => {
+                TriggerConfig::Scheduled {
+                    schedule,
+                    recurring,
+                } => {
                     let (sk, h, m, iv) = match schedule {
                         common::ScheduleSpec::DailyAt { hour, minute } => {
                             (ScheduleKind::DailyAt, *hour, *minute, 60)
@@ -1452,10 +1466,7 @@ impl App {
                     (TriggerKind::Scheduled, sk, h, m, iv, *recurring, 0)
                 }
                 TriggerConfig::InterceptMatch { rule_id } => {
-                    let rc = rules
-                        .iter()
-                        .position(|(id, _)| id == rule_id)
-                        .unwrap_or(0);
+                    let rc = rules.iter().position(|(id, _)| id == rule_id).unwrap_or(0);
                     (
                         TriggerKind::InterceptMatch,
                         ScheduleKind::Interval,
@@ -1491,11 +1502,7 @@ impl App {
             rule_cursor,
             nodes,
             agents,
-            os_filter: trigger
-                .target_spec
-                .os_filter
-                .clone()
-                .unwrap_or_default(),
+            os_filter: trigger.target_spec.os_filter.clone().unwrap_or_default(),
             include_triggering_node: trigger.target_spec.include_triggering_node,
             focused_section: TriggerFormSection::Chain,
             cursor: 0,
@@ -1609,7 +1616,11 @@ impl App {
             }
             KeyCode::Left | KeyCode::Right => {
                 if let Some(form) = self.trigger_form.as_mut() {
-                    let delta: i32 = if matches!(key.code, KeyCode::Left) { -1 } else { 1 };
+                    let delta: i32 = if matches!(key.code, KeyCode::Left) {
+                        -1
+                    } else {
+                        1
+                    };
                     Self::tweak_trigger_form_field(form, delta);
                 }
             }
@@ -1709,8 +1720,7 @@ impl App {
                     return;
                 }
                 let n = form.chains.len() as i32;
-                form.chain_cursor =
-                    (((form.chain_cursor as i32) + delta).rem_euclid(n)) as usize;
+                form.chain_cursor = (((form.chain_cursor as i32) + delta).rem_euclid(n)) as usize;
             }
             S::Type => {
                 let variants = [
@@ -1718,10 +1728,7 @@ impl App {
                     TriggerKind::InterceptMatch,
                     TriggerKind::NewNode,
                 ];
-                let idx = variants
-                    .iter()
-                    .position(|k| *k == form.kind)
-                    .unwrap_or(0) as i32;
+                let idx = variants.iter().position(|k| *k == form.kind).unwrap_or(0) as i32;
                 let n = variants.len() as i32;
                 let next = (idx + delta).rem_euclid(n) as usize;
                 form.kind = variants[next];
@@ -1757,8 +1764,7 @@ impl App {
                     return;
                 }
                 let n = form.rules.len() as i32;
-                form.rule_cursor =
-                    (((form.rule_cursor as i32) + delta).rem_euclid(n)) as usize;
+                form.rule_cursor = (((form.rule_cursor as i32) + delta).rem_euclid(n)) as usize;
             }
             S::Nodes => {
                 if form.nodes.is_empty() {

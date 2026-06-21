@@ -1,13 +1,13 @@
-use agent_client_protocol as acp;
-use acp::schema::{
-    CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, Implementation,
-    InitializeRequest, Meta, NewSessionRequest, NewSessionResponse,
-    PlanEntryStatus, PromptRequest, PromptResponse, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionId,
-    SessionNotification, SessionUpdate, TextContent, ToolCallContent, ToolCallStatus,
-};
 use crate::client::Client as PraxisRpcClient;
 use crate::event::AppEvent;
+use acp::schema::{
+    CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, Implementation,
+    InitializeRequest, Meta, NewSessionRequest, NewSessionResponse, PlanEntryStatus, PromptRequest,
+    PromptResponse, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SessionId, SessionNotification, SessionUpdate, TextContent,
+    ToolCallContent, ToolCallStatus,
+};
+use agent_client_protocol as acp;
 use common::{OrchestratorPlan, PlanStep, PlanStepStatus};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -60,10 +60,7 @@ pub enum AcpNotification {
         completion_tokens: u32,
         total_tokens: u32,
     },
-    PromptComplete {
-        #[allow(dead_code)]
-        request_id: String,
-    },
+    PromptComplete,
     //
     // Agent-initiated `session/request_permission` request. The TUI
     // surfaces this as `pending_permission` on the matching session,
@@ -78,8 +75,6 @@ pub enum AcpNotification {
         options: Vec<PermissionOption>,
     },
     Error {
-        #[allow(dead_code)]
-        request_id: Option<String>,
         message: String,
     },
 }
@@ -131,8 +126,7 @@ pub struct AcpBridgeHandle {
     // sender keyed by permission_id; the TUI resolves it from the
     // session-level a/l/d key handler.
     //
-    pending_permissions:
-        Arc<Mutex<HashMap<String, oneshot::Sender<RequestPermissionOutcome>>>>,
+    pending_permissions: Arc<Mutex<HashMap<String, oneshot::Sender<RequestPermissionOutcome>>>>,
 }
 
 impl AcpBridgeHandle {
@@ -193,10 +187,7 @@ impl AcpBridgeHandle {
     // commands and forwards session notifications to the TUI.
     //
 
-    pub fn start(
-        client: Arc<PraxisRpcClient>,
-        event_tx: mpsc::UnboundedSender<AppEvent>,
-    ) -> Self {
+    pub fn start(client: Arc<PraxisRpcClient>, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let acp_rx = client.subscribe_acp_events();
         let pending_permissions: Arc<
@@ -210,7 +201,6 @@ impl AcpBridgeHandle {
             {
                 tracing::debug!("ACP bridge ended: {}", e);
                 let _ = event_tx.send(AppEvent::AcpNotification(AcpNotification::Error {
-                    request_id: None,
                     message: format!("ACP bridge ended: {}", e),
                 }));
             }
@@ -452,69 +442,72 @@ async fn run_bridge(
             },
             acp::on_receive_notification!(),
         )
-        .on_receive_request({
-            let event_tx = event_tx.clone();
-            let pending = pending_permissions.clone();
-            move |req: RequestPermissionRequest,
-                  responder: acp::Responder<RequestPermissionResponse>,
-                  _cx: acp::ConnectionTo<acp::Agent>| {
+        .on_receive_request(
+            {
                 let event_tx = event_tx.clone();
-                let pending = pending.clone();
-                async move {
-                    //
-                    // Stash a oneshot keyed by a fresh permission_id,
-                    // forward the prompt to the TUI session UI, then
-                    // wait for the user's a/l/d decision.
-                    //
-                    let permission_id = uuid::Uuid::new_v4().to_string();
-                    let (tx, rx) = oneshot::channel::<RequestPermissionOutcome>();
-                    pending.lock().unwrap().insert(permission_id.clone(), tx);
+                let pending = pending_permissions.clone();
+                move |req: RequestPermissionRequest,
+                      responder: acp::Responder<RequestPermissionResponse>,
+                      _cx: acp::ConnectionTo<acp::Agent>| {
+                    let event_tx = event_tx.clone();
+                    let pending = pending.clone();
+                    async move {
+                        //
+                        // Stash a oneshot keyed by a fresh permission_id,
+                        // forward the prompt to the TUI session UI, then
+                        // wait for the user's a/l/d decision.
+                        //
+                        let permission_id = uuid::Uuid::new_v4().to_string();
+                        let (tx, rx) = oneshot::channel::<RequestPermissionOutcome>();
+                        pending.lock().unwrap().insert(permission_id.clone(), tx);
 
-                    let tool_name = req
-                        .tool_call
-                        .fields
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "permission".to_string());
-                    let tool_input = req
-                        .tool_call
-                        .fields
-                        .raw_input
-                        .as_ref()
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
-                    let options: Vec<PermissionOption> = req
-                        .options
-                        .iter()
-                        .map(|o| PermissionOption {
-                            option_id: o.option_id.0.to_string(),
-                            kind: o.kind,
-                        })
-                        .collect();
+                        let tool_name = req
+                            .tool_call
+                            .fields
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| "permission".to_string());
+                        let tool_input = req
+                            .tool_call
+                            .fields
+                            .raw_input
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        let options: Vec<PermissionOption> = req
+                            .options
+                            .iter()
+                            .map(|o| PermissionOption {
+                                option_id: o.option_id.0.to_string(),
+                                kind: o.kind,
+                            })
+                            .collect();
 
-                    let _ = event_tx.send(AppEvent::AcpNotification(
-                        AcpNotification::PermissionRequest {
-                            session_id: req.session_id.to_string(),
-                            permission_id: permission_id.clone(),
-                            tool_name,
-                            tool_input,
-                            options,
-                        },
-                    ));
+                        let _ = event_tx.send(AppEvent::AcpNotification(
+                            AcpNotification::PermissionRequest {
+                                session_id: req.session_id.to_string(),
+                                permission_id: permission_id.clone(),
+                                tool_name,
+                                tool_input,
+                                options,
+                            },
+                        ));
 
-                    let outcome = match rx.await {
-                        Ok(o) => o,
-                        Err(_) => RequestPermissionOutcome::Cancelled,
-                    };
-                    //
-                    // Best-effort cleanup if the TUI never resolved the
-                    // request (race / shutdown).
-                    //
-                    pending.lock().unwrap().remove(&permission_id);
-                    responder.respond(RequestPermissionResponse::new(outcome))
+                        let outcome = match rx.await {
+                            Ok(o) => o,
+                            Err(_) => RequestPermissionOutcome::Cancelled,
+                        };
+                        //
+                        // Best-effort cleanup if the TUI never resolved the
+                        // request (race / shutdown).
+                        //
+                        pending.lock().unwrap().remove(&permission_id);
+                        responder.respond(RequestPermissionResponse::new(outcome))
+                    }
                 }
-            }
-        }, acp::on_receive_request!())
+            },
+            acp::on_receive_request!(),
+        )
         .connect_with(transport, async move |cx| {
             //
             // Initialize the connection.
@@ -522,21 +515,18 @@ async fn run_bridge(
 
             match cx
                 .send_request(
-                    InitializeRequest::new(ProtocolVersion::V1).client_info(
-                        Implementation::new("praxis", env!("CARGO_PKG_VERSION")),
-                    ),
+                    InitializeRequest::new(ProtocolVersion::V1)
+                        .client_info(Implementation::new("praxis", env!("CARGO_PKG_VERSION"))),
                 )
                 .block_task()
                 .await
             {
                 Ok(_) => {
-                    let _ = event_tx.send(AppEvent::AcpNotification(
-                        AcpNotification::InitializeResult,
-                    ));
+                    let _ =
+                        event_tx.send(AppEvent::AcpNotification(AcpNotification::InitializeResult));
                 }
                 Err(e) => {
                     let _ = event_tx.send(AppEvent::AcpNotification(AcpNotification::Error {
-                        request_id: None,
                         message: format!("ACP initialize failed: {}", e),
                     }));
                     return Ok(());
@@ -549,9 +539,11 @@ async fn run_bridge(
             // draining cmd_rx while ACP requests are in flight.
             //
 
-            let mut cmd_rx = cmd_rx.lock().unwrap().take().ok_or_else(|| {
-                acp::util::internal_error("ACP bridge cmd_rx missing")
-            })?;
+            let mut cmd_rx = cmd_rx
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| acp::util::internal_error("ACP bridge cmd_rx missing"))?;
 
             while let Some(cmd) = cmd_rx.recv().await {
                 let event_tx = event_tx.clone();
@@ -578,17 +570,17 @@ async fn run_bridge(
                                         serde_json::json!({ "role": role, "text": text })
                                     })
                                     .collect();
-                                meta_obj.insert(
-                                    "history".to_string(),
-                                    serde_json::Value::Array(arr),
-                                );
+                                meta_obj
+                                    .insert("history".to_string(), serde_json::Value::Array(arr));
                             }
 
                             let mut req = NewSessionRequest::new(cwd);
                             if !meta_obj.is_empty() {
                                 req = req.meta(
-                                    serde_json::from_value::<Meta>(serde_json::Value::Object(meta_obj))
-                                        .unwrap(),
+                                    serde_json::from_value::<Meta>(serde_json::Value::Object(
+                                        meta_obj,
+                                    ))
+                                    .unwrap(),
                                 );
                             }
 
@@ -645,9 +637,7 @@ async fn run_bridge(
                             match &result {
                                 Ok(_) => {
                                     let _ = event_tx.send(AppEvent::AcpNotification(
-                                        AcpNotification::PromptComplete {
-                                            request_id: String::new(),
-                                        },
+                                        AcpNotification::PromptComplete,
                                     ));
                                 }
                                 Err(e) => {
@@ -661,7 +651,6 @@ async fn run_bridge(
                                     //
                                     let _ = event_tx.send(AppEvent::AcpNotification(
                                         AcpNotification::Error {
-                                            request_id: None,
                                             message: e.to_string(),
                                         },
                                     ));
@@ -671,10 +660,9 @@ async fn run_bridge(
                         }
 
                         BridgeCommand::Cancel { session_id } => {
-                            let _ = cx_clone
-                                .send_notification(CancelNotification::new(SessionId::from(
-                                    session_id,
-                                )));
+                            let _ = cx_clone.send_notification(CancelNotification::new(
+                                SessionId::from(session_id),
+                            ));
                         }
                     }
                     Ok(())

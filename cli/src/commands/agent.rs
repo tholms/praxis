@@ -170,15 +170,6 @@ pub async fn execute(client: &Client, command: AgentCommand) -> Result<()> {
     }
 }
 
-fn find_node_id(state: &common::SystemState, prefix: &str) -> Option<String> {
-    let search = prefix.to_lowercase();
-    state
-        .nodes
-        .iter()
-        .find(|node| node.node_id.to_lowercase().starts_with(&search))
-        .map(|node| node.node_id.clone())
-}
-
 async fn list_agents(client: &Client, node_prefix: &str) -> Result<()> {
     let state = client
         .get_state()
@@ -237,7 +228,11 @@ async fn update_agent(client: &Client, node_prefix: &str) -> Result<()> {
     let node = state
         .nodes
         .iter()
-        .find(|n| n.node_id.to_lowercase().starts_with(&node_prefix.to_lowercase()))
+        .find(|n| {
+            n.node_id
+                .to_lowercase()
+                .starts_with(&node_prefix.to_lowercase())
+        })
         .ok_or_else(|| anyhow!("No node found matching '{}'", node_prefix))?;
 
     print_success(&format!(
@@ -260,7 +255,7 @@ async fn read_file(
         .get_state()
         .await
         .ok_or_else(|| anyhow!("No state available"))?;
-    let node_id = find_node_id(&state, node_prefix)
+    let node_id = super::find_node_id(&state, node_prefix)
         .ok_or_else(|| anyhow!("No node found matching '{}'", node_prefix))?;
 
     let mut params = json!({
@@ -275,7 +270,9 @@ async fn read_file(
         params["line_end"] = json!(v);
     }
 
-    let result = client.acp_request(&node_id, EXT_PRAXIS_READ_FILE, params).await?;
+    let result = client
+        .acp_request(&node_id, EXT_PRAXIS_READ_FILE, params)
+        .await?;
 
     if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         return Err(anyhow!(err.to_string()));
@@ -312,18 +309,25 @@ async fn write_file(
         .get_state()
         .await
         .ok_or_else(|| anyhow!("No state available"))?;
-    let node_id = find_node_id(&state, node_prefix)
+    let node_id = super::find_node_id(&state, node_prefix)
         .ok_or_else(|| anyhow!("No node found matching '{}'", node_prefix))?;
 
     let result = client
-        .acp_request(&node_id, EXT_PRAXIS_WRITE_FILE, json!({
-            "file_type": file_type,
-            "path": path,
-            "contents": contents,
-        }))
+        .acp_request(
+            &node_id,
+            EXT_PRAXIS_WRITE_FILE,
+            json!({
+                "file_type": file_type,
+                "path": path,
+                "contents": contents,
+            }),
+        )
         .await?;
 
-    let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    let success = result
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if success {
         print_success("Write complete");
         Ok(())
@@ -348,16 +352,20 @@ async fn grep_file(
         .get_state()
         .await
         .ok_or_else(|| anyhow!("No state available"))?;
-    let node_id = find_node_id(&state, node_prefix)
+    let node_id = super::find_node_id(&state, node_prefix)
         .ok_or_else(|| anyhow!("No node found matching '{}'", node_prefix))?;
 
     let result = client
-        .acp_request(&node_id, EXT_PRAXIS_GREP_FILES, json!({
-            "agent_short_name": agent,
-            "file_type": file_type,
-            "paths": vec![path.to_string()],
-            "pattern": pattern,
-        }))
+        .acp_request(
+            &node_id,
+            EXT_PRAXIS_GREP_FILES,
+            json!({
+                "agent_short_name": agent,
+                "file_type": file_type,
+                "paths": vec![path.to_string()],
+                "pattern": pattern,
+            }),
+        )
         .await?;
 
     if result.get("pattern").is_none()
@@ -407,4 +415,3 @@ async fn grep_file(
     print_success("Grep complete");
     Ok(())
 }
-

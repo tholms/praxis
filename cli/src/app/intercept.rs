@@ -61,34 +61,16 @@ impl InterceptTab {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum ProtocolFilter {
-    All,
-    Http,
-    WebSocket,
-    Http2,
-}
-
 //
 // A row in the flattened display. HTTP entries show individually;
 // WS_*/H2_* frames are collapsed into groups keyed by (node_id, url) so
 // streaming endpoints don't flood the list.
 //
-// The node_id is part of the grouping key and is stored even though the
-// renderer currently only displays the URL; keeping it here means we
-// don't have to re-derive it from indices for filter/export purposes.
-//
 
 #[derive(Debug, Clone)]
 pub enum DisplayRow {
     Http(usize),
-    Group {
-        #[allow(dead_code)]
-        node_id: String,
-        url: String,
-        indices: Vec<usize>,
-    },
+    Group { url: String, indices: Vec<usize> },
 }
 
 impl DisplayRow {
@@ -124,7 +106,6 @@ pub struct InterceptState {
     pub search_focused: bool,
     pub search_input: String,
     search_regex: Option<Regex>,
-    pub protocol: ProtocolFilter,
     pub node_filter: Option<String>,
     pub agent_filter: Option<String>,
     pub initial_loaded: bool,
@@ -197,7 +178,6 @@ impl Default for InterceptState {
             search_focused: false,
             search_input: String::new(),
             search_regex: None,
-            protocol: ProtocolFilter::All,
             node_filter: None,
             agent_filter: None,
             initial_loaded: false,
@@ -245,11 +225,7 @@ impl InterceptState {
     // response included and marks the display dirty.
     //
 
-    pub fn replace_buffer(
-        &mut self,
-        entries: Vec<InterceptedTrafficEntry>,
-        total: usize,
-    ) {
+    pub fn replace_buffer(&mut self, entries: Vec<InterceptedTrafficEntry>, total: usize) {
         self.buffer.clear();
         for mut entry in entries {
             if let Some(id) = entry.id {
@@ -374,12 +350,6 @@ impl InterceptState {
         self.display_dirty = true;
     }
 
-    #[allow(dead_code)]
-    pub fn set_protocol(&mut self, p: ProtocolFilter) {
-        self.protocol = p;
-        self.display_dirty = true;
-    }
-
     pub fn set_node_filter(&mut self, node_id: Option<String>) {
         if self.node_filter != node_id {
             self.agent_filter = None;
@@ -426,7 +396,6 @@ impl InterceptState {
                 } else {
                     group_index.insert(key.clone(), rows.len());
                     rows.push(DisplayRow::Group {
-                        node_id: key.0,
                         url: key.1,
                         indices: vec![i],
                     });
@@ -456,26 +425,6 @@ impl InterceptState {
             return false;
         }
 
-        let method = entry.method.as_deref().unwrap_or("");
-        match self.protocol {
-            ProtocolFilter::All => {}
-            ProtocolFilter::Http => {
-                if method.starts_with("WS_") || method.starts_with("H2_") {
-                    return false;
-                }
-            }
-            ProtocolFilter::WebSocket => {
-                if !method.starts_with("WS_") {
-                    return false;
-                }
-            }
-            ProtocolFilter::Http2 => {
-                if !method.starts_with("H2_") {
-                    return false;
-                }
-            }
-        }
-
         if self.search_input.is_empty() {
             return true;
         }
@@ -489,8 +438,7 @@ impl InterceptState {
             {
                 return true;
             }
-            s.to_lowercase()
-                .contains(&self.search_input.to_lowercase())
+            s.to_lowercase().contains(&self.search_input.to_lowercase())
         };
 
         if hit(&entry.url) {
@@ -702,10 +650,7 @@ impl InterceptState {
     // Body cache helpers.
     //
 
-    pub fn request_body_for<'a>(
-        &'a self,
-        entry: &'a InterceptedTrafficEntry,
-    ) -> Option<&'a [u8]> {
+    pub fn request_body_for<'a>(&'a self, entry: &'a InterceptedTrafficEntry) -> Option<&'a [u8]> {
         if let Some(ref body) = entry.request_body {
             return Some(body.as_slice());
         }
@@ -713,10 +658,7 @@ impl InterceptState {
         self.body_cache.get(&id).and_then(|(req, _)| req.as_deref())
     }
 
-    pub fn response_body_for<'a>(
-        &'a self,
-        entry: &'a InterceptedTrafficEntry,
-    ) -> Option<&'a [u8]> {
+    pub fn response_body_for<'a>(&'a self, entry: &'a InterceptedTrafficEntry) -> Option<&'a [u8]> {
         if let Some(ref body) = entry.response_body {
             return Some(body.as_slice());
         }
@@ -840,7 +782,9 @@ impl App {
                 // the existing entry (matched by id) so the fetched
                 // bodies become visible without a second code path.
                 //
-                let _ = tx.send(crate::event::AppEvent::InterceptEntriesAppended(vec![entry]));
+                let _ = tx.send(crate::event::AppEvent::InterceptEntriesAppended(vec![
+                    entry,
+                ]));
             }
         });
     }
@@ -937,8 +881,7 @@ impl App {
             }
             KeyCode::Up => {
                 if self.intercept.detail_focus {
-                    self.intercept.detail_scroll =
-                        self.intercept.detail_scroll.saturating_sub(1);
+                    self.intercept.detail_scroll = self.intercept.detail_scroll.saturating_sub(1);
                 } else {
                     self.intercept.move_selection(-1);
                     self.fetch_body_for_selected().await;
@@ -956,8 +899,7 @@ impl App {
             }
             KeyCode::PageUp => {
                 if self.intercept.detail_focus {
-                    self.intercept.detail_scroll =
-                        self.intercept.detail_scroll.saturating_sub(10);
+                    self.intercept.detail_scroll = self.intercept.detail_scroll.saturating_sub(10);
                 } else {
                     self.intercept.move_selection(-10);
                     self.fetch_body_for_selected().await;
@@ -1087,8 +1029,11 @@ impl App {
             KeyCode::Down => {
                 if self.intercept.match_detail_focus {
                     let max = self.intercept.match_detail_max_scroll.get();
-                    self.intercept.match_detail_scroll =
-                        self.intercept.match_detail_scroll.saturating_add(1).min(max);
+                    self.intercept.match_detail_scroll = self
+                        .intercept
+                        .match_detail_scroll
+                        .saturating_add(1)
+                        .min(max);
                 } else {
                     self.intercept.move_match_selection(1);
                 }
@@ -1225,9 +1170,7 @@ impl App {
     pub async fn delete_intercept_rule(&mut self, id: i64) {
         match self.client.delete_intercept_rule(id).await {
             Ok(true) => self.intercept.remove_rule(id),
-            Ok(false) => self
-                .intercept
-                .set_error("Rule delete rejected".to_string()),
+            Ok(false) => self.intercept.set_error("Rule delete rejected".to_string()),
             Err(e) => self.intercept.set_error(format!("Delete rule: {}", e)),
         }
     }
@@ -1246,76 +1189,6 @@ impl App {
             }
             Err(e) => self.intercept.set_error(format!("Clear: {}", e)),
         }
-    }
-
-    #[allow(dead_code)]
-    async fn toggle_intercept_for_selected(&mut self) {
-        let Some(entry) = self.intercept.selected_primary_entry() else {
-            return;
-        };
-        let node_id = entry.node_id.clone();
-        let currently_on = self
-            .intercept
-            .intercept_statuses
-            .get(&node_id)
-            .map(|s| s.enabled)
-            .unwrap_or(false);
-
-        if currently_on {
-            self.confirm = Some(ConfirmAction {
-                message: format!(
-                    "Disable interception on node {}?",
-                    common::short_id(&node_id)
-                ),
-                action: ConfirmKind::ToggleIntercept {
-                    node_id,
-                    enable: false,
-                    method: None,
-                },
-            });
-            return;
-        }
-
-        //
-        // Auto-pick method by the node's OS. If we don't know the node
-        // (e.g. it disappeared) or it's macOS, surface an error rather
-        // than guessing.
-        //
-        let os_lower = self
-            .nodes
-            .nodes
-            .iter()
-            .find(|n| n.node_id == node_id)
-            .map(|n| n.os_details.to_lowercase())
-            .unwrap_or_default();
-
-        let method = if os_lower.contains("linux") {
-            common::InterceptMethod::Tproxy
-        } else if os_lower.contains("windows") {
-            common::InterceptMethod::Vpn
-        } else {
-            self.intercept
-                .set_error(format!("Interception not supported on node {}", common::short_id(&node_id)));
-            return;
-        };
-
-        self.confirm = Some(ConfirmAction {
-            message: format!(
-                "Enable interception on node {} via {}?",
-                common::short_id(&node_id),
-                match method {
-                    common::InterceptMethod::Tproxy => "TPROXY",
-                    common::InterceptMethod::Vpn => "VPN",
-                    common::InterceptMethod::Proxy => "system proxy",
-                    common::InterceptMethod::Hosts => "hosts file",
-                }
-            ),
-            action: ConfirmKind::ToggleIntercept {
-                node_id,
-                enable: true,
-                method: Some(method),
-            },
-        });
     }
 
     //
@@ -1364,11 +1237,7 @@ impl App {
         self.intercept.set_agent_filter(new);
     }
 
-    pub(crate) async fn handle_intercept_mouse(
-        &mut self,
-        mouse: MouseEvent,
-        content_area: Rect,
-    ) {
+    pub(crate) async fn handle_intercept_mouse(&mut self, mouse: MouseEvent, content_area: Rect) {
         use ratatui::layout::{Constraint, Layout};
 
         let chunks = Layout::vertical([
@@ -1424,11 +1293,8 @@ impl App {
                 });
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if crate::ui::common::hit_vertical_border(
-                            split[0],
-                            mouse.column,
-                            mouse.row,
-                        ) {
+                        if crate::ui::common::hit_vertical_border(split[0], mouse.column, mouse.row)
+                        {
                             self.intercept.log_dragging = true;
                             return;
                         }
@@ -1494,11 +1360,8 @@ impl App {
                 });
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if crate::ui::common::hit_vertical_border(
-                            split[0],
-                            mouse.column,
-                            mouse.row,
-                        ) {
+                        if crate::ui::common::hit_vertical_border(split[0], mouse.column, mouse.row)
+                        {
                             self.intercept.match_dragging = true;
                             return;
                         }
