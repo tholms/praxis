@@ -90,7 +90,7 @@
 
 - **Do not initiate any release steps unless explicitly asked to.**
 
-1. **Version bump**: Ensure the version is updated on the `prerelease` branch. It should be a minor bump over the current `main` version (unless otherwise specified).
+1. **Version bump**: Ensure the version is updated on the `prerelease` branch. Bump the last (patch) number only over the current `main` version, unless specifically asked otherwise.
 2. **Documentation**: Before creating the release PR, ensure all documentation in `docs/` is updated to reflect every change included in the release. Review all commits since the last release and update relevant doc pages.
 3. **Create PR**: Create a PR from `prerelease` into `main` with a clear, well-written description summarizing all changes since the last release.
 4. **Squash merge**: Squash-merge the PR into `main`.
