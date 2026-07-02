@@ -29,7 +29,6 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('docker')]
     [string]$Service,
     [switch]$Cli,
     [switch]$Src,
@@ -47,15 +46,45 @@ $CliInstallDir = if ($env:PRAXIS_CLI_DIR) { $env:PRAXIS_CLI_DIR } else { Join-Pa
 $ComposeCmd    = $null
 $BuildFromSource = [bool]$Src
 
-function Write-Info    { param($msg) Write-Host "  ▸ " -ForegroundColor Cyan   -NoNewline; Write-Host $msg }
-function Write-Success { param($msg) Write-Host "  ✓ " -ForegroundColor Green  -NoNewline; Write-Host $msg }
-function Write-Warn    { param($msg) Write-Host "  ⚠ " -ForegroundColor Yellow -NoNewline; Write-Host $msg }
-function Write-Err     { param($msg) Write-Host "  ✗ " -ForegroundColor Red    -NoNewline; Write-Host $msg; exit 1 }
+#
+# Unicode glyphs are declared here as code points (and the banner is decoded
+# from base64) so the source of this script stays pure ASCII. A BOM-less file
+# with literal multi-byte characters fails to parse under Windows PowerShell
+# 5.1 -- which decodes it as ANSI -- and over the 'irm | iex' pipe. Keeping
+# the source ASCII avoids that while still rendering the glyphs at runtime.
+#
+
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch { }
+
+$Glyph = @{
+    Info    = [char]0x25B8
+    Check   = [char]0x2713
+    Warn    = [char]0x26A0
+    Cross   = [char]0x2717
+    Bar     = [char]0x258C
+    Pointer = [char]0x25B6
+    Up      = [char]0x2191
+    Down    = [char]0x2193
+    Oh      = [char]0x00D8
+    Block   = [char]0x2588
+    Shade   = [char]0x2591
+    BoxH    = [char]0x2500
+    BoxV    = [char]0x2502
+    BoxTL   = [char]0x256D
+    BoxTR   = [char]0x256E
+    BoxBL   = [char]0x2570
+    BoxBR   = [char]0x256F
+}
+
+function Write-Info    { param($msg) Write-Host "  $($Glyph.Info) " -ForegroundColor Cyan   -NoNewline; Write-Host $msg }
+function Write-Success { param($msg) Write-Host "  $($Glyph.Check) " -ForegroundColor Green  -NoNewline; Write-Host $msg }
+function Write-Warn    { param($msg) Write-Host "  $($Glyph.Warn) " -ForegroundColor Yellow -NoNewline; Write-Host $msg }
+function Write-Err     { param($msg) Write-Host "  $($Glyph.Cross) " -ForegroundColor Red    -NoNewline; Write-Host $msg; exit 1 }
 
 function Write-Section {
     param([string]$Title)
     Write-Host ""
-    Write-Host "  ▌ " -ForegroundColor Cyan -NoNewline
+    Write-Host "  $($Glyph.Bar) " -ForegroundColor Cyan -NoNewline
     Write-Host $Title
     Write-Host ""
 }
@@ -84,17 +113,17 @@ function Run-WithProgressBar {
     $percent = 0
     $step = 2
     $delayMs = 300
-    $spin = @('⣾','⣽','⣻','⢿','⡿','⣟','⣯','⣷')
+    $spin = @(0x28FE,0x28FD,0x28FB,0x28BF,0x287F,0x28DF,0x28EF,0x28F7 | ForEach-Object { [char]$_ })
     $spinIdx = 0
 
     while (-not $proc.HasExited) {
         $filled = [int]($percent * $width / 100)
         $empty = $width - $filled
-        $bar = ('█' * $filled) + ('░' * $empty)
+        $bar = (([string]$Glyph.Block) * $filled) + (([string]$Glyph.Shade) * $empty)
         Write-Host -NoNewline ("`r" + (' ' * ([Console]::WindowWidth - 1)) + "`r")
         Write-Host -NoNewline "[" -ForegroundColor Cyan
-        Write-Host -NoNewline ('█' * $filled) -ForegroundColor Cyan
-        Write-Host -NoNewline ('░' * $empty)  -ForegroundColor DarkGray
+        Write-Host -NoNewline (([string]$Glyph.Block) * $filled) -ForegroundColor Cyan
+        Write-Host -NoNewline (([string]$Glyph.Shade) * $empty)  -ForegroundColor DarkGray
         Write-Host -NoNewline "] " -ForegroundColor Cyan
         Write-Host -NoNewline ("{0,3}% {1}" -f $percent, $spin[$spinIdx]) -ForegroundColor Cyan
 
@@ -106,7 +135,7 @@ function Run-WithProgressBar {
 
     Write-Host -NoNewline ("`r" + (' ' * ([Console]::WindowWidth - 1)) + "`r")
     Write-Host -NoNewline "[" -ForegroundColor Cyan
-    Write-Host -NoNewline ('█' * $width) -ForegroundColor Cyan
+    Write-Host -NoNewline (([string]$Glyph.Block) * $width) -ForegroundColor Cyan
     Write-Host "] 100%" -ForegroundColor Cyan
 
     if (Test-Path "$LogFile.err") {
@@ -142,14 +171,14 @@ function Test-Command {
 
 function Print-Banner {
     Write-Host ""
-    Write-Host "██████╗ ██████╗  █████╗ ██╗  ██╗██╗███████╗" -ForegroundColor Cyan
-    Write-Host "██╔══██╗██╔══██╗██╔══██╗╚██╗██╔╝██║██╔════╝" -ForegroundColor Cyan
-    Write-Host "██████╔╝██████╔╝███████║ ╚███╔╝ ██║███████╗" -ForegroundColor Cyan
-    Write-Host "██╔═══╝ ██╔══██╗██╔══██║ ██╔██╗ ██║╚════██║" -ForegroundColor Cyan
-    Write-Host "██║     ██║  ██║██║  ██║██╔╝ ██╗██║███████║" -ForegroundColor Cyan
-    Write-Host "╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚══════╝" -ForegroundColor Cyan
+    Write-Host ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('4paI4paI4paI4paI4paI4paI4pWXIOKWiOKWiOKWiOKWiOKWiOKWiOKVlyAg4paI4paI4paI4paI4paI4pWXIOKWiOKWiOKVlyAg4paI4paI4pWX4paI4paI4pWX4paI4paI4paI4paI4paI4paI4paI4pWX'))) -ForegroundColor Cyan
+    Write-Host ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('4paI4paI4pWU4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4paI4paI4pWX4paI4paI4pWU4pWQ4pWQ4paI4paI4pWX4pWa4paI4paI4pWX4paI4paI4pWU4pWd4paI4paI4pWR4paI4paI4pWU4pWQ4pWQ4pWQ4pWQ4pWd'))) -ForegroundColor Cyan
+    Write-Host ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('4paI4paI4paI4paI4paI4paI4pWU4pWd4paI4paI4paI4paI4paI4paI4pWU4pWd4paI4paI4paI4paI4paI4paI4paI4pWRIOKVmuKWiOKWiOKWiOKVlOKVnSDilojilojilZHilojilojilojilojilojilojilojilZc='))) -ForegroundColor Cyan
+    Write-Host ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('4paI4paI4pWU4pWQ4pWQ4pWQ4pWdIOKWiOKWiOKVlOKVkOKVkOKWiOKWiOKVl+KWiOKWiOKVlOKVkOKVkOKWiOKWiOKVkSDilojilojilZTilojilojilZcg4paI4paI4pWR4pWa4pWQ4pWQ4pWQ4pWQ4paI4paI4pWR'))) -ForegroundColor Cyan
+    Write-Host ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('4paI4paI4pWRICAgICDilojilojilZEgIOKWiOKWiOKVkeKWiOKWiOKVkSAg4paI4paI4pWR4paI4paI4pWU4pWdIOKWiOKWiOKVl+KWiOKWiOKVkeKWiOKWiOKWiOKWiOKWiOKWiOKWiOKVkQ=='))) -ForegroundColor Cyan
+    Write-Host ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('4pWa4pWQ4pWdICAgICDilZrilZDilZ0gIOKVmuKVkOKVneKVmuKVkOKVnSAg4pWa4pWQ4pWd4pWa4pWQ4pWdICDilZrilZDilZ3ilZrilZDilZ3ilZrilZDilZDilZDilZDilZDilZDilZ0='))) -ForegroundColor Cyan
     Write-Host "Semantic Command & Control Framework for Agents " -ForegroundColor DarkGray -NoNewline
-    Write-Host "by [Ø] Origin" -ForegroundColor Magenta
+    Write-Host "by [$($Glyph.Oh)] Origin" -ForegroundColor Magenta
     Write-Host ""
 }
 
@@ -197,7 +226,7 @@ function Select-Menu {
     $n = $Options.Length
     $sel = 0
     Write-Host $Prompt -NoNewline
-    Write-Host " (↑↓ move, enter select, q quit)" -ForegroundColor DarkGray
+    Write-Host " ($($Glyph.Up)$($Glyph.Down) move, enter select, q quit)" -ForegroundColor DarkGray
     Write-Host ""
     foreach ($_ in $Options) { Write-Host "" }
 
@@ -222,7 +251,7 @@ function Select-Menu {
                 $blank = "".PadRight([Console]::WindowWidth - 1)
                 [Console]::Write("`r$blank`r")
                 if ($i -eq $sel) {
-                    Write-Host "  ▶ $($Options[$i])" -ForegroundColor Cyan
+                    Write-Host "  $($Glyph.Pointer) $($Options[$i])" -ForegroundColor Cyan
                 } else {
                     Write-Host "    $($Options[$i])" -ForegroundColor DarkGray
                 }
@@ -443,15 +472,15 @@ function Print-Summary-Box {
     $pad = [Math]::Max(0, [int](($inner - $Title.Length) / 2))
     $lpad = ' ' * $pad
     $rpad = ' ' * [Math]::Max(0, $inner - $Title.Length - $pad)
-    $hbar = '─' * $inner
+    $hbar = ([string]$Glyph.BoxH) * $inner
     Write-Host ""
-    Write-Host "  ╭$hbar╮" -ForegroundColor Green
-    Write-Host "  │" -ForegroundColor Green -NoNewline
+    Write-Host "  $($Glyph.BoxTL)$hbar$($Glyph.BoxTR)" -ForegroundColor Green
+    Write-Host "  $($Glyph.BoxV)" -ForegroundColor Green -NoNewline
     Write-Host "$lpad" -NoNewline
     Write-Host "$Title" -ForegroundColor Green -NoNewline
     Write-Host "$rpad" -NoNewline
-    Write-Host "│" -ForegroundColor Green
-    Write-Host "  ╰$hbar╯" -ForegroundColor Green
+    Write-Host "$($Glyph.BoxV)" -ForegroundColor Green
+    Write-Host "  $($Glyph.BoxBL)$hbar$($Glyph.BoxBR)" -ForegroundColor Green
     Write-Host ""
 }
 
@@ -579,6 +608,19 @@ Print-Banner
 if ($Help)    { Print-Usage; exit 0 }
 Assert-Windows
 if ($Remove)  { Remove-All; exit 0 }
+
+#
+# Validate -Service in the body rather than with a [ValidateSet] attribute.
+# When the script is run via 'irm ... | iex', Invoke-Expression evaluates the
+# param() block in the caller's scope, which forces attribute validation of
+# the empty default value immediately and aborts with "The attribute cannot
+# be added because variable Service with value would no longer be valid."
+# Manual validation keeps the 'irm | iex' path working.
+#
+
+if ($Service -and $Service -ne 'docker') {
+    Write-Err "Invalid -Service '$Service'. Only 'docker' is supported on Windows."
+}
 
 if ($Service -or $Cli) {
     Get-LatestVersion
