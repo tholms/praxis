@@ -97,3 +97,4 @@
 5. **GitHub release**: Create a GitHub release on `main` with an excellent changelog covering all notable changes, new features, fixes, and breaking changes.
 6. **Tag and push**: Create a version tag matching the version number set on the `prerelease` branch (e.g., `v0.10.0`), push the tag, and push the release.
 7. **AUR package**: Handled automatically — a GitHub Action updates the `originsec/praxis-aur` repo on each release.
+8. **Back-merge into `prerelease`**: After the release completes (and once the automated AUR commits have landed on `main`), merge `main` back into `prerelease`. The squash-merge from step 4 and the AUR auto-commits land only on `main`, so without this step `prerelease` drifts behind `main`. That drift makes the next release PR show a misleading merge-base diff and risks silently reverting `main`-only changes (e.g. hotfixes merged directly to `main`) when squash-merged.
