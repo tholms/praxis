@@ -232,3 +232,72 @@ fn score_chunk(chunk: &DocChunk, query_terms: &[String]) -> f32 {
     }
     score
 }
+
+//
+// Tool-facing search: rank chunks against a free-text query and return a
+// compact list of matches (page, heading, snippet) so the assistant can decide
+// which pages to read in full.
+//
+
+pub fn search(query: &str, top_n: usize) -> String {
+    let terms = tokenize(query);
+    if terms.is_empty() {
+        return "No usable search terms in the query.".to_string();
+    }
+
+    let mut scored: Vec<(f32, &DocChunk)> = all_chunks()
+        .iter()
+        .map(|chunk| (score_chunk(chunk, &terms), chunk))
+        .filter(|(score, _)| *score > 0.0)
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    if scored.is_empty() {
+        return format!(
+            "No documentation sections matched \"{}\". Try different keywords, or read a page \
+             from the table of contents with read_doc.",
+            query
+        );
+    }
+
+    let mut out = String::new();
+    for (_, chunk) in scored.into_iter().take(top_n) {
+        let snippet: String = chunk.body.split_whitespace().take(28).collect::<Vec<_>>().join(" ");
+        out.push_str(&format!(
+            "- {} \u{2014} {}\n  {}\n",
+            chunk.path.trim_end_matches(".md"),
+            chunk.heading,
+            snippet
+        ));
+    }
+    out
+}
+
+//
+// Tool-facing page read: return the full text of a documentation page by path,
+// tolerant of a leading "./", a missing ".md", and case. Truncated to
+// `max_chars` characters so a single read stays bounded.
+//
+
+pub fn read_page(path: &str, max_chars: usize) -> Option<String> {
+    let want = path
+        .trim()
+        .trim_start_matches("./")
+        .replace('\\', "/")
+        .trim_end_matches(".md")
+        .to_lowercase();
+
+    EMBEDDED_DOCS.iter().find_map(|(p, content)| {
+        if p.trim_end_matches(".md").eq_ignore_ascii_case(&want) {
+            let truncated: String = content.chars().take(max_chars).collect();
+            let note = if truncated.len() < content.len() {
+                "\n\n[...page truncated...]"
+            } else {
+                ""
+            };
+            Some(format!("{}{}", truncated, note))
+        } else {
+            None
+        }
+    })
+}

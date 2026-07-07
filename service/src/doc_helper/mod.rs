@@ -7,7 +7,11 @@ use lapin::Channel;
 use tokio::sync::RwLock;
 
 use common::ClientDirectMessage;
-use common::ai::{ChatCompletionRequest, Message, Provider, create_ai_client};
+use common::ai::{
+    ChatCompletionRequest, Message, Provider, Tool, create_ai_client,
+    get_system_prompt_with_tools, parse_manual_tool_call,
+};
+use serde_json::{Value, json};
 
 use crate::config::ServiceConfig;
 use crate::messaging::send_to_client;
@@ -17,15 +21,23 @@ mod retrieval;
 const DOC_HELPER_PROMPT: &str = include_str!("../prompts/doc_helper.prompt");
 
 //
-// How many documentation chunks to retrieve per question, and the character
-// budget for the injected excerpts. The corpus is small, so a handful of
-// on-topic sections plus the table of contents is plenty of grounding while
-// staying well within any provider's context window.
+// Size of the initial retrieval seed injected with the system prompt. This is
+// only a head start — the assistant can pull more via the search_docs /
+// read_doc tools — so it is kept modest.
 //
 const RETRIEVE_TOP_N: usize = 8;
-const RETRIEVE_CHAR_BUDGET: usize = 24_000;
+const RETRIEVE_CHAR_BUDGET: usize = 18_000;
 
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+//
+// Agentic retrieval bounds: the assistant can call search_docs / read_doc to
+// pull further context. Cap the number of tool round-trips per question and
+// the size of a single page read so a turn stays bounded.
+//
+const MAX_TOOL_ITERATIONS: usize = 6;
+const SEARCH_RESULTS: usize = 12;
+const READ_PAGE_MAX_CHARS: usize = 16_000;
 
 //
 // Manages in-flight documentation-helper requests. Unlike the orchestrator,
@@ -136,45 +148,144 @@ impl DocHelperManager {
         let active_map = self.active.clone();
 
         tokio::spawn(async move {
-            let messages = build_messages(&prompt, &history, context.as_deref());
-            let request =
-                ChatCompletionRequest::new(model, messages).with_max_tokens(max_tokens);
+            let tools = doc_tools();
+            let mut conversation_history =
+                build_messages(&prompt, &history, context.as_deref(), &tools);
 
-            let mut stream = client.chat_completion_stream(request);
             let mut errored = false;
+            let mut iterations = 0usize;
 
-            while let Some(result) = stream.next().await {
+            macro_rules! send_chunk {
+                ($text:expr) => {{
+                    let _ = send_to_client(
+                        &publish_channel,
+                        &client_id,
+                        ClientDirectMessage::DocHelperChunk {
+                            request_id: request_id.clone(),
+                            delta: $text.to_string(),
+                        },
+                    )
+                    .await;
+                }};
+            }
+
+            'outer: loop {
                 if cancel.load(Ordering::SeqCst) {
                     break;
                 }
-                match result {
-                    Ok(delta) => {
-                        if !delta.content.is_empty() {
+
+                let request =
+                    ChatCompletionRequest::new(model.clone(), conversation_history.clone())
+                        .with_max_tokens(max_tokens);
+
+                let mut stream = client.chat_completion_stream(request);
+                let mut full_response = String::new();
+                let mut send_buffer = String::new();
+                let mut held_back = false;
+                let mut bytes_sent = 0usize;
+
+                while let Some(result) = stream.next().await {
+                    if cancel.load(Ordering::SeqCst) {
+                        break 'outer;
+                    }
+                    match result {
+                        Ok(delta) => {
+                            if delta.content.is_empty() {
+                                continue;
+                            }
+                            full_response.push_str(&delta.content);
+
+                            //
+                            // Stream prose to the overlay, but hold back once a
+                            // tool-call marker appears so raw tool JSON is never
+                            // shown. A short tail is retained each flush so a
+                            // partial marker split across deltas isn't leaked.
+                            //
+                            if held_back {
+                                continue;
+                            }
+                            send_buffer.push_str(&delta.content);
+
+                            if let Some(pos) = send_buffer
+                                .find("{\"tool\"")
+                                .or_else(|| send_buffer.find("```"))
+                            {
+                                let pre = send_buffer[..pos]
+                                    .trim_end_matches(|c: char| c == '`' || c == '\n' || c == '\r');
+                                if !pre.trim().is_empty() {
+                                    bytes_sent += pre.len();
+                                    send_chunk!(pre);
+                                }
+                                held_back = true;
+                                send_buffer.clear();
+                            } else if send_buffer.len() >= 40 || delta.content.contains('\n') {
+                                let keep = 8.min(send_buffer.len());
+                                let split = floor_boundary(&send_buffer, send_buffer.len() - keep);
+                                if split > 0 {
+                                    let piece = send_buffer[..split].to_string();
+                                    bytes_sent += piece.len();
+                                    send_chunk!(&piece);
+                                    send_buffer.replace_range(..split, "");
+                                }
+                            }
+                        }
+                        Err(e) => {
                             let _ = send_to_client(
                                 &publish_channel,
                                 &client_id,
-                                ClientDirectMessage::DocHelperChunk {
+                                ClientDirectMessage::DocHelperError {
                                     request_id: request_id.clone(),
-                                    delta: delta.content,
+                                    message: format!("AI request failed: {}", e),
                                 },
                             )
                             .await;
+                            errored = true;
+                            break 'outer;
                         }
                     }
-                    Err(e) => {
-                        let _ = send_to_client(
-                            &publish_channel,
-                            &client_id,
-                            ClientDirectMessage::DocHelperError {
-                                request_id: request_id.clone(),
-                                message: format!("AI request failed: {}", e),
-                            },
-                        )
-                        .await;
-                        errored = true;
-                        break;
+                }
+
+                //
+                // Extract any tool calls the model emitted.
+                //
+                let mut response_text = full_response.clone();
+                let mut tool_results: Vec<(String, String)> = Vec::new();
+                while let Some((tool_name, tool_args, remaining_text)) =
+                    parse_manual_tool_call(&response_text)
+                {
+                    if cancel.load(Ordering::SeqCst) {
+                        break 'outer;
+                    }
+                    let result = execute_doc_tool(&tool_name, &tool_args);
+                    tool_results.push((tool_name, result));
+                    response_text = remaining_text;
+                }
+
+                if !tool_results.is_empty() && iterations < MAX_TOOL_ITERATIONS {
+                    conversation_history.push(Message::assistant(&full_response));
+                    let combined: String = tool_results
+                        .iter()
+                        .map(|(name, result)| format!("Result of {}:\n{}", name, result))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    conversation_history.push(Message::user(combined));
+                    iterations += 1;
+                    continue;
+                }
+
+                //
+                // Final answer: flush anything not yet streamed (the retained
+                // tail, plus any content held back for a marker that turned out
+                // not to be a tool call).
+                //
+                let start = floor_boundary(&full_response, bytes_sent.min(full_response.len()));
+                if start < full_response.len() {
+                    let unsent = full_response[start..].to_string();
+                    if !unsent.trim().is_empty() {
+                        send_chunk!(&unsent);
                     }
                 }
+                break;
             }
 
             if !errored {
@@ -239,15 +350,23 @@ fn build_messages(
     prompt: &str,
     history: &[(String, String)],
     context: Option<&str>,
+    tools: &[Tool],
 ) -> Vec<Message> {
     let excerpts = retrieval::retrieve(prompt, context, RETRIEVE_TOP_N, RETRIEVE_CHAR_BUDGET);
 
-    let system_prompt = format!(
-        "{base}\n\n## Documentation pages\n\n{toc}\n\n## Retrieved excerpts\n\n{excerpts}",
+    let base = format!(
+        "{base}\n\n## Documentation pages\n\n{toc}\n\n## Pre-selected excerpts\n\n{excerpts}",
         base = DOC_HELPER_PROMPT,
         toc = retrieval::table_of_contents(),
         excerpts = excerpts,
     );
+
+    //
+    // Append the tool-calling instructions and tool catalogue (search_docs /
+    // read_doc) using the same helper the orchestrator uses, so the manual
+    // tool-call format the parser expects is documented to the model.
+    //
+    let system_prompt = get_system_prompt_with_tools(&base, tools);
 
     let mut messages = vec![Message::system(&system_prompt)];
 
@@ -272,4 +391,95 @@ fn build_messages(
 
     messages.push(Message::user(prompt));
     messages
+}
+
+//
+// The documentation tools the assistant can call. Both are read-only and
+// operate entirely on the embedded documentation.
+//
+
+fn doc_tools() -> Vec<Tool> {
+    vec![
+        Tool {
+            name: "search_docs".to_string(),
+            description: Some(
+                "Search the Praxis documentation for sections relevant to a query. Returns a \
+                 ranked list of matching pages and section headings with short snippets. Use \
+                 this to discover which pages to read."
+                    .to_string(),
+            ),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keywords or phrase to search for."
+                    }
+                },
+                "required": ["query"]
+            })),
+        },
+        Tool {
+            name: "read_doc".to_string(),
+            description: Some(
+                "Read the full text of a documentation page by its path (e.g. \
+                 \"usage/semantic-operations\" or \"usage/recon.md\"). Use after search_docs, \
+                 or on any page listed in the table of contents, to get complete details."
+                    .to_string(),
+            ),
+            parameters: Some(json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Documentation page path, as shown in the table of contents."
+                    }
+                },
+                "required": ["path"]
+            })),
+        },
+    ]
+}
+
+//
+// Execute a documentation tool call and return the result text fed back to the
+// model on the next turn.
+//
+
+fn execute_doc_tool(name: &str, args: &Value) -> String {
+    match name {
+        "search_docs" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            if query.trim().is_empty() {
+                return "Error: search_docs requires a non-empty \"query\".".to_string();
+            }
+            retrieval::search(query, SEARCH_RESULTS)
+        }
+        "read_doc" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            retrieval::read_page(path, READ_PAGE_MAX_CHARS).unwrap_or_else(|| {
+                format!(
+                    "No documentation page found at \"{}\". Use search_docs to find valid page \
+                     paths, or pick one from the table of contents.",
+                    path
+                )
+            })
+        }
+        _ => format!("Unknown tool: {}", name),
+    }
+}
+
+//
+// Walk `i` back to the nearest char boundary at or below it, so streamed
+// slices never split a multi-byte character.
+//
+
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
