@@ -1,6 +1,7 @@
 mod agent_scripts;
 mod chain_form;
 mod forms;
+pub mod help;
 mod input;
 pub mod intercept;
 pub mod log_query;
@@ -52,6 +53,7 @@ pub enum Window {
 pub struct App {
     pub active_window: Window,
     pub orchestrator: OrchestratorState,
+    pub help: help::HelpState,
     pub nodes: NodesState,
     pub intercept: InterceptState,
     pub log_query: LogQueryState,
@@ -424,6 +426,7 @@ impl App {
         Self {
             active_window: Window::Orchestrator,
             orchestrator: OrchestratorState::default(),
+            help: help::HelpState::default(),
             nodes: NodesState::default(),
             intercept: InterceptState::default(),
             log_query: LogQueryState::default(),
@@ -525,6 +528,7 @@ impl App {
                 self.handle_acp_notification(notif).await;
                 true
             }
+            AppEvent::DocHelper(event) => self.apply_doc_helper_event(event),
             AppEvent::SessionListPoll => false,
             AppEvent::OrchestratorRetryRecovery => {
                 if self.orchestrator.recovering {
@@ -1076,6 +1080,21 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) {
+        //
+        // Documentation-helper overlay: Ctrl+H summons it from any window and
+        // while it is open it captures all keys. Handled before every other
+        // intercept (including terminal raw mode) so help is reachable from
+        // every screen.
+        //
+        if self.help.open {
+            self.handle_help_key(key).await;
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('h') {
+            self.open_help();
+            return;
+        }
+
         //
         // Terminal mode intercepts all keys except ^q when Nodes window active.
         // ^y toggles the terminal closed from inside the PTY view.

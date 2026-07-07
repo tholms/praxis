@@ -90,8 +90,22 @@ pub enum AppEvent {
     ChainLoadedForEdit {
         chain: ChainDefinitionFull,
     },
+    //
+    // Documentation helper agent streaming response, correlated by request_id.
+    //
+    DocHelper(DocHelperEvent),
     Tick,
     AnimationTick,
+}
+
+//
+// A streamed documentation-helper response fragment, forwarded from the
+// client transport to the app event loop.
+//
+pub enum DocHelperEvent {
+    Chunk { request_id: String, delta: String },
+    Complete { request_id: String },
+    Error { request_id: String, message: String },
 }
 
 pub struct NodeSessionEntry {
@@ -227,6 +241,19 @@ impl EventHandler {
                     .send(AppEvent::InterceptStatusChanged(status))
                     .is_err()
                 {
+                    break;
+                }
+            }
+        });
+
+        //
+        // Documentation helper streaming responses.
+        //
+        let tx_doc_helper = tx.clone();
+        let mut doc_helper_rx = client.subscribe_doc_helper();
+        tokio::spawn(async move {
+            while let Some(event) = doc_helper_rx.recv().await {
+                if tx_doc_helper.send(AppEvent::DocHelper(event)).is_err() {
                     break;
                 }
             }

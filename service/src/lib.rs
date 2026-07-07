@@ -9,6 +9,7 @@ mod config;
 mod conversions;
 mod database;
 mod dispatch;
+mod doc_helper;
 mod handlers;
 mod intercept_targets;
 mod log_query;
@@ -477,6 +478,12 @@ async fn run_main_loop() -> Result<()> {
     common::log_info!("Initialized AgentChat manager");
 
     //
+    // Initialize the documentation helper manager.
+    //
+    let doc_helper_manager = Arc::new(crate::doc_helper::DocHelperManager::new());
+    common::log_info!("Initialized documentation helper manager");
+
+    //
     // Initialize Toolkit manager.
     //
     let toolkit_manager = Arc::new(ToolkitManager::new(
@@ -893,6 +900,7 @@ async fn run_main_loop() -> Result<()> {
         semantic_ops_manager,
         chain_executor,
         agent_chat_manager,
+        doc_helper_manager,
         acp_server,
         acp_node_proxy,
         toolkit_manager,
