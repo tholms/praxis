@@ -5,7 +5,7 @@
 // broadcast payload strips them.
 //
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
@@ -187,7 +187,6 @@ pub struct InterceptState {
     pub group_frame_selected: usize,
     pub status_message: Option<(String, Instant)>,
     pub jump_traffic_id: Option<i64>,
-    pub tab_hit_regions: RefCell<Vec<(InterceptTab, u16, u16)>>,
 }
 
 impl Default for InterceptState {
@@ -237,7 +236,6 @@ impl Default for InterceptState {
             intercept_statuses: HashMap::new(),
             traffic_match_rules: HashMap::new(),
             rule_match_counts: HashMap::new(),
-            tab_hit_regions: RefCell::new(Vec::new()),
         }
     }
 }
@@ -1610,7 +1608,7 @@ impl App {
         }
     }
 
-    async fn submit_rule_form(&mut self) {
+    pub(crate) async fn submit_rule_form(&mut self) {
         let form = match self.intercept.rule_form.as_ref() {
             Some(f) => f,
             None => return,
@@ -1820,199 +1818,6 @@ impl App {
             }
         };
         self.intercept.set_agent_filter(new);
-    }
-
-    pub(crate) async fn handle_intercept_mouse(&mut self, mouse: MouseEvent, content_area: Rect) {
-        use ratatui::layout::{Constraint, Layout};
-
-        let show_banner = !self.intercept.any_intercept_active()
-            && (!self.nodes.nodes.is_empty() || !self.intercept.intercept_statuses.is_empty());
-        let mut constraints = vec![Constraint::Length(1)];
-        if show_banner {
-            constraints.push(Constraint::Length(1));
-        }
-        constraints.extend([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ]);
-        let chunks = Layout::vertical(constraints).split(content_area);
-        let tabs_idx = if show_banner { 2 } else { 1 };
-        let body_idx = if show_banner { 5 } else { 4 };
-        let tabs_area = chunks[tabs_idx];
-        let body_area = chunks[body_idx];
-
-        //
-        // Tab click.
-        //
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            if mouse.row == tabs_area.y {
-                let rel = mouse.column.saturating_sub(tabs_area.x);
-                //
-                // Labels rendered as:
-                // "  " + " Log " + "<count> " + " │ " + " Matches " + ...
-                // Hit-box by approximate column ranges kept in sync with
-                // ui::intercept::mod::render_tabs.
-                //
-                let regions = self.intercept.tab_hit_regions.borrow();
-                if let Some(tab) = crate::ui::intercept::tab_at_column(rel, &regions) {
-                    self.intercept.tab = tab;
-                    return;
-                }
-            }
-        }
-
-        //
-        // Per-tab body handling — for Log and Matches we support a
-        // horizontal split drag and pane focus click.
-        //
-        match self.intercept.tab {
-            InterceptTab::Traffic => {
-                let pct = self.intercept.log_split_percent.clamp(20, 80);
-                let split = Layout::horizontal([
-                    Constraint::Percentage(pct),
-                    Constraint::Percentage(100 - pct),
-                ])
-                .split(Rect {
-                    y: body_area.y + 1,
-                    height: body_area.height.saturating_sub(1),
-                    ..body_area
-                });
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if crate::ui::common::hit_vertical_border(split[0], mouse.column, mouse.row)
-                        {
-                            self.intercept.log_dragging = true;
-                            return;
-                        }
-                        //
-                        // Detail pane click -> focus.
-                        //
-                        if mouse.column >= split[1].x
-                            && mouse.column < split[1].x + split[1].width
-                            && mouse.row >= split[1].y
-                            && mouse.row < split[1].y + split[1].height
-                        {
-                            self.intercept.detail_focus = true;
-                            self.fetch_body_for_selected().await;
-                            return;
-                        }
-                        //
-                        // List pane click -> unfocus detail + select row.
-                        //
-                        if mouse.column >= split[0].x
-                            && mouse.column < split[0].x + split[0].width
-                            && mouse.row >= split[0].y
-                            && mouse.row < split[0].y + split[0].height
-                        {
-                            self.intercept.detail_focus = false;
-                            let list_start = split[0].y + 2;
-                            if mouse.row >= list_start {
-                                let clicked = (mouse.row - list_start) as usize;
-                                if clicked < self.intercept.display_rows.len() {
-                                    self.intercept.selected = clicked;
-                                    self.intercept.detail_scroll = 0;
-                                    self.intercept.group_frame_selected = 0;
-                                    self.fetch_body_for_selected().await;
-                                }
-                            }
-                            return;
-                        }
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) if self.intercept.log_dragging => {
-                        self.intercept.log_split_percent = crate::ui::common::drag_split_percent(
-                            body_area.x,
-                            body_area.width,
-                            mouse.column,
-                        );
-                        return;
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        self.intercept.log_dragging = false;
-                    }
-                    _ => {}
-                }
-            }
-            InterceptTab::Matches => {
-                let pct = self.intercept.match_split_percent.clamp(20, 80);
-                let split = Layout::horizontal([
-                    Constraint::Percentage(pct),
-                    Constraint::Percentage(100 - pct),
-                ])
-                .split(Rect {
-                    y: body_area.y + 1,
-                    height: body_area.height.saturating_sub(1),
-                    ..body_area
-                });
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if crate::ui::common::hit_vertical_border(split[0], mouse.column, mouse.row)
-                        {
-                            self.intercept.match_dragging = true;
-                            return;
-                        }
-                        if mouse.column >= split[1].x
-                            && mouse.column < split[1].x + split[1].width
-                            && mouse.row >= split[1].y
-                            && mouse.row < split[1].y + split[1].height
-                        {
-                            self.intercept.match_detail_focus = true;
-                            self.fetch_body_for_match_selected().await;
-                            return;
-                        }
-                        if mouse.column >= split[0].x
-                            && mouse.column < split[0].x + split[0].width
-                            && mouse.row >= split[0].y
-                            && mouse.row < split[0].y + split[0].height
-                        {
-                            self.intercept.match_detail_focus = false;
-                            let list_start = split[0].y + 2;
-                            if mouse.row >= list_start {
-                                let clicked = (mouse.row - list_start) as usize;
-                                let total = self.intercept.filtered_matches_len();
-                                if clicked < total {
-                                    self.intercept.match_selected = clicked;
-                                    self.intercept.match_detail_scroll = 0;
-                                    self.fetch_body_for_match_selected().await;
-                                }
-                            }
-                            return;
-                        }
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) if self.intercept.match_dragging => {
-                        self.intercept.match_split_percent = crate::ui::common::drag_split_percent(
-                            body_area.x,
-                            body_area.width,
-                            mouse.column,
-                        );
-                        return;
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        self.intercept.match_dragging = false;
-                    }
-                    _ => {}
-                }
-            }
-            InterceptTab::Rules => {
-                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                    //
-                    // Rules tab layout: filter bar (1) + table. Click a
-                    // row to select it.
-                    //
-                    let table_y = body_area.y + 1;
-                    let header_offset = 2u16; // border + header
-                    if mouse.row >= table_y + header_offset {
-                        let clicked = (mouse.row - (table_y + header_offset)) as usize;
-                        let ids = self.intercept.filtered_rule_ids();
-                        if clicked < ids.len() {
-                            self.intercept.rule_selected_id = Some(ids[clicked]);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn cycle_match_rule_filter(&mut self) {

@@ -4,6 +4,8 @@ mod forms;
 mod input;
 pub mod intercept;
 pub mod log_query;
+mod mouse;
+mod mouse_overlay;
 mod nodes;
 mod operations;
 mod orchestrator;
@@ -26,7 +28,7 @@ use common::{
     ChainTriggerInfo, InterceptRule, NodeState, OrchestratorPlan, REMOTE_NODE_KINDS, SystemState,
 };
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use std::cell::{Cell, RefCell};
@@ -75,6 +77,7 @@ pub struct App {
     // handler can map clicks to actions without re-deriving the layout.
     //
     pub chain_form_hits: std::cell::RefCell<crate::ui::chain_form::ChainFormHitMap>,
+    pub hit_layer: RefCell<crate::ui::hits::HitLayer>,
 }
 
 pub struct NodesState {
@@ -404,6 +407,7 @@ impl App {
             terminal_resume: Arc::new(tokio::sync::Notify::new()),
             last_click: None,
             chain_form_hits: std::cell::RefCell::new(Default::default()),
+            hit_layer: RefCell::new(Default::default()),
         }
     }
 
@@ -1868,251 +1872,9 @@ impl App {
         }
     }
 
-    async fn handle_recon_mouse(&mut self, mouse: MouseEvent) {
-        if self.nodes.recon.is_none() {
-            return;
-        }
-
-        //
-        // Mirror the main render layout so hit-testing lines up with what
-        // the user sees. ui::mod::render does:
-        //   inner = f.area().inner(Margin{1,2})
-        //   chunks = Layout::vertical([1,1,Min,1]).split(inner)
-        //   nodes::render gets chunks[2], which is then passed straight
-        //   to recon::render_recon.
-        //
-
-        let term_w = self.terminal_width;
-        let term_h = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(40);
-        let terminal_area = Rect::new(0, 0, term_w, term_h);
-        let inner_area = terminal_area.inner(Margin {
-            vertical: 1,
-            horizontal: 2,
-        });
-        let main_chunks = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(inner_area);
-        let recon_area = main_chunks[2];
-
-        let areas = crate::ui::recon::recon_areas(recon_area);
-        let tabs_area = areas.tabs;
-        let content_area = areas.content;
-
-        let Some(split_percent) = self.nodes.recon.as_ref().map(|r| r.recon_split_percent) else {
-            return;
-        };
-        let left_pct = split_percent.min(80).max(20);
-        let right_pct = 100u16.saturating_sub(left_pct);
-        let pane_chunks = Layout::horizontal([
-            Constraint::Percentage(left_pct),
-            Constraint::Percentage(right_pct),
-        ])
-        .split(content_area);
-        let left_area = pane_chunks[0];
-        let right_area = pane_chunks[1];
-
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                let Some(recon) = self.nodes.recon.as_mut() else {
-                    return;
-                };
-                if recon.right_pane_focused {
-                    recon.selected_right_scroll = recon.selected_right_scroll.saturating_sub(3);
-                } else {
-                    recon.selected_left = recon.selected_left.saturating_sub(3);
-                    recon.config_content_error = None;
-                    recon.session_content_error = None;
-                    recon.selected_right_scroll = 0;
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                let Some(recon) = self.nodes.recon.as_mut() else {
-                    return;
-                };
-                let left_max = match recon.active_tab {
-                    ReconTab::Config => recon
-                        .recon_result
-                        .as_ref()
-                        .map_or(0, |r| r.config.items.len().saturating_sub(1)),
-                    ReconTab::Tools => 2,
-                    ReconTab::Sessions => recon
-                        .recon_result
-                        .as_ref()
-                        .map_or(0, |r| r.sessions.items.len().saturating_sub(1)),
-                };
-                if recon.right_pane_focused {
-                    let max = recon.right_pane_max_scroll.get();
-                    recon.selected_right_scroll =
-                        recon.selected_right_scroll.saturating_add(3).min(max);
-                } else {
-                    recon.selected_left = (recon.selected_left + 3).min(left_max);
-                    recon.config_content_error = None;
-                    recon.session_content_error = None;
-                    recon.selected_right_scroll = 0;
-                }
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                //
-                // Tab bar click. Hit-test before the panes since the tab
-                // row sits above content_area.
-                //
-                if mouse.row == tabs_area.y
-                    && mouse.column >= tabs_area.x
-                    && mouse.column < tabs_area.x + tabs_area.width
-                {
-                    let counts = {
-                        let Some(recon) = self.nodes.recon.as_ref() else {
-                            return;
-                        };
-                        [
-                            recon
-                                .recon_result
-                                .as_ref()
-                                .map_or(0, |r| r.config.items.len()),
-                            recon.recon_result.as_ref().map_or(0, |r| {
-                                r.tools.mcp_servers.len()
-                                    + r.tools.skills.len()
-                                    + r.tools.internal_tools.len()
-                            }),
-                            recon
-                                .recon_result
-                                .as_ref()
-                                .map_or(0, |r| r.sessions.items.len()),
-                        ]
-                    };
-                    if let Some(new_tab) =
-                        crate::ui::recon::tab_at(tabs_area.x, mouse.column, counts)
-                    {
-                        let Some(recon) = self.nodes.recon.as_mut() else {
-                            return;
-                        };
-                        if recon.active_tab != new_tab {
-                            recon.active_tab = new_tab;
-                            recon.selected_left = 0;
-                            recon.selected_right_scroll = 0;
-                            recon.right_pane_focused = false;
-                            recon.config_content_error = None;
-                            recon.session_content_error = None;
-                            recon.config_loading = false;
-                            recon.session_loading = false;
-                        }
-                        return;
-                    }
-                }
-
-                if crate::ui::common::hit_vertical_border(left_area, mouse.column, mouse.row) {
-                    if let Some(recon) = self.nodes.recon.as_mut() {
-                        recon.recon_dragging = true;
-                    }
-                    return;
-                }
-
-                //
-                // Click in the left pane: focus it, and if the click
-                // landed on a list row, select that item and fetch its
-                // content (matching the Up/Down keyboard behaviour).
-                //
-                if mouse.column >= left_area.x
-                    && mouse.column < left_area.x + left_area.width
-                    && mouse.row >= left_area.y
-                    && mouse.row < left_area.y + left_area.height
-                {
-                    let inner_x = left_area.x.saturating_add(1);
-                    let inner_y = left_area.y.saturating_add(1);
-                    let inner_w = left_area.width.saturating_sub(2);
-                    let inner_h = left_area.height.saturating_sub(2);
-                    let in_list = mouse.column >= inner_x
-                        && mouse.column < inner_x + inner_w
-                        && mouse.row >= inner_y
-                        && mouse.row < inner_y + inner_h;
-
-                    let mut fetch = false;
-                    {
-                        let Some(recon) = self.nodes.recon.as_mut() else {
-                            return;
-                        };
-                        recon.right_pane_focused = false;
-
-                        if in_list {
-                            let (lines_per_item, max_items) = match recon.active_tab {
-                                ReconTab::Config => (
-                                    2usize,
-                                    recon
-                                        .recon_result
-                                        .as_ref()
-                                        .map_or(0, |r| r.config.items.len()),
-                                ),
-                                ReconTab::Tools => (1usize, 3usize),
-                                ReconTab::Sessions => (
-                                    3usize,
-                                    recon
-                                        .recon_result
-                                        .as_ref()
-                                        .map_or(0, |r| r.sessions.items.len()),
-                                ),
-                            };
-                            let visible_items = (inner_h as usize / lines_per_item).max(1);
-                            let scroll_offset = if recon.selected_left >= visible_items {
-                                recon.selected_left.saturating_sub(visible_items - 1)
-                            } else {
-                                0
-                            };
-                            let rel_row = (mouse.row - inner_y) as usize;
-                            let item_idx = scroll_offset + rel_row / lines_per_item;
-                            if item_idx < max_items && item_idx != recon.selected_left {
-                                recon.selected_left = item_idx;
-                                recon.selected_right_scroll = 0;
-                                recon.config_content_error = None;
-                                recon.session_content_error = None;
-                                fetch = true;
-                            }
-                        }
-                    }
-                    if fetch {
-                        self.handle_recon_enter().await;
-                    }
-                    return;
-                }
-
-                if mouse.column >= right_area.x
-                    && mouse.column < right_area.x + right_area.width
-                    && mouse.row >= right_area.y
-                    && mouse.row < right_area.y + right_area.height
-                {
-                    if let Some(recon) = self.nodes.recon.as_mut() {
-                        recon.right_pane_focused = true;
-                    }
-                    return;
-                }
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                let Some(recon) = self.nodes.recon.as_mut() else {
-                    return;
-                };
-                if recon.recon_dragging {
-                    recon.recon_split_percent = crate::ui::common::drag_split_percent(
-                        content_area.x,
-                        content_area.width,
-                        mouse.column,
-                    );
-                }
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(recon) = self.nodes.recon.as_mut() {
-                    recon.recon_dragging = false;
-                }
-            }
-            _ => {}
-        }
-    }
-
     async fn handle_mouse(&mut self, mouse: MouseEvent) {
         //
-        // Terminal mode: forward scroll as escape sequences.
+        // Terminal mode: scroll only (no HitLayer targets while in PTY view).
         //
 
         if self.nodes.terminal.is_some() && self.active_window == Window::Nodes {
@@ -2128,11 +1890,6 @@ impl App {
                     _ => {}
                 }
             }
-            return;
-        }
-
-        if self.nodes.recon.is_some() && self.active_window == Window::Nodes {
-            self.handle_recon_mouse(mouse).await;
             return;
         }
 
@@ -2157,7 +1914,7 @@ impl App {
         ])
         .split(inner_area);
         let content_area = frame_chunks[2];
-        let status_area = frame_chunks[3];
+        let _status_area = frame_chunks[3];
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -2171,6 +1928,19 @@ impl App {
                     Window::Operations if self.operations.detail_focus => {
                         self.operations.detail_scroll =
                             self.operations.detail_scroll.saturating_sub(3);
+                    }
+                    Window::Nodes if self.nodes.recon.is_some() => {
+                        if let Some(recon) = self.nodes.recon.as_mut() {
+                            if recon.right_pane_focused {
+                                recon.selected_right_scroll =
+                                    recon.selected_right_scroll.saturating_sub(3);
+                            } else {
+                                recon.selected_left = recon.selected_left.saturating_sub(3);
+                                recon.config_content_error = None;
+                                recon.session_content_error = None;
+                                recon.selected_right_scroll = 0;
+                            }
+                        }
                     }
                     Window::Nodes if self.nodes.active_session().is_some() => {
                         if let Some(session) = self.nodes.active_session_mut() {
@@ -2209,6 +1979,31 @@ impl App {
                         self.operations.detail_scroll =
                             self.operations.detail_scroll.saturating_add(3).min(max);
                     }
+                    Window::Nodes if self.nodes.recon.is_some() => {
+                        if let Some(recon) = self.nodes.recon.as_mut() {
+                            let left_max = match recon.active_tab {
+                                ReconTab::Config => recon
+                                    .recon_result
+                                    .as_ref()
+                                    .map_or(0, |r| r.config.items.len().saturating_sub(1)),
+                                ReconTab::Tools => 2,
+                                ReconTab::Sessions => recon
+                                    .recon_result
+                                    .as_ref()
+                                    .map_or(0, |r| r.sessions.items.len().saturating_sub(1)),
+                            };
+                            if recon.right_pane_focused {
+                                let max = recon.right_pane_max_scroll.get();
+                                recon.selected_right_scroll =
+                                    recon.selected_right_scroll.saturating_add(3).min(max);
+                            } else {
+                                recon.selected_left = (recon.selected_left + 3).min(left_max);
+                                recon.config_content_error = None;
+                                recon.session_content_error = None;
+                                recon.selected_right_scroll = 0;
+                            }
+                        }
+                    }
                     Window::Nodes if self.nodes.active_session().is_some() => {
                         if let Some(session) = self.nodes.active_session_mut() {
                             session.scroll_offset = session.scroll_offset.saturating_sub(3);
@@ -2239,423 +2034,8 @@ impl App {
             _ => {}
         }
 
-        //
-        // Popup mouse handling (ModelSelect, CommandPalette).
-        //
-        if let Some(ref popup) = self.popup {
-            let is_model = matches!(popup.kind, PopupKind::ModelSelect);
-            let is_command = matches!(popup.kind, PopupKind::CommandPalette);
-
-            if is_model || is_command {
-                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                    let filtered = popup.filtered_items();
-
-                    //
-                    // Calculate popup geometry matching render code.
-                    //
-                    let (px, py, popup_w, item_count) = if is_model {
-                        let ic = filtered.len().min(12) as u16;
-                        let ph = ic + 2;
-                        let max_lw = filtered
-                            .iter()
-                            .map(|(_, item)| item.label.len() + item.description.len() + 4)
-                            .max()
-                            .unwrap_or(30);
-                        let pw = (max_lw as u16 + 4)
-                            .min(terminal_area.width.saturating_sub(4))
-                            .max(30);
-                        let x = (terminal_area.width.saturating_sub(pw)) / 2;
-                        let y = (terminal_area.height.saturating_sub(ph)) / 2;
-                        (x, y, pw, ic)
-                    } else {
-                        // CommandPalette: anchored above input at bottom.
-                        let ic = filtered.len().min(8) as u16;
-                        let ph = ic + 2;
-                        let bottom_offset = 5u16;
-                        let y = terminal_area.height.saturating_sub(bottom_offset + ph);
-                        let pw = (terminal_area.width / 2)
-                            .max(30)
-                            .min(terminal_area.width.saturating_sub(4));
-                        (1u16, y, pw, ic)
-                    };
-
-                    let inner_x = px + 1;
-                    let inner_y = py + 1;
-                    if mouse.row >= inner_y
-                        && mouse.row < inner_y + item_count
-                        && mouse.column >= inner_x
-                        && mouse.column < inner_x + popup_w.saturating_sub(2)
-                    {
-                        let clicked = (mouse.row - inner_y) as usize;
-                        let value = filtered.get(clicked).map(|(_, item)| item.value.clone());
-                        let is_dbl = self.is_double_click(mouse.row, mouse.column);
-
-                        if let Some(p) = self.popup.as_mut() {
-                            p.selected = clicked;
-                        }
-                        if is_dbl {
-                            if let Some(value) = value {
-                                if is_model {
-                                    self.popup = None;
-                                    self.select_model(&value).await;
-                                } else {
-                                    self.popup = None;
-                                    self.orchestrator.input.clear();
-                                    self.orchestrator.cursor_pos = 0;
-                                    self.handle_slash_command(&format!("/{}", value)).await;
-                                }
-                            }
-                        }
-                        return;
-                    }
-
-                    self.popup = None;
-                    return;
-                }
-            }
-        }
-
-        //
-        // Confirm dialog mouse handling.
-        //
-        if self.confirm.is_some() {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                let msg_len = self.confirm.as_ref().map(|c| c.message.len()).unwrap_or(20);
-                let width = (msg_len as u16 + 6).min(h.saturating_sub(4)).max(30);
-                let height = 5u16;
-                let px = (terminal_area.width.saturating_sub(width)) / 2;
-                let py = (terminal_area.height.saturating_sub(height)) / 2;
-                let inner_y = py + 1;
-                let inner_x = px + 1;
-
-                //
-                // The confirm dialog has: line 0 = message, line 1 = blank,
-                // line 2 = " y yes  n no" (or "press any key" for Info).
-                //
-                let is_info = self
-                    .confirm
-                    .as_ref()
-                    .is_some_and(|c| matches!(c.action, ConfirmKind::Info));
-
-                if mouse.row == inner_y + 2 {
-                    if is_info {
-                        self.confirm = None;
-                    } else {
-                        let rel = mouse.column.saturating_sub(inner_x) as usize;
-                        if rel >= 1 && rel < 7 {
-                            // "y yes" region — confirm
-                            let confirm = self.confirm.take().unwrap();
-                            self.execute_confirm(confirm).await;
-                        } else if rel >= 8 {
-                            // "n no" region — cancel
-                            self.confirm = None;
-                        }
-                    }
-                } else if mouse.row < py
-                    || mouse.row >= py + height
-                    || mouse.column < px
-                    || mouse.column >= px + width
-                {
-                    self.confirm = None;
-                }
-            }
-            return;
-        }
-
-        //
-        // RunOptions popup mouse handling.
-        //
-        if self.run_options.is_some() {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                let opts_chunks = Layout::vertical([
-                    Constraint::Length(2),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                ])
-                .split(content_area);
-                let opts_inner = Rect {
-                    x: opts_chunks[1].x + 2,
-                    width: opts_chunks[1].width.saturating_sub(4),
-                    ..opts_chunks[1]
-                };
-                let hints_area = opts_chunks[2];
-
-                if let Some(ref opts) = self.run_options {
-                    let rel_row = mouse.row.saturating_sub(opts_inner.y) as usize;
-                    let node_count = opts.nodes.len();
-                    let agent_count = opts.agents.len();
-                    let is_chain = opts.is_chain;
-
-                    let nodes_start = 1;
-                    let nodes_end = nodes_start + node_count;
-                    let agents_start = nodes_end + 2;
-                    let agents_end = agents_start + agent_count;
-                    let yolo_row = agents_end + 1;
-
-                    if rel_row >= nodes_start && rel_row < nodes_end {
-                        self.toggle_run_option(0, rel_row - nodes_start);
-                    } else if rel_row >= agents_start && rel_row < agents_end {
-                        self.toggle_run_option(1, rel_row - agents_start);
-                    } else if !is_chain && rel_row == yolo_row {
-                        self.toggle_run_option(2, 0);
-                    }
-                }
-
-                //
-                // Hint bar clicks: "^r run  esc cancel"
-                //
-                if mouse.row == hints_area.y {
-                    let rel = mouse.column.saturating_sub(hints_area.x) as usize;
-                    // "  ↑↓ navigate  enter toggle  tab section  ^r run  esc cancel"
-                    //   0             15            27           39 42   48  52
-                    if rel >= 39 && rel < 47 {
-                        if let Some(opts) = self.run_options.take() {
-                            self.execute_run_options(opts).await;
-                        }
-                    } else if rel >= 48 {
-                        self.run_options = None;
-                    }
-                }
-            }
-            return;
-        }
-
-        //
-        // NewOpForm popup mouse handling.
-        //
-        if self.new_op_form.is_some() {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                if let Some(ref mut form) = self.new_op_form {
-                    let chunks = Layout::vertical([
-                        Constraint::Length(2),
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                    ])
-                    .split(content_area);
-                    let form_inner = Rect {
-                        x: chunks[1].x + 2,
-                        width: chunks[1].width.saturating_sub(4),
-                        ..chunks[1]
-                    };
-
-                    let rel_row = mouse.row.saturating_sub(form_inner.y) as usize;
-
-                    //
-                    // Row layout (visual): 0=Mode, 1=blank, 2=Name, 3=ShortName,
-                    // 4=Category, 5=Description, 6=Iterations(agent only), 7=Timeout,
-                    // 8=blank, 9=YOLO, 10+=Prompt area
-                    //
-                    // Map visual row to field index.
-                    //
-                    let is_agent = form.mode == 1;
-                    let field = match rel_row {
-                        0 => Some(0),                                         // Mode
-                        2 => Some(1),                                         // Name
-                        3 => Some(2),                                         // Short Name
-                        4 => Some(3),                                         // Category
-                        5 => Some(4),                                         // Description
-                        6 if is_agent => Some(5),                             // Iterations
-                        6 if !is_agent => Some(6), // Timeout (shifts up when no iterations)
-                        7 if is_agent => Some(6),  // Timeout
-                        r if r == (if is_agent { 9 } else { 8 }) => Some(7), // YOLO
-                        r if r >= (if is_agent { 10 } else { 9 }) => Some(8), // Prompt
-                        _ => None,
-                    };
-
-                    if let Some(idx) = field {
-                        form.focused_field = idx;
-                        Self::toggle_new_op_field(form);
-                    }
-                }
-            }
-            return;
-        }
-
-        //
-        // ChainForm popup mouse handling.
-        //
-        if self.chain_form.is_some() {
-            self.handle_chain_form_mouse(mouse).await;
-            return;
-        }
-
-        //
-        // TriggerForm popup mouse handling.
-        //
-        if self.trigger_form.is_some() {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                let chunks = Layout::vertical([
-                    Constraint::Length(2),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                ])
-                .split(content_area);
-                let form_inner = Rect {
-                    x: chunks[1].x + 2,
-                    width: chunks[1].width.saturating_sub(4),
-                    ..chunks[1]
-                };
-                let hints_area = chunks[2];
-
-                //
-                // Hint bar clicks: " ^s save  esc cancel ".
-                //
-                if mouse.row == hints_area.y {
-                    let rel = mouse.column.saturating_sub(hints_area.x) as usize;
-                    if rel < 12 {
-                        self.submit_trigger_form().await;
-                    } else {
-                        self.trigger_form = None;
-                    }
-                    return;
-                }
-
-                //
-                // Body clicks: map visual row to a form section + cursor
-                // using the layout the renderer produces in
-                // ui::popup::render_trigger_form.
-                //
-                let rel_row = mouse.row.saturating_sub(form_inner.y) as i32;
-                if rel_row < 0 {
-                    return;
-                }
-                let visual = rel_row as usize;
-                if let Some(form) = self.trigger_form.as_mut() {
-                    let sections = crate::ui::popup::trigger_form_section_rows(form);
-                    for (row, section, cursor) in sections {
-                        if row == visual {
-                            form.focused_section = section;
-                            form.cursor = cursor;
-                            Self::toggle_trigger_form_selection(form);
-                            return;
-                        }
-                    }
-                }
-            }
-            return;
-        }
-
-        //
-        // Status bar clicks. Reconstruct the exact rendered text (kept
-        // in sync with crate::ui::status_bar::render) so each hit-box
-        // lines up with the label on screen.
-        //
-        if mouse.row == status_area.y {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                let col = mouse.column;
-                let node_count = self.nodes.nodes.len();
-                let node_text = if node_count == 1 {
-                    "1 node".to_string()
-                } else {
-                    format!("{} nodes", node_count)
-                };
-                let session_count = self.nodes.sessions.len();
-
-                //
-                // Reconstruct the rendered text exactly as status_bar.rs
-                // writes it. Leading " " + node_text + " " + optional
-                // session segment + separators + labels.
-                //
-                let mut status_text = format!(" {} ", node_text);
-                if session_count > 0 {
-                    status_text.push_str(&format!(" \u{00b7} {} sessions ", session_count));
-                }
-                status_text.push_str(" \u{00b7} ");
-                let labels: [(&str, Window); 6] = [
-                    ("^o orchestrator", Window::Orchestrator),
-                    ("^l nodes", Window::Nodes),
-                    ("^p ops", Window::Operations),
-                    ("^i intercept", Window::Intercept),
-                    ("^g logs", Window::LogQuery),
-                    ("^s settings", Window::Settings),
-                ];
-                let mut label_positions: Vec<(Window, usize, usize)> = Vec::new();
-                for (i, (lbl, win)) in labels.iter().enumerate() {
-                    let start = status_text.chars().count();
-                    status_text.push_str(lbl);
-                    label_positions.push((*win, start, start + lbl.chars().count()));
-                    if i + 1 < labels.len() {
-                        status_text.push_str("  ");
-                    }
-                }
-                status_text.push_str(" \u{00b7} ");
-                let quit_start = status_text.chars().count();
-                status_text.push_str("^q quit");
-                let quit_end = status_text.chars().count();
-
-                //
-                // Column -> character index within status_area.
-                //
-                let rel = col.saturating_sub(status_area.x) as usize;
-
-                for (win, s, e) in &label_positions {
-                    if rel >= *s && rel < *e {
-                        self.active_window = *win;
-                        match *win {
-                            Window::Nodes => self.refresh_node_sessions(),
-                            Window::Operations => self.refresh_operations(),
-                            Window::Intercept => self.enter_intercept().await,
-                            _ => {}
-                        }
-                        return;
-                    }
-                }
-                if rel >= quit_start && rel < quit_end {
-                    self.should_quit = true;
-                    return;
-                }
-                return;
-            }
-        }
-
-        //
-        // Operations window mouse handling.
-        //
-        if self.active_window == Window::Operations {
-            self.handle_operations_mouse(mouse, content_area).await;
-            return;
-        }
-
-        //
-        // Intercept window mouse handling (tab click, pane resize, row click).
-        //
-        if self.active_window == Window::Intercept {
-            self.handle_intercept_mouse(mouse, content_area).await;
-            return;
-        }
-
-        //
-        // Log Query mouse handling (pane focus, schema close).
-        //
-        if self.active_window == Window::LogQuery {
-            self.handle_log_query_mouse(mouse, content_area).await;
-            return;
-        }
-
-        //
-        // Nodes window mouse handling.
-        //
-        if self.active_window == Window::Nodes {
-            self.handle_nodes_mouse(mouse, content_area).await;
-            return;
-        }
-
-        //
-        // Settings window mouse handling.
-        //
-        if self.active_window == Window::Settings {
-            self.handle_settings_mouse(mouse, content_area, terminal_area)
-                .await;
-            return;
-        }
-
-        //
-        // Orchestrator window mouse handling.
-        //
-        if self.active_window == Window::Orchestrator {
-            self.handle_orchestrator_mouse(mouse, content_area).await;
-            return;
-        }
+        self.handle_hit_layer_mouse(mouse, content_area, terminal_area)
+            .await;
     }
 
     fn handle_state_update(&mut self, state: SystemState) {

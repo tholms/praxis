@@ -14,7 +14,8 @@ mod search_bar;
 use crate::app::App;
 use crate::app::intercept::{InterceptTab, body::BodyMode};
 use crate::ui::chrome;
-use crate::ui::common::short_id;
+use crate::ui::common::{short_id, table_data_start_titled};
+use crate::ui::hits::{split_border_rect, MouseAction, RowSelect, RowSelectKind};
 use crate::ui::theme::{ACCENT, BORDER_SUBTLE, DIM, MUTED, OK, STATUS_FAIL, STATUS_RUNNING, TEXT_BRIGHT, WARN};
 use common::InterceptStatus;
 use ratatui::Frame;
@@ -27,21 +28,87 @@ pub(super) fn body_lines(bytes: &[u8], mode: BodyMode) -> Vec<ratatui::text::Lin
     crate::app::intercept::body::render_body(bytes, mode)
 }
 
-pub fn tab_at_column(rel_col: u16, regions: &[(InterceptTab, u16, u16)]) -> Option<InterceptTab> {
-    for &(tab, start, end) in regions {
-        if rel_col >= start && rel_col < end {
-            return Some(tab);
-        }
+pub fn show_banner(app: &App) -> bool {
+    !app.intercept.any_intercept_active()
+        && (!app.nodes.nodes.is_empty() || !app.intercept.intercept_statuses.is_empty())
+}
+
+/// Chrome layout below the window header — shared by render and mouse hit-tests.
+pub struct InterceptChrome {
+    pub tabs: Rect,
+    pub body: Rect,
+}
+
+pub fn chrome_layout(area: Rect, show_banner: bool) -> InterceptChrome {
+    let mut constraints = vec![Constraint::Length(1)];
+    if show_banner {
+        constraints.push(Constraint::Length(1));
     }
-    None
+    constraints.extend([
+        Constraint::Length(1), // status strip
+        Constraint::Length(1), // tab header
+        Constraint::Length(1), // divider
+        Constraint::Min(1),    // tab body
+        Constraint::Length(1), // hints / status
+    ]);
+    let chunks = Layout::vertical(constraints).split(area);
+    let mut idx = 0usize;
+    if show_banner {
+        idx += 1; // banner (render-only)
+    }
+    idx += 1; // status strip (render-only)
+    let tabs = chunks[idx];
+    idx += 2; // divider + body
+    let body = chunks[idx];
+    InterceptChrome { tabs, body }
+}
+
+/// Filter bar + horizontal split used by Traffic and Matches tabs.
+pub struct FilterSplit {
+    pub filter: Rect,
+    pub left: Rect,
+    pub right: Rect,
+}
+
+pub fn filter_split(body: Rect, split_percent: u16) -> FilterSplit {
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(body);
+    let pct = split_percent.clamp(20, 80);
+    let split = Layout::horizontal([
+        Constraint::Percentage(pct),
+        Constraint::Percentage(100 - pct),
+    ])
+    .split(chunks[1]);
+    FilterSplit {
+        filter: chunks[0],
+        left: split[0],
+        right: split[1],
+    }
+}
+
+/// Filter bar + remaining body (Rules tab; no horizontal split).
+pub fn filter_and_table(body: Rect) -> (Rect, Rect) {
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(body);
+    (chunks[0], chunks[1])
+}
+
+/// Rules tab body: full width, or left pane when the form is split in.
+pub fn rules_list_area(body: Rect, split_form: bool) -> Rect {
+    if split_form {
+        Layout::horizontal([
+            Constraint::Percentage(42),
+            Constraint::Percentage(58),
+        ])
+        .split(body)[0]
+    } else {
+        body
+    }
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let show_banner = !app.intercept.any_intercept_active()
-        && (!app.nodes.nodes.is_empty() || !app.intercept.intercept_statuses.is_empty());
+    let banner = show_banner(app);
 
     let mut constraints = vec![Constraint::Length(1)];
-    if show_banner {
+    if banner {
         constraints.push(Constraint::Length(1));
     }
     constraints.extend([
@@ -54,7 +121,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let chunks = Layout::vertical(constraints).split(area);
     let mut idx = 0usize;
-    if show_banner {
+    if banner {
         render_banner(f, chunks[idx], app);
         idx += 1;
     }
@@ -76,6 +143,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             ])
             .split(content);
             rules::render(f, split[0], app);
+            register_rules_hits(app, content);
             form::render(f, split[1], rf, app);
         } else {
             form::render(f, content, rf, app);
@@ -85,12 +153,75 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 
     match app.intercept.tab {
-        InterceptTab::Traffic => log::render(f, content, app),
-        InterceptTab::Rules => rules::render(f, content, app),
-        InterceptTab::Matches => matches::render(f, content, app),
+        InterceptTab::Traffic => {
+            log::render(f, content, app);
+            register_traffic_hits(app, content);
+        }
+        InterceptTab::Rules => {
+            rules::render(f, content, app);
+            register_rules_hits(app, content);
+        }
+        InterceptTab::Matches => {
+            matches::render(f, content, app);
+            register_matches_hits(app, content);
+        }
     }
 
     render_hints(f, hints, app);
+}
+
+fn register_traffic_hits(app: &App, body: Rect) {
+    let panes = filter_split(body, app.intercept.log_split_percent);
+    app.hits_register(
+        split_border_rect(panes.left),
+        MouseAction::InterceptLogSplitDragStart {
+            outer_x: panes.filter.x,
+            outer_width: panes.filter.width,
+        },
+    );
+    app.hits_register(panes.right, MouseAction::InterceptLogDetailFocus);
+    app.hits_register(
+        panes.left,
+        MouseAction::SelectRow(RowSelect {
+            kind: RowSelectKind::InterceptLog,
+            table_area: panes.left,
+            data_start: table_data_start_titled(panes.left),
+        }),
+    );
+}
+
+fn register_matches_hits(app: &App, body: Rect) {
+    let panes = filter_split(body, app.intercept.match_split_percent);
+    app.hits_register(
+        split_border_rect(panes.left),
+        MouseAction::InterceptMatchSplitDragStart {
+            outer_x: panes.filter.x,
+            outer_width: panes.filter.width,
+        },
+    );
+    app.hits_register(panes.right, MouseAction::InterceptMatchDetailFocus);
+    app.hits_register(
+        panes.left,
+        MouseAction::SelectRow(RowSelect {
+            kind: RowSelectKind::InterceptMatch,
+            table_area: panes.left,
+            data_start: table_data_start_titled(panes.left),
+        }),
+    );
+}
+
+fn register_rules_hits(app: &App, body: Rect) {
+    let split_form = app.intercept.rule_form.is_some();
+    let list_body = rules_list_area(body, split_form);
+    let (_filter, table) = filter_and_table(list_body);
+    app.hits_register(
+        table,
+        MouseAction::SelectRow(RowSelect {
+            kind: RowSelectKind::InterceptRule,
+            table_area: table,
+            data_start: table_data_start_titled(table),
+        }),
+    );
 }
 
 fn render_banner(f: &mut Frame, area: Rect, app: &App) {
@@ -168,17 +299,18 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
         (InterceptTab::Matches, InterceptTab::Matches.label(), matches_count),
     ];
 
-    let mut regions: Vec<(InterceptTab, u16, u16)> = Vec::new();
     let mut x = 0u16;
     for (i, (tab, label, n)) in tab_specs.iter().enumerate() {
         let w = chrome::tab_width(label, Some(*n));
-        regions.push((*tab, x, x + w));
+        app.hits_register(
+            Rect::new(area.x.saturating_add(x), area.y, w, 1),
+            MouseAction::InterceptTab(*tab),
+        );
         x += w;
         if i + 1 < tab_specs.len() {
             x += chrome::tab_sep_width();
         }
     }
-    *app.intercept.tab_hit_regions.borrow_mut() = regions;
 
     let mut spans: Vec<Span> = Vec::new();
     for (i, (tab, label, n)) in tab_specs.iter().enumerate() {
