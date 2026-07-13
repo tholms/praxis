@@ -282,6 +282,9 @@ impl App {
                     self.open_run_target_popup();
                 }
             }
+            //
+            // Ctrl+Alt+N — new chain (Library). Hint shows as ^!n.
+            //
             KeyCode::Char('n')
                 if key
                     .modifiers
