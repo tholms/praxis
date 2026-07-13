@@ -1056,6 +1056,7 @@ impl App {
             .map(|s| s.is_streaming)
             .unwrap_or(false)
             || self.nodes.sessions.values().any(|s| s.is_waiting)
+            || (self.help.open && self.help.is_streaming)
     }
 
     fn has_live_execution_timers(&self) -> bool {

@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::app::help::{HelpMessage, HelpState};
+use crate::ui::common::spinner_char;
 use crate::ui::theme::{ACCENT, BG_PANEL, BORDER, DIM, ERROR, MUTED, TEXT, TEXT_BRIGHT};
 
 //
@@ -28,18 +29,39 @@ pub fn render(f: &mut Frame, help: &HelpState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    //
+    // The input grows to wrap long questions across multiple rows so text
+    // never runs off the edge. It is capped at MAX_INPUT_ROWS; beyond that it
+    // scrolls to keep the caret (always at the end while typing) in view. A
+    // one-row slack when wrapping absorbs word-wrap rounding so the caret line
+    // is not clipped.
+    //
+    let input_line = build_input_line(help);
+    let inner_width = inner.width.max(1);
+    let base_rows = (input_line.width() as u16).max(1).div_ceil(inner_width);
+    let est_rows = if base_rows > 1 { base_rows + 1 } else { 1 };
+    let input_rows = est_rows.clamp(1, MAX_INPUT_ROWS);
+    let input_scroll = est_rows.saturating_sub(input_rows);
+
     let rows = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(input_rows),
         Constraint::Length(1),
     ])
     .split(inner);
 
     render_conversation(f, rows[0], help);
-    render_input(f, rows[2], help);
+    f.render_widget(
+        Paragraph::new(input_line)
+            .wrap(Wrap { trim: false })
+            .scroll((input_scroll, 0)),
+        rows[2],
+    );
     render_footer(f, rows[3], help);
 }
+
+const MAX_INPUT_ROWS: u16 = 6;
 
 fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
     let mut lines: Vec<Line> = Vec::new();
@@ -90,10 +112,19 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
         }
     }
 
-    if help.is_streaming {
+    //
+    // While waiting for the first token, show the same animated spinner the
+    // orchestrator uses. Once assistant text starts arriving it streams in its
+    // place, matching the orchestrator's behaviour.
+    //
+    let awaiting_text = !matches!(
+        help.messages.last(),
+        Some(HelpMessage::Assistant(t)) if !t.trim().is_empty()
+    );
+    if help.is_streaming && awaiting_text {
         lines.push(Line::from(Span::styled(
-            "…",
-            Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+            format!("{} thinking", spinner_char()),
+            Style::default().fg(MUTED),
         )));
     }
 
@@ -119,10 +150,12 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
     f.render_widget(paragraph, area);
 }
 
-fn render_input(f: &mut Frame, area: Rect, help: &HelpState) {
-    //
-    // Render the input with a block cursor at the byte-offset caret position.
-    //
+//
+// Build the input as a single Line with a block cursor at the byte-offset
+// caret position. The caller renders it with wrapping so long input flows onto
+// additional rows; the caret span wraps along with the surrounding text.
+//
+fn build_input_line(help: &HelpState) -> Line<'static> {
     let (before, after) = help.input.split_at(help.cursor.min(help.input.len()));
     let mut spans = vec![
         Span::styled("> ", Style::default().fg(ACCENT)),
@@ -134,7 +167,9 @@ fn render_input(f: &mut Frame, area: Rect, help: &HelpState) {
         Some(c) => {
             spans.push(Span::styled(
                 c.to_string(),
-                Style::default().fg(TEXT_BRIGHT).add_modifier(Modifier::REVERSED),
+                Style::default()
+                    .fg(TEXT_BRIGHT)
+                    .add_modifier(Modifier::REVERSED),
             ));
             spans.push(Span::styled(
                 chars.as_str().to_string(),
@@ -142,14 +177,11 @@ fn render_input(f: &mut Frame, area: Rect, help: &HelpState) {
             ));
         }
         None => {
-            spans.push(Span::styled(
-                "\u{2588}",
-                Style::default().fg(ACCENT),
-            ));
+            spans.push(Span::styled("\u{2588}", Style::default().fg(ACCENT)));
         }
     }
 
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    Line::from(spans)
 }
 
 fn render_footer(f: &mut Frame, area: Rect, help: &HelpState) {
