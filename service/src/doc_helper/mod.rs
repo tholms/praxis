@@ -152,6 +152,15 @@ impl DocHelperManager {
             let mut conversation_history =
                 build_messages(&prompt, &history, context.as_deref(), &tools);
 
+            common::log_info!(
+                "DocHelper request: model={}, prompt={:?}, history={}, context={}, msgs={}",
+                model,
+                common::truncate_str(&prompt, 80),
+                history.len(),
+                context.is_some(),
+                conversation_history.len()
+            );
+
             let mut errored = false;
             let mut iterations = 0usize;
 
@@ -245,6 +254,13 @@ impl DocHelperManager {
                     }
                 }
 
+                common::log_info!(
+                    "DocHelper iter {}: response={} chars, held_back={}",
+                    iterations,
+                    full_response.len(),
+                    held_back
+                );
+
                 //
                 // Extract any tool calls the model emitted.
                 //
@@ -259,6 +275,15 @@ impl DocHelperManager {
                     let result = execute_doc_tool(&tool_name, &tool_args);
                     tool_results.push((tool_name, result));
                     response_text = remaining_text;
+                }
+
+                if !tool_results.is_empty() {
+                    common::log_info!(
+                        "DocHelper iter {}: {} tool call(s): {:?}",
+                        iterations,
+                        tool_results.len(),
+                        tool_results.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+                    );
                 }
 
                 if !tool_results.is_empty() && iterations < MAX_TOOL_ITERATIONS {
