@@ -615,4 +615,16 @@ mod tests {
                 .contains("[Question]\nHow do I use this?")
         );
     }
+
+    #[test]
+    fn help_prompt_requires_an_initial_lookup_acknowledgement() {
+        let messages = build_messages("How do I configure a node?", &[], None, &doc_tools());
+
+        assert!(
+            messages[0]
+                .text()
+                .contains("Documentation lookup acknowledgement")
+        );
+        assert!(messages[0].text().contains("never\nomit it"));
+    }
 }

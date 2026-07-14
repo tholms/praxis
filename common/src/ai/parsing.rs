@@ -305,7 +305,8 @@ This will help me understand."#;
 
     #[test]
     fn test_parse_tool_call_with_direct_arguments() {
-        let text = r#"{"tool": "search_docs", "query": "node not showing in intercept window"}"#;
+        let text = r#"I'll check the Interception documentation for that.
+{"tool": "search_docs", "query": "node not showing in intercept window"}"#;
 
         let result = parse_manual_tool_call(text);
         assert!(result.is_some());
@@ -313,7 +314,10 @@ This will help me understand."#;
         let (tool_name, args, remaining) = result.unwrap();
         assert_eq!(tool_name, "search_docs");
         assert_eq!(args["query"], "node not showing in intercept window");
-        assert!(remaining.is_empty());
+        assert_eq!(
+            remaining,
+            "I'll check the Interception documentation for that."
+        );
     }
 
     #[test]
