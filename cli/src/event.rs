@@ -104,6 +104,7 @@ pub enum AppEvent {
 //
 pub enum DocHelperEvent {
     Chunk { request_id: String, delta: String },
+    FollowUp { request_id: String },
     Complete { request_id: String },
     Error { request_id: String, message: String },
 }

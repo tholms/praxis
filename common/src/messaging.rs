@@ -2149,12 +2149,17 @@ pub enum ClientDirectMessage {
     //
     // Documentation helper agent streaming responses, correlated by
     // `request_id`. `DocHelperChunk` carries an incremental text delta;
-    // `DocHelperComplete` signals the turn finished (naturally or via
-    // cancellation); `DocHelperError` reports a failure.
+    // `DocHelperFollowUp` indicates the helper is consulting documentation
+    // before producing a detailed continuation; `DocHelperComplete` signals
+    // the turn finished (naturally or via cancellation); `DocHelperError`
+    // reports a failure.
     //
     DocHelperChunk {
         request_id: String,
         delta: String,
+    },
+    DocHelperFollowUp {
+        request_id: String,
     },
     DocHelperComplete {
         request_id: String,

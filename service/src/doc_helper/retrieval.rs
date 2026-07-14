@@ -20,21 +20,6 @@ pub struct DocChunk {
     pub body: String,
 }
 
-impl DocChunk {
-    //
-    // Render the chunk for inclusion in the system prompt, tagged with its
-    // source so the model can cite the page.
-    //
-    fn render(&self) -> String {
-        format!(
-            "### {} — {}\n{}",
-            self.path.trim_end_matches(".md"),
-            self.heading,
-            self.body.trim()
-        )
-    }
-}
-
 //
 // Parse all embedded docs into heading-level chunks, once, on first use.
 //
@@ -108,22 +93,6 @@ fn page_title(path: &str) -> String {
 }
 
 //
-// A compact table of contents (one line per page) so the model always knows
-// the full documentation surface even when a page was not retrieved.
-//
-
-pub fn table_of_contents() -> String {
-    let mut pages: Vec<&str> = EMBEDDED_DOCS.iter().map(|(p, _)| *p).collect();
-    pages.sort_unstable();
-    pages.dedup();
-    pages
-        .iter()
-        .map(|p| format!("- {}", p.trim_end_matches(".md")))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-//
 // Tokenize into lowercase alphanumeric terms, dropping very short tokens and a
 // small set of common stopwords that carry no retrieval signal.
 //
@@ -143,67 +112,10 @@ fn tokenize(text: &str) -> Vec<String> {
 
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "are", "how", "does", "did", "can", "you", "your", "with", "what", "when",
-    "where", "why", "who", "that", "this", "from", "into", "was", "were", "will", "would", "should",
-    "there", "here", "have", "has", "had", "not", "but", "all", "any", "get", "got", "use", "used",
-    "using", "about", "which", "them", "they", "its",
+    "where", "why", "who", "that", "this", "from", "into", "was", "were", "will", "would",
+    "should", "there", "here", "have", "has", "had", "not", "but", "all", "any", "get", "got",
+    "use", "used", "using", "about", "which", "them", "they", "its",
 ];
-
-//
-// Rank chunks by keyword overlap with the query (and, lightly, any screen
-// context) and return the top `top_n` rendered chunks joined together. This is
-// a deliberately simple lexical ranker — no embeddings or vector store — which
-// is sufficient given the small documentation corpus.
-//
-
-pub fn retrieve(query: &str, context: Option<&str>, top_n: usize, char_budget: usize) -> String {
-    let mut query_terms = tokenize(query);
-
-    //
-    // Context terms are included at reduced weight: they help disambiguate
-    // ("what is this screen") without letting a large context block swamp the
-    // operator's actual question.
-    //
-    if let Some(ctx) = context {
-        let mut ctx_terms = tokenize(ctx);
-        ctx_terms.truncate(24);
-        query_terms.extend(ctx_terms);
-    }
-
-    if query_terms.is_empty() {
-        //
-        // No usable query terms (e.g. an empty or all-stopword prompt): fall
-        // back to a stable prefix of the corpus so the model still has grounding.
-        //
-        return all_chunks()
-            .iter()
-            .take(top_n)
-            .map(DocChunk::render)
-            .collect::<Vec<_>>()
-            .join("\n\n");
-    }
-
-    let chunks = all_chunks();
-    let mut scored: Vec<(f32, &DocChunk)> = chunks
-        .iter()
-        .map(|chunk| (score_chunk(chunk, &query_terms), chunk))
-        .filter(|(score, _)| *score > 0.0)
-        .collect();
-
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut rendered = Vec::new();
-    let mut used = 0usize;
-    for (_, chunk) in scored.into_iter().take(top_n) {
-        let text = chunk.render();
-        if used + text.len() > char_budget && !rendered.is_empty() {
-            break;
-        }
-        used += text.len();
-        rendered.push(text);
-    }
-
-    rendered.join("\n\n")
-}
 
 //
 // Score a chunk against the query terms. Heading matches are weighted more
@@ -262,7 +174,12 @@ pub fn search(query: &str, top_n: usize) -> String {
 
     let mut out = String::new();
     for (_, chunk) in scored.into_iter().take(top_n) {
-        let snippet: String = chunk.body.split_whitespace().take(28).collect::<Vec<_>>().join(" ");
+        let snippet: String = chunk
+            .body
+            .split_whitespace()
+            .take(28)
+            .collect::<Vec<_>>()
+            .join(" ");
         out.push_str(&format!(
             "- {} \u{2014} {}\n  {}\n",
             chunk.path.trim_end_matches(".md"),

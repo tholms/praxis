@@ -18,14 +18,6 @@ pub const LLM_FEATURE_SEMANTIC_OPS: &str = "llm_feature_semantic_ops";
 pub const LLM_FEATURE_ORCHESTRATOR: &str = "llm_feature_orchestrator";
 pub const LLM_FEATURE_DOC_HELPER: &str = "llm_feature_doc_helper";
 
-//
-// When true, the documentation helper includes structured screen context by
-// default without prompting. Only low-sensitivity structured context is ever
-// auto-included; sensitive surfaces (terminal output, intercept bodies, loot)
-// are never swept in automatically regardless of this setting.
-//
-pub const DOC_HELPER_AUTO_CONTEXT: &str = "doc_helper_auto_context";
-
 /// Praxis agent configuration keys.
 pub const PRAXIS_AGENT_SETTINGS: &str = "praxis_agent_settings";
 pub const PRAXIS_AGENT_SYSTEM_PROMPT: &str = "praxis_agent_system_prompt";
@@ -66,7 +58,6 @@ pub const KNOWN_CONFIG_KEYS: &[&str] = &[
     LLM_FEATURE_SEMANTIC_OPS,
     LLM_FEATURE_ORCHESTRATOR,
     LLM_FEATURE_DOC_HELPER,
-    DOC_HELPER_AUTO_CONTEXT,
     PRAXIS_AGENT_SETTINGS,
     PRAXIS_AGENT_SYSTEM_PROMPT,
     APPLICATION_LOGS_ENABLED,
@@ -201,11 +192,6 @@ impl ServiceConfig {
     pub fn get_doc_helper_model_def(&self) -> Option<ModelDefinition> {
         self.get(LLM_FEATURE_DOC_HELPER)
             .and_then(|model_ref| self.find_model_definition(model_ref))
-    }
-
-    /// Whether the doc helper auto-includes structured screen context.
-    pub fn get_doc_helper_auto_context(&self) -> bool {
-        self.get_bool(DOC_HELPER_AUTO_CONTEXT, false)
     }
 
     /// Get Praxis agent settings from config.

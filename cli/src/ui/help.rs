@@ -93,13 +93,44 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
                 }
                 lines.push(Line::from(""));
             }
-            HelpMessage::Assistant(text) => {
-                for l in text.lines() {
-                    lines.push(Line::from(Span::styled(
-                        l.to_string(),
-                        Style::default().fg(TEXT),
-                    )));
+            HelpMessage::Assistant { text, is_follow_up } => {
+                lines.push(Line::from(Span::styled(
+                    if *is_follow_up {
+                        "Praxis Help · Details"
+                    } else {
+                        "Praxis Help"
+                    },
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )));
+                let mut in_code_block = false;
+                for line in text.lines() {
+                    if line.trim_start().starts_with("```") {
+                        in_code_block = !in_code_block;
+                        continue;
+                    }
+                    lines.push(if in_code_block {
+                        Line::from(Span::styled(
+                            format!("  {}", line),
+                            Style::default().fg(TEXT_BRIGHT),
+                        ))
+                    } else {
+                        render_markdown_line(line)
+                    });
                 }
+                lines.push(Line::from(""));
+            }
+            HelpMessage::FollowUp => {
+                let awaiting_details = help.is_streaming
+                    && matches!(help.messages.last(), Some(HelpMessage::FollowUp));
+                let label = if awaiting_details {
+                    format!(
+                        "{} checking the documentation for more detail",
+                        spinner_char()
+                    )
+                } else {
+                    "── Documentation details ──".to_string()
+                };
+                lines.push(Line::from(Span::styled(label, Style::default().fg(MUTED))));
                 lines.push(Line::from(""));
             }
             HelpMessage::Error(text) => {
@@ -109,19 +140,28 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
                 )));
                 lines.push(Line::from(""));
             }
+            HelpMessage::Status(text) => {
+                lines.push(Line::from(Span::styled(
+                    text.to_string(),
+                    Style::default().fg(MUTED),
+                )));
+                lines.push(Line::from(""));
+            }
         }
     }
 
     //
     // While waiting for the first token, show the same animated spinner the
-    // orchestrator uses. Once assistant text starts arriving it streams in its
-    // place, matching the orchestrator's behaviour.
+    // orchestrator uses. A documentation lookup after an initial answer uses
+    // the persistent FollowUp divider above instead.
     //
-    let awaiting_text = !matches!(
-        help.messages.last(),
-        Some(HelpMessage::Assistant(t)) if !t.trim().is_empty()
+    let awaiting_initial_text = !help.messages.iter().any(
+        |message| matches!(message, HelpMessage::Assistant { text, .. } if !text.trim().is_empty()),
     );
-    if help.is_streaming && awaiting_text {
+    if help.is_streaming
+        && awaiting_initial_text
+        && !matches!(help.messages.last(), Some(HelpMessage::FollowUp))
+    {
         lines.push(Line::from(Span::styled(
             format!("{} thinking", spinner_char()),
             Style::default().fg(MUTED),
@@ -148,6 +188,80 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
         .wrap(Wrap { trim: false })
         .scroll((top, 0));
     f.render_widget(paragraph, area);
+}
+
+fn render_markdown_line(line: &str) -> Line<'static> {
+    let trimmed = line.trim_start();
+    let heading_level = trimmed.chars().take_while(|c| *c == '#').count();
+
+    if heading_level > 0 && trimmed.as_bytes().get(heading_level) == Some(&b' ') {
+        let text = trimmed[heading_level + 1..].to_string();
+        return Line::from(markdown_spans(
+            &text,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let leading = line.len() - trimmed.len();
+    if let Some(item) = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+    {
+        let text = format!("{}• {}", &line[..leading], item);
+        return Line::from(markdown_spans(&text, Style::default().fg(TEXT)));
+    }
+
+    if let Some(quote) = trimmed.strip_prefix("> ") {
+        let text = format!("{}│ {}", &line[..leading], quote);
+        return Line::from(markdown_spans(&text, Style::default().fg(MUTED)));
+    }
+
+    Line::from(markdown_spans(line, Style::default().fg(TEXT)))
+}
+
+fn markdown_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    let mut bold = false;
+    let mut code = false;
+    let mut chars = text.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        if character == '*' && chars.peek() == Some(&'*') {
+            push_markdown_span(&mut spans, &mut buffer, base, bold, code);
+            chars.next();
+            bold = !bold;
+        } else if character == '`' {
+            push_markdown_span(&mut spans, &mut buffer, base, bold, code);
+            code = !code;
+        } else {
+            buffer.push(character);
+        }
+    }
+    push_markdown_span(&mut spans, &mut buffer, base, bold, code);
+
+    spans
+}
+
+fn push_markdown_span(
+    spans: &mut Vec<Span<'static>>,
+    buffer: &mut String,
+    base: Style,
+    bold: bool,
+    code: bool,
+) {
+    if buffer.is_empty() {
+        return;
+    }
+
+    let mut style = base;
+    if bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if code {
+        style = style.fg(ACCENT);
+    }
+    spans.push(Span::styled(std::mem::take(buffer), style));
 }
 
 //
@@ -205,9 +319,9 @@ fn render_footer(f: &mut Frame, area: Rect, help: &HelpState) {
     let hints = if help.is_streaming {
         "Ctrl+C stop · Esc close"
     } else if help.context.is_some() {
-        "Enter send · Ctrl+T toggle context · Esc close"
+        "Enter send · Ctrl+T context · Ctrl+L clear · Esc close"
     } else {
-        "Enter send · Esc close"
+        "Enter send · Ctrl+L clear · Esc close"
     };
     spans.push(Span::styled(hints, Style::default().fg(DIM)));
 

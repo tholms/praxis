@@ -7,8 +7,8 @@ concepts — without leaving the app.
 
 It is deliberately separate from the [Orchestrator](./orchestrator.md): the
 Orchestrator is an operator that plans and executes campaigns by driving nodes
-and agents, whereas the Help Assistant is a read-only guide. It has no tools and
-never takes actions on your behalf.
+and agents, whereas the Help Assistant is a read-only guide. It can only search
+the documentation bundled with Praxis and never takes actions on your behalf.
 
 ## Opening the assistant
 
@@ -23,11 +23,22 @@ doing.
 | `Enter` | Send the current question |
 | `Ctrl+T` | Toggle inclusion of screen context (when available) |
 | `Ctrl+C` | Stop a streaming response (keeps the overlay open) |
+| `Ctrl+L` | Clear the conversation |
 | `Esc` | Close the assistant (cancels any in-flight response) |
 | `Up` / `Down` / `PageUp` / `PageDown` | Scroll the conversation |
+| Mouse wheel | Scroll the conversation |
 
-Responses stream in as they are generated. Closing the overlay while a response
-is streaming cancels it, so nothing keeps running in the background.
+Every question is sent to the model assigned to the Documentation Helper. The
+model decides whether the available conversation and screen context are enough
+to answer directly or whether it should search and read the bundled
+documentation. The overlay shows a neutral thinking indicator while the model
+is deciding; when it calls a documentation tool, it instead shows a
+documentation-specific divider and spinner before the final answer. Tool-turn
+narration is limited to the first acknowledgement, so a multi-step lookup has
+a helpful initial response without several repeated partial replies. The terminal renders
+the common Markdown used in answers: headings, bullet lists, bold text, inline
+code, block quotes, and fenced code blocks. Closing the overlay while a
+response is streaming cancels it, so nothing keeps running in the background.
 
 ## Screen context
 
@@ -54,7 +65,6 @@ Relevant service configuration keys:
 | Key | Description |
 | --- | --- |
 | `llm_feature_doc_helper` | Model definition assigned to the Help Assistant. Falls back to `llm_feature_orchestrator` when unset. |
-| `doc_helper_auto_context` | When `true`, structured screen context is included by default without prompting. Sensitive surfaces are excluded regardless of this setting. |
 
 The documentation corpus is embedded into the service at build time, so the
 assistant's answers reflect the documentation shipped with your Praxis version

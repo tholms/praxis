@@ -30,9 +30,7 @@ use chrono::Utc;
 use common::{
     ChainTriggerInfo, InterceptRule, NodeState, OrchestratorPlan, REMOTE_NODE_KINDS, SystemState,
 };
-use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -2071,6 +2069,23 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: MouseEvent) {
+        //
+        // The Help overlay is modal. Do not let clicks or scrolling leak
+        // through to the screen underneath; the wheel scrolls its transcript.
+        //
+        if self.help.open {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.help.scroll = self.help.scroll.saturating_add(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.help.scroll = self.help.scroll.saturating_sub(3);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         //
         // Terminal mode: scroll only (no HitLayer targets while in PTY view).
         //

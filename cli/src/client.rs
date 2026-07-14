@@ -440,6 +440,11 @@ impl Client {
                     let _ = tx.send(crate::event::DocHelperEvent::Chunk { request_id, delta });
                 }
             }
+            ClientDirectMessage::DocHelperFollowUp { request_id } => {
+                if let Some(ref tx) = state.doc_helper_tx {
+                    let _ = tx.send(crate::event::DocHelperEvent::FollowUp { request_id });
+                }
+            }
             ClientDirectMessage::DocHelperComplete { request_id } => {
                 if let Some(ref tx) = state.doc_helper_tx {
                     let _ = tx.send(crate::event::DocHelperEvent::Complete { request_id });
@@ -983,9 +988,8 @@ impl Client {
     }
 
     //
-    // Fire-and-forget a documentation-helper prompt. Responses arrive
-    // asynchronously via the doc-helper subscription, correlated by
-    // `request_id`.
+    // Submit a documentation-helper prompt. Responses arrive asynchronously
+    // via the doc-helper subscription, correlated by `request_id`.
     //
     pub async fn send_doc_helper_prompt(
         &self,
@@ -993,25 +997,23 @@ impl Client {
         prompt: String,
         history: Vec<(String, String)>,
         context: Option<String>,
-    ) {
-        let _ = self
-            .publish_signal(ClientSignalMessage::DocHelperPrompt {
-                client_id: self.client_id.clone(),
-                request_id,
-                prompt,
-                history,
-                context,
-            })
-            .await;
+    ) -> Result<()> {
+        self.publish_signal(ClientSignalMessage::DocHelperPrompt {
+            client_id: self.client_id.clone(),
+            request_id,
+            prompt,
+            history,
+            context,
+        })
+        .await
     }
 
-    pub async fn send_doc_helper_cancel(&self, request_id: String) {
-        let _ = self
-            .publish_signal(ClientSignalMessage::DocHelperCancel {
-                client_id: self.client_id.clone(),
-                request_id,
-            })
-            .await;
+    pub async fn send_doc_helper_cancel(&self, request_id: String) -> Result<()> {
+        self.publish_signal(ClientSignalMessage::DocHelperCancel {
+            client_id: self.client_id.clone(),
+            request_id,
+        })
+        .await
     }
 
     //
