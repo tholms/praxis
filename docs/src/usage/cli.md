@@ -189,6 +189,9 @@ total). See [Log Query](./log-query.md) for the full query reference.
 - Multi-line editor with basic KQL keyword highlighting
 - `Ctrl+R` runs the query (`Ctrl+Enter` is kept as an alias); the spinner
   in the hint line indicates in-flight execution
+- `Ctrl+E` opens the current query in `$VISUAL` / `$EDITOR` (falls back
+  to `vi` / `notepad`). Save and quit cleanly to replace the in-app
+  editor buffer with the saved text
 - `Tab` opens a context-aware autocomplete popup (tables at start of
   query, operators after `|`, columns inside `where` / `project` /
   `sort`, functions & keywords inline). `↑`/`↓` navigate, `Enter`
