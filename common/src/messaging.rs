@@ -1652,6 +1652,25 @@ pub enum ClientSignalMessage {
     },
 
     //
+    // Documentation helper agent — a lightweight, doc-seeded conversational
+    // assistant, independent of the orchestrator. Each prompt carries its own
+    // `request_id` for correlation; responses stream back as the
+    // `DocHelper*` direct messages. `context` is optional structured screen
+    // context captured from the active TUI window.
+    //
+    DocHelperPrompt {
+        client_id: String,
+        request_id: String,
+        prompt: String,
+        history: Vec<(String, String)>,
+        context: Option<String>,
+    },
+    DocHelperCancel {
+        client_id: String,
+        request_id: String,
+    },
+
+    //
     // Semantic operations.
     //
     /// Run a semantic operation by name - service looks up the definition
@@ -2126,6 +2145,29 @@ pub enum ClientDirectMessage {
     TerminalOutput(TerminalOutput),
     /// Streaming session update from an ACP agent transaction
     SessionUpdate(SessionUpdate),
+
+    //
+    // Documentation helper agent streaming responses, correlated by
+    // `request_id`. `DocHelperChunk` carries an incremental text delta;
+    // `DocHelperFollowUp` indicates the helper is consulting documentation
+    // before producing a detailed continuation; `DocHelperComplete` signals
+    // the turn finished (naturally or via cancellation); `DocHelperError`
+    // reports a failure.
+    //
+    DocHelperChunk {
+        request_id: String,
+        delta: String,
+    },
+    DocHelperFollowUp {
+        request_id: String,
+    },
+    DocHelperComplete {
+        request_id: String,
+    },
+    DocHelperError {
+        request_id: String,
+        message: String,
+    },
 
     //
     // Semantic operations responses.
