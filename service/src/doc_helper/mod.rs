@@ -9,8 +9,8 @@ use tokio::sync::RwLock;
 
 use common::ClientDirectMessage;
 use common::ai::{
-    ChatCompletionRequest, Message, Provider, Tool, create_ai_client, get_system_prompt_with_tools,
-    parse_manual_tool_call,
+    ChatCompletionRequest, Message, Provider, Tool, Usage, create_ai_client,
+    get_system_prompt_with_tools, parse_manual_tool_call_lenient, strip_incomplete_tool_call,
 };
 use serde_json::{Value, json};
 
@@ -95,6 +95,7 @@ impl DocHelperManager {
             Some(def) => def,
             None => {
                 drop(config);
+                common::log_warn!("DocHelper request {}: no model configured", request_id);
                 self.send_error(
                     publish_channel,
                     &client_id,
@@ -110,6 +111,11 @@ impl DocHelperManager {
         let provider_needs_key = !provider.api_key_optional();
         if model_def.api_key.is_empty() && provider_needs_key {
             drop(config);
+            common::log_warn!(
+                "DocHelper request {}: no API key configured for model {}",
+                request_id,
+                model_def.model
+            );
             self.send_error(
                 publish_channel,
                 &client_id,
@@ -133,6 +139,11 @@ impl DocHelperManager {
         ) {
             Ok(c) => c,
             Err(e) => {
+                common::log_error!(
+                    "DocHelper request {}: failed to create AI client: {}",
+                    request_id,
+                    e
+                );
                 self.send_error(
                     publish_channel,
                     &client_id,
@@ -160,9 +171,10 @@ impl DocHelperManager {
                 build_messages(&prompt, &history, context.as_deref(), &tools);
 
             common::log_info!(
-                "DocHelper request: model={}, prompt={:?}, history={}, context={}, msgs={}",
+                "DocHelper request {}: model={}, prompt_chars={}, history={}, context={}, msgs={}",
+                request_id,
                 model,
-                common::truncate_str(&prompt, 80),
+                prompt.len(),
                 history.len(),
                 context.is_some(),
                 conversation_history.len()
@@ -171,6 +183,7 @@ impl DocHelperManager {
             let mut errored = false;
             let mut iterations = 0usize;
             let mut sent_tool_preamble = false;
+            let mut total_usage: Option<Usage> = None;
 
             macro_rules! send_chunk {
                 ($text:expr) => {{
@@ -211,6 +224,7 @@ impl DocHelperManager {
                 let mut stream = client.chat_completion_stream(request);
                 let mut full_response = String::new();
                 let mut finish_reason = None;
+                let mut iteration_usage: Option<Usage> = None;
 
                 loop {
                     let result = tokio::select! {
@@ -228,12 +242,20 @@ impl DocHelperManager {
                             if let Some(reason) = delta.finish_reason.clone() {
                                 finish_reason = Some(reason);
                             }
+                            if let Some(usage) = delta.usage.clone() {
+                                iteration_usage = Some(usage);
+                            }
                             if delta.content.is_empty() {
                                 continue;
                             }
                             full_response.push_str(&delta.content);
                         }
                         Err(e) => {
+                            common::log_error!(
+                                "DocHelper request {}: AI request failed: {}",
+                                request_id,
+                                e
+                            );
                             let _ = send_to_client(
                                 &publish_channel,
                                 &client_id,
@@ -249,11 +271,23 @@ impl DocHelperManager {
                     }
                 }
 
+                if let Some(usage) = &iteration_usage {
+                    total_usage = Some(match total_usage {
+                        Some(t) => Usage {
+                            prompt_tokens: t.prompt_tokens + usage.prompt_tokens,
+                            completion_tokens: t.completion_tokens + usage.completion_tokens,
+                            total_tokens: t.total_tokens + usage.total_tokens,
+                        },
+                        None => usage.clone(),
+                    });
+                }
+
                 common::log_info!(
-                    "DocHelper iter {}: response={} chars, finish_reason={:?}",
+                    "DocHelper iter {}: response={} chars, finish_reason={:?}, usage={:?}",
                     iterations,
                     full_response.len(),
-                    finish_reason
+                    finish_reason,
+                    iteration_usage
                 );
 
                 if full_response.trim().is_empty() {
@@ -262,6 +296,11 @@ impl DocHelperManager {
                     } else {
                         "The model returned an empty response. Please try again."
                     };
+                    common::log_warn!(
+                        "DocHelper request {}: empty response (finish_reason={:?})",
+                        request_id,
+                        finish_reason
+                    );
                     let _ = send_to_client(
                         &publish_channel,
                         &client_id,
@@ -281,7 +320,7 @@ impl DocHelperManager {
                 let mut response_text = full_response.clone();
                 let mut tool_results: Vec<(String, String)> = Vec::new();
                 while let Some((tool_name, tool_args, remaining_text)) =
-                    parse_manual_tool_call(&response_text)
+                    parse_manual_tool_call_lenient(&response_text)
                 {
                     if cancel.load(Ordering::SeqCst) {
                         break 'outer;
@@ -337,9 +376,21 @@ impl DocHelperManager {
                 //
                 // Final answers are shown after the documentation-progress
                 // indicator. Only the first tool-turn acknowledgement is made
-                // visible above it.
+                // visible above it. If the model was cut off by the output
+                // limit, a dangling unparsed tool-call fragment must never
+                // reach the operator as raw JSON.
                 //
-                send_chunk!(&full_response);
+                let mut display_text = full_response;
+                if is_truncated(finish_reason.as_deref()) {
+                    let (cleaned, _) = strip_incomplete_tool_call(&display_text);
+                    display_text = cleaned;
+                    display_text.push_str(
+                        "\n\n_(This response was cut off at the model's length limit. Try a \
+                         narrower question, or raise the Documentation Helper's max tokens in \
+                         Settings.)_",
+                    );
+                }
+                send_chunk!(&display_text);
                 break;
             }
 
@@ -520,6 +571,20 @@ fn execute_doc_tool(name: &str, args: &Value) -> String {
 }
 
 //
+// Provider finish/stop reasons that indicate the response was cut off by
+// the output-token limit rather than completing naturally. Providers use
+// different casing and terms for the same outcome (OpenAI: "length",
+// Anthropic: "max_tokens", Gemini: "MAX_TOKENS").
+//
+
+fn is_truncated(finish_reason: Option<&str>) -> bool {
+    matches!(
+        finish_reason.map(|r| r.to_lowercase()).as_deref(),
+        Some("length") | Some("max_tokens")
+    )
+}
+
+//
 // Walk `i` back to the nearest char boundary at or below it, so streamed
 // slices never split a multi-byte character.
 //
@@ -588,12 +653,30 @@ mod tests {
 
     #[test]
     fn bounded_history_preserves_utf8_boundaries() {
-        let history = vec![("assistant".to_string(), "é".repeat(MAX_HISTORY_CHARS))];
+        //
+        // Prefixing one ASCII byte pushes the MAX_HISTORY_CHARS cut point
+        // into the middle of a 2-byte 'é', forcing floor_boundary's
+        // walk-back to actually run (an even budget lands exactly on a
+        // boundary for this repeated 2-byte input and would never exercise
+        // it otherwise).
+        //
+        let text = format!("a{}", "é".repeat(MAX_HISTORY_CHARS));
+        let history = vec![("assistant".to_string(), text)];
 
         let bounded = bounded_history(&history);
 
         assert!(std::str::from_utf8(bounded[0].1.as_bytes()).is_ok());
-        assert!(bounded[0].1.len() <= MAX_HISTORY_CHARS);
+        assert_eq!(bounded[0].1.len(), MAX_HISTORY_CHARS - 1);
+    }
+
+    #[test]
+    fn is_truncated_recognizes_provider_specific_values() {
+        assert!(is_truncated(Some("length")));
+        assert!(is_truncated(Some("max_tokens")));
+        assert!(is_truncated(Some("MAX_TOKENS")));
+        assert!(!is_truncated(Some("stop")));
+        assert!(!is_truncated(Some("refusal")));
+        assert!(!is_truncated(None));
     }
 
     #[test]
@@ -607,7 +690,7 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert!(messages[0].text().contains("search_docs"));
-        assert!(!messages[0].text().contains("Pre-selected excerpts"));
+        assert!(messages[0].text().contains("read_doc"));
         assert!(messages[1].text().contains("The Nodes window"));
         assert!(
             messages[1]
@@ -625,6 +708,13 @@ mod tests {
                 .text()
                 .contains("Documentation lookup acknowledgement")
         );
-        assert!(messages[0].text().contains("never\nomit it"));
+        assert!(
+            messages[0]
+                .text()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("so never omit it")
+        );
     }
 }

@@ -236,24 +236,53 @@ fn parse_sse_stream(
 
             let chunk: OpenAIStreamChunk = match serde_json::from_str(data) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    crate::log_warn!(
+                        "OpenAI stream: unparseable SSE line ({}): {}",
+                        e,
+                        crate::truncate_str(data, 200)
+                    );
+                    continue;
+                }
             };
 
-            if let Some(choice) = chunk.choices.first() {
-                let content = choice.delta.content.clone().unwrap_or_default();
-                let finish_reason = choice.finish_reason.clone();
+            //
+            // Some providers signal a mid-stream failure (context length,
+            // quota, an upstream 5xx) as an `{"error": ...}` envelope with
+            // an HTTP 200 status, rather than a failing status code. Surface
+            // it as a stream error instead of falling through silently.
+            //
+            if let Some(err) = chunk.error {
+                Err(anyhow!("OpenAI stream error: {}", err.message))?;
+            }
 
-                let usage = chunk.usage.map(|u| Usage {
-                    prompt_tokens: u.prompt_tokens,
-                    completion_tokens: u.completion_tokens,
-                    total_tokens: u.total_tokens,
-                });
+            let usage = chunk.usage.map(|u| Usage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            });
 
-                yield ChatCompletionDelta {
-                    content,
-                    finish_reason,
-                    usage,
-                };
+            match chunk.choices.first() {
+                Some(choice) => {
+                    yield ChatCompletionDelta {
+                        content: choice.delta.content.clone().unwrap_or_default(),
+                        finish_reason: choice.finish_reason.clone(),
+                        usage,
+                    };
+                }
+                //
+                // Some providers send a final, choice-less chunk carrying
+                // only usage stats. Yield it so callers reading usage from
+                // the delta stream are not silently starved of it.
+                //
+                None if usage.is_some() => {
+                    yield ChatCompletionDelta {
+                        content: String::new(),
+                        finish_reason: None,
+                        usage,
+                    };
+                }
+                None => {}
             }
         }
     })
@@ -300,8 +329,15 @@ struct OpenAIStreamRequest {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
+    #[serde(default)]
     choices: Vec<OpenAIStreamChoice>,
     usage: Option<OpenAIUsage>,
+    error: Option<OpenAIStreamErrorEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIStreamErrorEnvelope {
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,6 +382,28 @@ struct OpenAIResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_stream_chunk_deserializes_error_envelope() {
+        let data = r#"{"error": {"message": "context_length_exceeded"}}"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(data).unwrap();
+        assert_eq!(chunk.error.unwrap().message, "context_length_exceeded");
+    }
+
+    #[test]
+    fn test_stream_chunk_usage_only_chunk_has_no_choices() {
+        let data = r#"{"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(data).unwrap();
+        assert!(chunk.choices.is_empty());
+        assert_eq!(chunk.usage.unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn test_stream_chunk_choices_defaults_when_absent() {
+        let data = r#"{"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(data).unwrap();
+        assert!(chunk.choices.is_empty());
+    }
 
     #[test]
     fn test_client_creation() {

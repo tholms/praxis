@@ -152,12 +152,16 @@ fn score_chunk(chunk: &DocChunk, query_terms: &[String]) -> f32 {
 //
 
 pub fn search(query: &str, top_n: usize) -> String {
+    search_chunks(query, top_n, all_chunks())
+}
+
+fn search_chunks(query: &str, top_n: usize, chunks: &[DocChunk]) -> String {
     let terms = tokenize(query);
     if terms.is_empty() {
         return "No usable search terms in the query.".to_string();
     }
 
-    let mut scored: Vec<(f32, &DocChunk)> = all_chunks()
+    let mut scored: Vec<(f32, &DocChunk)> = chunks
         .iter()
         .map(|chunk| (score_chunk(chunk, &terms), chunk))
         .filter(|(score, _)| *score > 0.0)
@@ -191,21 +195,39 @@ pub fn search(query: &str, top_n: usize) -> String {
 }
 
 //
+// Normalize a model-supplied documentation path for case/format-insensitive
+// matching. Slash direction and case must be unified *before* stripping the
+// leading "./" and trailing ".md": a Windows-style relative path puts the
+// backslash directly after the dot (".\usage\recon.md"), which the "./"
+// strip would otherwise miss since it never sees a leading "./" to strip;
+// and an uppercase ".MD" would survive a case-sensitive suffix strip
+// performed before lowercasing.
+//
+
+fn normalize_doc_path(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .to_lowercase()
+        .trim_start_matches("./")
+        .trim_end_matches(".md")
+        .to_string()
+}
+
+//
 // Tool-facing page read: return the full text of a documentation page by path,
 // tolerant of a leading "./", a missing ".md", and case. Truncated to
 // `max_chars` characters so a single read stays bounded.
 //
 
 pub fn read_page(path: &str, max_chars: usize) -> Option<String> {
-    let want = path
-        .trim()
-        .trim_start_matches("./")
-        .replace('\\', "/")
-        .trim_end_matches(".md")
-        .to_lowercase();
+    read_page_from(path, max_chars, EMBEDDED_DOCS)
+}
 
-    EMBEDDED_DOCS.iter().find_map(|(p, content)| {
-        if p.trim_end_matches(".md").eq_ignore_ascii_case(&want) {
+fn read_page_from(path: &str, max_chars: usize, docs: &[(&str, &str)]) -> Option<String> {
+    let want = normalize_doc_path(path);
+
+    docs.iter().find_map(|(p, content)| {
+        if normalize_doc_path(p) == want {
             let truncated: String = content.chars().take(max_chars).collect();
             let note = if truncated.len() < content.len() {
                 "\n\n[...page truncated...]"
@@ -217,4 +239,141 @@ pub fn read_page(path: &str, max_chars: usize) -> Option<String> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_page_splits_on_headings_and_ignores_fenced_hashes() {
+        let md = "# Real Heading\nbody text\n```\n# not a heading\n```\nmore body\n\
+                  ## Sub Heading\nsub body\n";
+        let mut out = Vec::new();
+        chunk_page("usage/example.md", md, &mut out);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].heading, "Real Heading");
+        assert!(out[0].body.contains("# not a heading"));
+        assert!(out[0].body.contains("more body"));
+        assert_eq!(out[1].heading, "Sub Heading");
+        assert!(out[1].body.contains("sub body"));
+    }
+
+    #[test]
+    fn chunk_page_attaches_preheading_content_to_the_page_title() {
+        let md = "intro text before any heading\n# First Heading\nbody\n";
+        let mut out = Vec::new();
+        chunk_page("usage/log-query.md", md, &mut out);
+
+        assert_eq!(out[0].heading, "log query");
+        assert!(out[0].body.contains("intro text"));
+    }
+
+    #[test]
+    fn tokenize_drops_stopwords_and_short_terms() {
+        assert_eq!(
+            tokenize("how do you use the recon node"),
+            vec!["recon", "node"]
+        );
+    }
+
+    #[test]
+    fn score_chunk_weights_heading_matches_over_body_matches() {
+        let heading_match = DocChunk {
+            path: "p".to_string(),
+            heading: "recon".to_string(),
+            body: "unrelated text".to_string(),
+        };
+        let body_match = DocChunk {
+            path: "p".to_string(),
+            heading: "unrelated".to_string(),
+            body: "recon".to_string(),
+        };
+        let terms = vec!["recon".to_string()];
+
+        assert!(score_chunk(&heading_match, &terms) > score_chunk(&body_match, &terms));
+    }
+
+    #[test]
+    fn page_title_humanizes_the_file_name() {
+        assert_eq!(page_title("usage/log-query.md"), "log query");
+        assert_eq!(page_title("recon.md"), "recon");
+    }
+
+    #[test]
+    fn normalize_doc_path_treats_equivalent_spellings_the_same() {
+        //
+        // ".\usage\recon.md" and "USAGE\RECON.MD" are the two shapes that
+        // previously broke: a Windows-style leading ".\" and an uppercase
+        // extension, both fixed by reordering slash/case normalization
+        // ahead of the "./" and ".md" strips.
+        //
+        let variants = [
+            "usage/recon.md",
+            "./usage/recon",
+            "USAGE/RECON",
+            "usage\\recon",
+            ".\\usage\\recon.md",
+            "USAGE\\RECON.MD",
+        ];
+
+        for variant in variants {
+            assert_eq!(normalize_doc_path(variant), "usage/recon");
+        }
+    }
+
+    #[test]
+    fn read_page_from_resolves_path_shape_variants() {
+        let docs: &[(&str, &str)] = &[("usage/recon.md", "Recon page contents.")];
+
+        for variant in [".\\usage\\recon.md", "./usage/recon", "USAGE/RECON.MD"] {
+            assert_eq!(
+                read_page_from(variant, 100, docs).as_deref(),
+                Some("Recon page contents.")
+            );
+        }
+    }
+
+    #[test]
+    fn read_page_from_truncates_and_notes_it() {
+        let docs: &[(&str, &str)] = &[("usage/recon.md", "0123456789")];
+
+        let page = read_page_from("usage/recon", 4, docs).unwrap();
+
+        assert!(page.starts_with("0123"));
+        assert!(page.contains("[...page truncated...]"));
+    }
+
+    #[test]
+    fn read_page_from_returns_none_for_unknown_path() {
+        let docs: &[(&str, &str)] = &[("usage/recon.md", "content")];
+        assert!(read_page_from("usage/nonexistent", 100, docs).is_none());
+    }
+
+    #[test]
+    fn search_chunks_ranks_heading_match_first() {
+        let chunks = vec![
+            DocChunk {
+                path: "a.md".to_string(),
+                heading: "Unrelated".to_string(),
+                body: "recon mentioned once".to_string(),
+            },
+            DocChunk {
+                path: "b.md".to_string(),
+                heading: "Recon Operations".to_string(),
+                body: "how to run a recon".to_string(),
+            },
+        ];
+
+        let result = search_chunks("recon", 5, &chunks);
+
+        assert!(result.find("Recon Operations").unwrap() < result.find("Unrelated").unwrap());
+    }
+
+    #[test]
+    fn search_chunks_reports_no_usable_terms() {
+        let result = search_chunks("the a is", 5, &[]);
+        assert_eq!(result, "No usable search terms in the query.");
+    }
 }
