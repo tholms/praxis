@@ -155,9 +155,7 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
     // orchestrator uses. A documentation lookup after an initial answer uses
     // the persistent FollowUp divider above instead.
     //
-    let awaiting_initial_text = !help.messages.iter().any(
-        |message| matches!(message, HelpMessage::Assistant { text, .. } if !text.trim().is_empty()),
-    );
+    let awaiting_initial_text = awaiting_initial_response(&help.messages);
     if help.is_streaming
         && awaiting_initial_text
         && !matches!(help.messages.last(), Some(HelpMessage::FollowUp))
@@ -188,6 +186,22 @@ fn render_conversation(f: &mut Frame, area: Rect, help: &HelpState) {
         .wrap(Wrap { trim: false })
         .scroll((top, 0));
     f.render_widget(paragraph, area);
+}
+
+//
+// Whether the panel is still waiting for the first token of a response to
+// the operator's most recent question. Scoped to messages after the last
+// `User` entry so a prior turn's answer doesn't suppress the spinner on a
+// later turn — checking the whole history instead only ever matches the
+// very first question of the conversation.
+//
+
+fn awaiting_initial_response(messages: &[HelpMessage]) -> bool {
+    !messages
+        .iter()
+        .rev()
+        .take_while(|m| !matches!(m, HelpMessage::User(_)))
+        .any(|m| matches!(m, HelpMessage::Assistant { text, .. } if !text.trim().is_empty()))
 }
 
 fn render_markdown_line(line: &str) -> Line<'static> {
@@ -346,4 +360,46 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
         Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn awaiting_initial_response_true_before_any_answer() {
+        let messages = vec![HelpMessage::User("question".to_string())];
+        assert!(awaiting_initial_response(&messages));
+    }
+
+    #[test]
+    fn awaiting_initial_response_false_once_first_turn_is_answered() {
+        let messages = vec![
+            HelpMessage::User("question".to_string()),
+            HelpMessage::Assistant {
+                text: "answer".to_string(),
+                is_follow_up: false,
+            },
+        ];
+        assert!(!awaiting_initial_response(&messages));
+    }
+
+    #[test]
+    fn awaiting_initial_response_true_again_for_a_later_question() {
+        //
+        // Regression: checking the whole history (instead of scoping to
+        // messages after the last User entry) made this permanently false
+        // once any earlier turn had an answer, so the "thinking" spinner
+        // never showed again from the second question onward.
+        //
+        let messages = vec![
+            HelpMessage::User("question one".to_string()),
+            HelpMessage::Assistant {
+                text: "answer one".to_string(),
+                is_follow_up: false,
+            },
+            HelpMessage::User("question two".to_string()),
+        ];
+        assert!(awaiting_initial_response(&messages));
+    }
 }
