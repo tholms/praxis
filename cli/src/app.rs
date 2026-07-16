@@ -537,6 +537,8 @@ impl App {
             AppEvent::StateUpdate(state) => {
                 let had_no_nodes = self.nodes.nodes.is_empty();
                 self.handle_state_update(state);
+                self.intercept
+                    .sync_status_from_nodes(&self.nodes.nodes);
                 //
                 // On the first state update (empty → populated), also pull
                 // existing sessions from each node. This ensures a fresh
@@ -800,19 +802,85 @@ impl App {
                 }
                 true
             }
-            AppEvent::InterceptEntriesAppended(entries) => {
-                self.intercept.push_entries(entries);
+            AppEvent::InterceptEntriesAppended {
+                generation,
+                service_instance_id,
+                entries,
+            } => {
+                self.intercept.push_entries_scoped(
+                    Some(service_instance_id.as_str()).filter(|s| !s.is_empty()),
+                    generation,
+                    entries,
+                );
                 self.active_window == Window::Intercept
             }
-            AppEvent::InterceptMatchesAppended(matches) => {
-                self.intercept.push_matches(matches);
+            AppEvent::InterceptMatchesAppended {
+                generation,
+                service_instance_id,
+                matches,
+            } => {
+                self.intercept.push_matches_scoped(
+                    Some(service_instance_id.as_str()).filter(|s| !s.is_empty()),
+                    generation,
+                    matches,
+                );
                 self.active_window == Window::Intercept
                     && self.intercept.tab == crate::app::intercept::InterceptTab::Matches
             }
-            AppEvent::InterceptStatusChanged(status) => {
+            AppEvent::ServiceInstanceRebind(id) => {
+                self.intercept.note_service_instance(&id);
+                //
+                // note_service_instance marks pages unloaded; reload persistent
+                // history when the intercept window is active (or next enter).
+                //
+                if self.active_window == Window::Intercept {
+                    self.enter_intercept().await;
+                }
+                self.active_window == Window::Intercept
+            }
+            AppEvent::InterceptClearBoundary {
+                service_instance_id,
+                generation,
+            } => {
+                //
+                // Late clear success: same gate as clear_intercept_traffic.
+                //
                 self.intercept
-                    .intercept_statuses
-                    .insert(status.node_id.clone(), status);
+                    .apply_validated_clear_boundary(&service_instance_id, generation);
+                self.active_window == Window::Intercept
+            }
+            AppEvent::InterceptStatusChanged(status) => {
+                self.intercept.apply_status(status);
+                self.active_window == Window::Intercept
+            }
+            AppEvent::InterceptBodyFetchEmpty(id) => {
+                self.intercept.complete_empty_body_fetch(id);
+                self.active_window == Window::Intercept
+            }
+            AppEvent::InterceptBodyFetchFailed { id, message } => {
+                self.intercept.note_body_fetch_failed(id);
+                self.intercept.set_error(message);
+                true
+            }
+            AppEvent::InterceptToggleResult {
+                node_id,
+                enable,
+                result,
+            } => {
+                self.intercept.pending_toggles.remove(&node_id);
+                match result {
+                    Ok(()) => {
+                        let msg = if enable {
+                            "Interception enabled"
+                        } else {
+                            "Interception disabled"
+                        };
+                        self.intercept.set_status_message(msg);
+                    }
+                    Err(e) => {
+                        self.intercept.set_error(format!("Intercept toggle: {}", e));
+                    }
+                }
                 self.active_window == Window::Intercept
             }
             AppEvent::ReconGetResponse {
@@ -1169,6 +1237,15 @@ impl App {
         //
         if self.add_remote_node_form.is_some() {
             self.handle_add_remote_node_form_key(key).await;
+            return;
+        }
+
+        //
+        // Intercept rule create/edit form: same priority as other
+        // modals so ^s saves instead of opening Settings.
+        //
+        if self.intercept.rule_form.is_some() {
+            self.handle_rule_form_key(key).await;
             return;
         }
 
@@ -2169,9 +2246,37 @@ impl App {
                                 session.scroll_offset.saturating_add(3).min(max);
                         }
                     }
-                    Window::Intercept if self.intercept.detail_focus => {
+                    //
+                    // Gate detail scroll by active tab — traffic
+                    // `detail_focus` can still be true after switching to
+                    // Matches/Rules and would otherwise steal the wheel.
+                    //
+                    Window::Intercept
+                        if self.intercept.tab == crate::app::intercept::InterceptTab::Traffic
+                            && self.intercept.detail_focus =>
+                    {
                         self.intercept.detail_scroll =
                             self.intercept.detail_scroll.saturating_sub(3);
+                    }
+                    Window::Intercept
+                        if self.intercept.tab == crate::app::intercept::InterceptTab::Matches
+                            && self.intercept.match_detail_focus =>
+                    {
+                        self.intercept.match_detail_scroll =
+                            self.intercept.match_detail_scroll.saturating_sub(3);
+                    }
+                    Window::Intercept
+                        if self.intercept.tab == crate::app::intercept::InterceptTab::Rules
+                            && self.intercept.rule_detail_focus =>
+                    {
+                        self.intercept.rule_detail_scroll =
+                            self.intercept.rule_detail_scroll.saturating_sub(3);
+                    }
+                    Window::Intercept if self.intercept.tab == crate::app::intercept::InterceptTab::Rules => {
+                        self.intercept.move_rule_selection(-3);
+                    }
+                    Window::Intercept if self.intercept.tab == crate::app::intercept::InterceptTab::Matches => {
+                        self.intercept.move_match_selection(-3);
                     }
                     Window::Intercept => {
                         self.intercept.move_selection(-3);
@@ -2226,10 +2331,41 @@ impl App {
                             session.scroll_offset = session.scroll_offset.saturating_sub(3);
                         }
                     }
-                    Window::Intercept if self.intercept.detail_focus => {
+                    Window::Intercept
+                        if self.intercept.tab == crate::app::intercept::InterceptTab::Traffic
+                            && self.intercept.detail_focus =>
+                    {
                         let max = self.intercept.detail_max_scroll.get();
                         self.intercept.detail_scroll =
                             self.intercept.detail_scroll.saturating_add(3).min(max);
+                    }
+                    Window::Intercept
+                        if self.intercept.tab == crate::app::intercept::InterceptTab::Matches
+                            && self.intercept.match_detail_focus =>
+                    {
+                        let max = self.intercept.match_detail_max_scroll.get();
+                        self.intercept.match_detail_scroll = self
+                            .intercept
+                            .match_detail_scroll
+                            .saturating_add(3)
+                            .min(max);
+                    }
+                    Window::Intercept
+                        if self.intercept.tab == crate::app::intercept::InterceptTab::Rules
+                            && self.intercept.rule_detail_focus =>
+                    {
+                        let max = self.intercept.rule_detail_max_scroll.get();
+                        self.intercept.rule_detail_scroll = self
+                            .intercept
+                            .rule_detail_scroll
+                            .saturating_add(3)
+                            .min(max);
+                    }
+                    Window::Intercept if self.intercept.tab == crate::app::intercept::InterceptTab::Rules => {
+                        self.intercept.move_rule_selection(3);
+                    }
+                    Window::Intercept if self.intercept.tab == crate::app::intercept::InterceptTab::Matches => {
+                        self.intercept.move_match_selection(3);
                     }
                     Window::Intercept => {
                         self.intercept.move_selection(3);

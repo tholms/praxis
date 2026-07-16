@@ -22,7 +22,7 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
-const TRAFFIC_CHANNEL_CAPACITY: usize = 4096;
+const TRAFFIC_CHANNEL_CAPACITY: usize = 64;
 const EVENT_LOG_CHANNEL_CAPACITY: usize = 1024;
 
 pub enum RuntimeExit {
@@ -307,17 +307,20 @@ async fn listen_to_queues(
                 reset_queue_for_consumer
             );
 
-            while let Some(delivery_result) = consumer.next().await {
+            //
+            // Only the first delivery matters: a reset signal cancels the
+            // token, an error ends the consumer. Either way we stop after
+            // one message, so this reads a single delivery rather than looping.
+            //
+            if let Some(delivery_result) = consumer.next().await {
                 match delivery_result {
                     Ok(delivery) => {
                         common::log_info!("Reset message received, signalling main loop");
                         delivery.ack(BasicAckOptions::default()).await.ok();
                         reset_token_signal.cancel();
-                        break;
                     }
                     Err(e) => {
                         common::log_error!("Reset consumer error: {}", e);
-                        break;
                     }
                 }
             }
@@ -432,12 +435,16 @@ async fn listen_to_queues(
                     terminal_manager.lock().await.close_all();
 
                     let mut intercept_manager = intercept_manager.lock().await;
-                    if intercept_manager.is_enabled() {
+                    intercept_manager.request_cancel();
+                    if intercept_manager.needs_cleanup() {
                         common::log_info!("Disabling intercept and restoring system settings...");
-                        if let Err(e) = intercept_manager.disable().await {
-                            common::log_error!("Failed to disable intercept during shutdown: {}", e);
+                        if let Err(e) = intercept_manager.force_cleanup().await {
+                            common::log_error!(
+                                "Failed to cleanup intercept during shutdown: {}",
+                                e
+                            );
                         } else {
-                            common::log_info!("Intercept disabled, system settings restored");
+                            common::log_info!("Intercept cleanup complete");
                         }
                     }
                 }
@@ -459,6 +466,7 @@ async fn listen_to_queues(
 
                 crate::agent_connectors::lua::runtime::signal_reset();
 
+                let mut force_cleanup_ok = true;
                 {
                     let (terminal_manager, intercept_manager) = {
                         let state = node_state.read().await;
@@ -467,11 +475,33 @@ async fn listen_to_queues(
                     terminal_manager.lock().await.close_all();
 
                     let mut intercept_manager = intercept_manager.lock().await;
-                    if intercept_manager.is_enabled() {
-                        if let Err(e) = intercept_manager.disable().await {
-                            common::log_error!("Failed to disable intercept during reset: {}", e);
+                    intercept_manager.request_cancel();
+                    if intercept_manager.needs_cleanup() {
+                        if let Err(e) = intercept_manager.force_cleanup().await {
+                            force_cleanup_ok = false;
+                            common::log_error!(
+                                "Failed to cleanup intercept during reset: {}",
+                                e
+                            );
                         }
                     }
+                }
+
+                //
+                // Incomplete force_cleanup must not drop the manager and
+                // re-register as clean (detached packet task risk). Exit the
+                // process instead so OS reclaims any retained engine work.
+                //
+                if !crate::intercept::lifecycle::may_reset_reregister_after_force_cleanup(
+                    force_cleanup_ok,
+                ) {
+                    common::log_error!(
+                        "Reset aborted: intercept cleanup incomplete; shutting down instead of re-register"
+                    );
+                    if let Some(forwarders) = forwarders.take() {
+                        forwarders.shutdown().await;
+                    }
+                    return Ok(RuntimeExit::Shutdown);
                 }
 
                 common::log_info!("Reset cleanup complete, will re-register");
@@ -596,17 +626,36 @@ async fn listen_to_queues(
                                         cmd_request.command_id,
                                         cmd_request.command
                                     );
+                                    //
+                                    // Cancel enable at phase boundaries without
+                                    // dropping the future as the sole cleanup:
+                                    // cancel the op token, then await the handler
+                                    // so enable can roll back, then outer loop
+                                    // will hit reset/shutdown cleanup.
+                                    //
+                                    let op_cancel =
+                                        tokio_util::sync::CancellationToken::new();
+                                    let handle = handle_command(
+                                        cmd_request,
+                                        &channel,
+                                        &node_id,
+                                        &registry,
+                                        &node_state,
+                                        &factory,
+                                        &fingerprint_cache,
+                                        op_cancel.clone(),
+                                    );
+                                    tokio::pin!(handle);
                                     tokio::select! {
-                                        _ = reset_token.cancelled() => {}
-                                        _ = handle_command(
-                                            cmd_request,
-                                            &channel,
-                                            &node_id,
-                                            &registry,
-                                            &node_state,
-                                            &factory,
-                                            &fingerprint_cache,
-                                        ) => {}
+                                        _ = reset_token.cancelled() => {
+                                            op_cancel.cancel();
+                                            let _ = handle.await;
+                                        }
+                                        _ = shutdown_token.cancelled() => {
+                                            op_cancel.cancel();
+                                            let _ = handle.await;
+                                        }
+                                        _ = &mut handle => {}
                                     }
                                 }
                                 NodeDirectMessage::SemanticParserResponse(response) => {
@@ -775,6 +824,7 @@ async fn handle_command(
     node_state: &Arc<RwLock<NodeState>>,
     factory: &Arc<AgentFactory>,
     fingerprint_cache: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, bool>>>,
+    operation_cancel: tokio_util::sync::CancellationToken,
 ) {
     //
     // Check if this is a fire-and-forget command (no response needed).
@@ -783,9 +833,12 @@ async fn handle_command(
         request.command,
         NodeCommand::Terminal(TerminalCommand::Write { .. }) | NodeCommand::Config(_)
     );
+    let was_intercept = matches!(request.command, NodeCommand::Intercept(_));
 
     let result = match request.command.clone() {
-        NodeCommand::Intercept(cmd) => handle_intercept_command(cmd, node_state).await,
+        NodeCommand::Intercept(cmd) => {
+            handle_intercept_command(cmd, node_state, operation_cancel).await
+        }
         NodeCommand::Terminal(cmd) => {
             handle_terminal_command(cmd, &request.client_id, node_state).await
         }
@@ -811,6 +864,38 @@ async fn handle_command(
     }
 
     //
+    // After intercept enable/disable (including Error paths that may leave
+    // CleanupRequired), publish a full InterceptStatus so clients see
+    // cleanup_required / enabled immediately.
+    //
+    // Bound nonessential publishes so a hung broker cannot delay Reset/Ctrl+C
+    // after the operation cancel path has already completed host work.
+    //
+    const PUBLISH_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
+    if was_intercept {
+        let status = {
+            let state = node_state.read().await;
+            let manager = state.intercept_manager.lock().await;
+            manager.status()
+        };
+        let status_msg = NodeSignalMessage::InterceptStatusUpdate(status);
+        match tokio::time::timeout(
+            PUBLISH_BOUND,
+            publish_json(channel, NODE_SIGNAL_QUEUE, &status_msg),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::error!("Failed to send intercept status update: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!("Timed out publishing intercept status update");
+            }
+        }
+    }
+
+    //
     // Send response back to the server.
     //
     let response = CommandResponse {
@@ -820,17 +905,36 @@ async fn handle_command(
     };
 
     let message = NodeSignalMessage::CommandResponse(response);
-    if let Err(e) = publish_json(channel, NODE_SIGNAL_QUEUE, &message).await {
-        common::log_error!("Failed to send command response: {}", e);
+    match tokio::time::timeout(
+        PUBLISH_BOUND,
+        publish_json(channel, NODE_SIGNAL_QUEUE, &message),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::error!("Failed to send command response: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!("Timed out publishing command response");
+        }
     }
 
     //
-    // Send an information update after every command so the UI has fresh state.
+    // Information update is best-effort after cancel-sensitive work.
     //
-    if let Err(e) =
-        send_node_information_update(channel, node_id, registry, node_state, fingerprint_cache)
-            .await
+    match tokio::time::timeout(
+        PUBLISH_BOUND,
+        send_node_information_update(channel, node_id, registry, node_state, fingerprint_cache),
+    )
+    .await
     {
-        common::log_error!("Failed to send information update after command: {}", e);
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!("Failed to send information update after command: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!("Timed out sending information update after command");
+        }
     }
 }
