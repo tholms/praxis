@@ -20,7 +20,7 @@ pub use client::{
 
 pub use parsing::{
     parse_completion_signal, parse_manual_tool_call, parse_manual_tool_call_lenient,
-    strip_incomplete_tool_call,
+    parse_manual_tool_calls, strip_incomplete_tool_call,
 };
 
 pub use prompts::{get_system_prompt_with_tools, get_system_prompt_with_tools_and_completion};

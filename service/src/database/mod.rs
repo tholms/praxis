@@ -13,6 +13,7 @@ mod operations;
 mod recon;
 mod remote_nodes;
 mod rules;
+pub mod rules_snapshot;
 mod service_config;
 mod toolkit_actions;
 mod traffic;
@@ -88,27 +89,33 @@ impl Database {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                let url = format!("sqlite://{}?mode=rwc", path.display());
+                //
+                // Set every per-connection PRAGMA on the connect options, not
+                // as one-shot queries against the pool. These settings apply
+                // per-connection, so a pool reconnect (idle drop, error) must
+                // re-apply them or the connection silently reverts to SQLite
+                // defaults. foreign_keys is the critical one: without it,
+                // clear_all_traffic and rule deletes stop cascading and leave
+                // orphaned traffic_matches rows. journal_mode and synchronous
+                // also tune behaviour for network file systems (Azure Files,
+                // SMB/CIFS).
+                //
+                use sqlx::sqlite::{
+                    SqliteConnectOptions, SqliteJournalMode, SqliteLockingMode, SqliteSynchronous,
+                };
+                let connect_options = SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Normal)
+                    .busy_timeout(Duration::from_secs(5))
+                    .locking_mode(SqliteLockingMode::Normal)
+                    .foreign_keys(true);
+
                 let pool = sqlx::sqlite::SqlitePoolOptions::new()
                     .max_connections(1)
                     .acquire_timeout(Duration::from_secs(5))
-                    .connect(&url)
-                    .await?;
-
-                //
-                // Configure SQLite for network file systems (Azure Files, SMB/CIFS).
-                //
-                sqlx::query("PRAGMA journal_mode = WAL")
-                    .execute(&pool)
-                    .await?;
-                sqlx::query("PRAGMA synchronous = NORMAL")
-                    .execute(&pool)
-                    .await?;
-                sqlx::query("PRAGMA busy_timeout = 5000")
-                    .execute(&pool)
-                    .await?;
-                sqlx::query("PRAGMA locking_mode = NORMAL")
-                    .execute(&pool)
+                    .connect_with(connect_options)
                     .await?;
 
                 DatabasePool::Sqlite(pool)
@@ -674,4 +681,198 @@ fn toml_str(s: &str) -> String {
         })
         .collect();
     format!("\"{}\"", escaped)
+}
+
+#[cfg(test)]
+mod foreign_key_tests {
+    use super::{Database, DatabaseConfig, DatabasePool};
+    use common::{
+        InterceptMethod, InterceptedTrafficEntry, RuleScope, TargetDirection, TrafficDirection,
+    };
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDb {
+        path: PathBuf,
+        db: Database,
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{}", self.path.display(), suffix));
+            }
+        }
+    }
+
+    async fn temp_db() -> TempDb {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "praxis_fk_test_{}_{}.db",
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = Database::new(&DatabaseConfig::Sqlite { path: path.clone() })
+            .await
+            .expect("failed to open sqlite test db");
+        TempDb { path, db }
+    }
+
+    async fn match_row_count(db: &Database) -> i64 {
+        match &db.pool {
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM traffic_matches")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            _ => unreachable!("test db is always sqlite"),
+        }
+    }
+
+    fn sample_entry() -> InterceptedTrafficEntry {
+        InterceptedTrafficEntry {
+            id: None,
+            timestamp: chrono::Utc::now(),
+            node_id: "n1".into(),
+            agent_short_name: "agent".into(),
+            intercept_method: InterceptMethod::Proxy,
+            direction: TrafficDirection::Send,
+            method: Some("GET".into()),
+            url: "https://example.com/x".into(),
+            host: "example.com".into(),
+            request_headers: None,
+            request_body: None,
+            response_status: Some(200),
+            response_headers: None,
+            response_body: None,
+        }
+    }
+
+    //
+    // Without PRAGMA foreign_keys = ON, deleting the parent traffic row leaves
+    // the traffic_matches row orphaned rather than cascading. These tests hold
+    // that regression: a direct count of traffic_matches must reach zero, which
+    // a JOIN-based query would hide.
+    //
+
+    #[tokio::test]
+    async fn clear_all_traffic_cascades_to_matches() {
+        let tmp = temp_db().await;
+        let db = &tmp.db;
+
+        let rule = db
+            .insert_rule("r", "x", &TargetDirection::Both, &RuleScope::All, None)
+            .await
+            .unwrap();
+        let traffic_id = db.insert_traffic(&sample_entry()).await.unwrap();
+        db.insert_traffic_match(traffic_id, rule.id, None)
+            .await
+            .unwrap();
+        assert_eq!(match_row_count(db).await, 1);
+
+        db.clear_all_traffic().await.unwrap();
+        assert_eq!(
+            match_row_count(db).await,
+            0,
+            "deleting traffic must cascade-delete its matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_rule_cascades_to_matches() {
+        let tmp = temp_db().await;
+        let db = &tmp.db;
+
+        let rule = db
+            .insert_rule("r", "x", &TargetDirection::Both, &RuleScope::All, None)
+            .await
+            .unwrap();
+        let traffic_id = db.insert_traffic(&sample_entry()).await.unwrap();
+        db.insert_traffic_match(traffic_id, rule.id, None)
+            .await
+            .unwrap();
+        assert_eq!(match_row_count(db).await, 1);
+
+        assert!(db.delete_rule(rule.id).await.unwrap());
+        assert_eq!(
+            match_row_count(db).await,
+            0,
+            "deleting a rule must cascade-delete its matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_matches_body_only_regex() {
+        let tmp = temp_db().await;
+        let db = &tmp.db;
+
+        let mut hit = sample_entry();
+        hit.url = "https://api.anthropic.com/v1/messages".into();
+        hit.host = "api.anthropic.com".into();
+        hit.method = Some("POST".into());
+        hit.request_body = Some(br#"{"text":"<system-reminder>hi"}"#.to_vec());
+
+        let mut miss = sample_entry();
+        miss.url = "https://api.factory.ai/api/feature-flags".into();
+        miss.host = "api.factory.ai".into();
+        miss.request_body = Some(br#"{"flags":[]}"#.to_vec());
+
+        db.insert_traffic(&hit).await.unwrap();
+        db.insert_traffic(&miss).await.unwrap();
+
+        let rule = db
+            .insert_rule(
+                "system reminder",
+                r"(?i)system",
+                &TargetDirection::Both,
+                &RuleScope::All,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let n = db.backfill_matches_for_rule(&rule, 500).await.unwrap();
+        assert_eq!(n, 1, "only the body hit should backfill");
+        assert_eq!(match_row_count(db).await, 1);
+
+        // Idempotent: second backfill must not duplicate.
+        let n2 = db.backfill_matches_for_rule(&rule, 500).await.unwrap();
+        assert_eq!(n2, 0);
+        assert_eq!(match_row_count(db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn backfill_skips_disabled_rule() {
+        let tmp = temp_db().await;
+        let db = &tmp.db;
+
+        let mut entry = sample_entry();
+        entry.url = "https://example.com/secret".into();
+        db.insert_traffic(&entry).await.unwrap();
+
+        let rule = db
+            .insert_rule(
+                "secret",
+                "secret",
+                &TargetDirection::Both,
+                &RuleScope::All,
+                None,
+            )
+            .await
+            .unwrap();
+        let disabled = db
+            .update_rule(rule.id, None, None, None, None, Some(false), None)
+            .await
+            .unwrap()
+            .expect("rule row");
+        assert!(!disabled.enabled);
+
+        let n = db.backfill_matches_for_rule(&disabled, 500).await.unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(match_row_count(db).await, 0);
+    }
 }
