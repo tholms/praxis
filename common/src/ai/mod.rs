@@ -18,7 +18,10 @@ pub use client::{
     AiClient, build_message, create_ai_client, execute_chat_completion, execute_with_tool_parsing,
 };
 
-pub use parsing::{parse_completion_signal, parse_manual_tool_call, parse_manual_tool_calls};
+pub use parsing::{
+    parse_completion_signal, parse_manual_tool_call, parse_manual_tool_call_lenient,
+    parse_manual_tool_calls, strip_incomplete_tool_call,
+};
 
 pub use prompts::{get_system_prompt_with_tools, get_system_prompt_with_tools_and_completion};
 

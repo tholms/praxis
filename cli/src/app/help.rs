@@ -297,6 +297,24 @@ impl App {
                 if current != Some(request_id.as_str()) {
                     return false;
                 }
+                //
+                // Restore the question this error answers so Enter resends
+                // it, but only when the input is still empty — a draft the
+                // operator typed while the request was in flight must not
+                // be clobbered.
+                //
+                if self.help.input.is_empty() {
+                    if let Some(HelpMessage::User(text)) = self
+                        .help
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| matches!(m, HelpMessage::User(_)))
+                    {
+                        self.help.input = text.clone();
+                        self.help.cursor = self.help.input.len();
+                    }
+                }
                 self.help.messages.push(HelpMessage::Error(message));
                 self.help.is_streaming = false;
                 self.help.request_id = None;
@@ -325,10 +343,20 @@ fn conversation_history(messages: &[HelpMessage]) -> Vec<(String, String)> {
     for message in messages {
         match message {
             HelpMessage::User(text) => pending_user = Some(text.clone()),
-            HelpMessage::Assistant { text, .. } => {
+            HelpMessage::Assistant { text, is_follow_up } => {
                 if let Some(user) = pending_user.take() {
                     history.push(("user".to_string(), user));
                     history.push(("assistant".to_string(), text.clone()));
+                } else if *is_follow_up {
+                    //
+                    // The detailed follow-up answer supersedes the initial
+                    // lookup acknowledgement recorded for this turn, so the
+                    // replayed history reflects what the operator actually
+                    // read rather than just "I'll check the docs...".
+                    //
+                    if let Some(last) = history.last_mut() {
+                        last.1 = text.clone();
+                    }
                 }
             }
             HelpMessage::FollowUp | HelpMessage::Error(_) | HelpMessage::Status(_) => {}
@@ -362,6 +390,30 @@ mod tests {
                 is_follow_up: true,
             } if text == "Detailed answer."
         ));
+    }
+
+    #[test]
+    fn history_uses_the_follow_up_answer_not_the_preamble() {
+        let messages = vec![
+            HelpMessage::User("How do I configure X?".to_string()),
+            HelpMessage::Assistant {
+                text: "I'll check the docs.".to_string(),
+                is_follow_up: false,
+            },
+            HelpMessage::FollowUp,
+            HelpMessage::Assistant {
+                text: "Here is the full answer.".to_string(),
+                is_follow_up: true,
+            },
+        ];
+
+        assert_eq!(
+            conversation_history(&messages),
+            vec![
+                ("user".to_string(), "How do I configure X?".to_string()),
+                ("assistant".to_string(), "Here is the full answer.".to_string()),
+            ]
+        );
     }
 
     #[test]
