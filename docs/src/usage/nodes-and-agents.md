@@ -50,7 +50,9 @@ Bridge nodes are created by enabling the Claude Bridge in Settings and launching
 
 ### Removing Nodes
 
-If a node disconnects and you want to remove it from the list, click the remove button. This clears the node from the service's tracking. If the node reconnects, it will appear again.
+Removing an online deployed node sends it a graceful shutdown request, which cancels active work, restores interception settings, and exits the node process before the service removes it from the list. Start the node binary again to reconnect it.
+
+Removing an offline or stale node only clears it from the service's tracking, so a future intentional restart can register normally.
 
 ### Resetting Nodes
 

@@ -145,12 +145,10 @@ pub fn decode_terminal_create_response(
             NodeCommandResult::Terminal(TerminalCommandResult::Created { terminal_id }) => {
                 Some((resp.command_id.clone(), Ok(terminal_id.clone())))
             }
-            NodeCommandResult::Terminal(_) => {
-                Some((
-                    resp.command_id.clone(),
-                    Err("Unexpected terminal result".into()),
-                ))
-            }
+            NodeCommandResult::Terminal(_) => Some((
+                resp.command_id.clone(),
+                Err("Unexpected terminal result".into()),
+            )),
             //
             // Bare Error is handled by the caller against the pending map —
             // matching every Error here would swallow intercept (and other)
@@ -2919,6 +2917,9 @@ pub enum NodeDirectMessage {
     /// Reset the node: cancel all operations, tear down state, re-register.
     /// Delivered on a dedicated queue so it is never blocked by handlers.
     Reset,
+    /// Gracefully stop the node: cancel all operations, restore system state,
+    /// and exit without reconnecting. Delivered on the lifecycle control queue.
+    Shutdown,
     /// ACP JSON-RPC frame destined for the node's ACP server
     Acp(AcpFrame),
 }
