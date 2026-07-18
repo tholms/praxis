@@ -27,6 +27,7 @@
 
 - [Overview](./connectors/overview.md)
 - [Adding New Connectors](./connectors/adding-new.md)
+- [Antigravity (Agy) CLI](./connectors/agy.md)
 - [Claude Bridge (CCRv1/CCRv2)](./connectors/claude-bridge.md)
 - [Claude Code](./connectors/claude-code.md)
 - [Claude Desktop](./connectors/claude-desktop.md)

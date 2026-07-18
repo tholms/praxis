@@ -262,9 +262,9 @@ async fn listen_to_queues(
     });
 
     //
-    // Dedicated reset queue: a separate consumer that signals the main loop
-    // via a CancellationToken. Runs on its own task so it is never blocked
-    // by in-flight command handlers.
+    // Dedicated lifecycle queue: a separate consumer that signals reset or
+    // shutdown to the main loop. It runs on its own task so control requests
+    // are never blocked by in-flight command handlers.
     //
 
     let reset_token = shutdown_token.child_token();
@@ -282,6 +282,7 @@ async fn listen_to_queues(
     {
         let reset_channel = channel.clone();
         let reset_token_signal = reset_token.clone();
+        let shutdown_token_signal = shutdown_token.clone();
         let reset_queue_for_consumer = reset_queue_name.clone();
         tokio::spawn(async move {
             let mut consumer = match reset_channel
@@ -307,17 +308,34 @@ async fn listen_to_queues(
                 reset_queue_for_consumer
             );
 
-            //
-            // Only the first delivery matters: a reset signal cancels the
-            // token, an error ends the consumer. Either way we stop after
-            // one message, so this reads a single delivery rather than looping.
-            //
+            // Only the first lifecycle request matters. Either signal ends
+            // this consumer; the main loop performs the actual cleanup.
             if let Some(delivery_result) = consumer.next().await {
                 match delivery_result {
                     Ok(delivery) => {
-                        common::log_info!("Reset message received, signalling main loop");
+                        let message = serde_json::from_slice::<NodeDirectMessage>(&delivery.data);
                         delivery.ack(BasicAckOptions::default()).await.ok();
-                        reset_token_signal.cancel();
+                        match message {
+                            Ok(NodeDirectMessage::Reset) => {
+                                common::log_info!("Reset message received, signalling main loop");
+                                reset_token_signal.cancel();
+                            }
+                            Ok(NodeDirectMessage::Shutdown) => {
+                                common::log_info!(
+                                    "Shutdown message received, signalling main loop"
+                                );
+                                shutdown_token_signal.cancel();
+                            }
+                            Ok(other) => {
+                                common::log_warn!(
+                                    "Ignoring unexpected lifecycle message: {:?}",
+                                    other
+                                );
+                            }
+                            Err(e) => {
+                                common::log_warn!("Failed to parse lifecycle message: {}", e);
+                            }
+                        }
                     }
                     Err(e) => {
                         common::log_error!("Reset consumer error: {}", e);
@@ -668,6 +686,10 @@ async fn listen_to_queues(
                                 NodeDirectMessage::Reset => {
                                     common::log_info!("Reset message received on main queue (expected on reset queue)");
                                     reset_token.cancel();
+                                }
+                                NodeDirectMessage::Shutdown => {
+                                    common::log_info!("Shutdown message received on main queue");
+                                    shutdown_token.cancel();
                                 }
                                 NodeDirectMessage::Acp(frame) => {
                                     let server = Arc::clone(&acp_server);

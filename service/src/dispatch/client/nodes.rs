@@ -139,11 +139,31 @@ pub(super) async fn handle_remove_node(ctx: &ServiceContext, node_id: String) {
         common::short_id(&node_id)
     );
 
-    //
-    // If this is a remote-node bridge, stop the bridge task and delete
-    // its persisted record. stop is a no-op when there is no matching
-    // bridge, so we can call it unconditionally.
-    //
+    // Ask a recently active deployed node to stop before dropping it from the
+    // registry. The lifecycle queue has its own node-side consumer, so this
+    // promptly cancels in-flight work and prevents the normal reconnect loop.
+    // Do not enqueue a shutdown for stale/offline entries: their durable queue
+    // might otherwise stop a future, intentional restart.
+    if let Some(node) = ctx.node_registry.get(&node_id).await {
+        let age_seconds = (chrono::Utc::now() - node.last_update_received).num_seconds();
+        let is_online =
+            common::NodeStatus::from_age_seconds(age_seconds) == common::NodeStatus::Online;
+        if !node.queue_name.is_empty() && is_online {
+            let lifecycle_queue = common::node_reset_queue_name(&node_id);
+            if let Err(e) = common::publish_json(
+                &ctx.publish_channel,
+                &lifecycle_queue,
+                &NodeDirectMessage::Shutdown,
+            )
+            .await
+            {
+                common::log_error!("Failed to send shutdown to node {}: {}", node_id, e);
+            }
+        }
+    }
+
+    // If this is a remote-node bridge, stop the bridge task and delete its
+    // persisted record. stop is a no-op when there is no matching bridge.
     ctx.remote_node_manager.stop(&node_id).await;
     let _ = ctx.database.delete_remote_node(&node_id).await;
 

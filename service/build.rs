@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::Path;
 
@@ -30,6 +31,22 @@ fn main() {
 
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Built-in agent scripts are persisted in the service database. Include
+    // their content in the script-set version so an upgraded service updates
+    // existing built-ins whenever a connector changes, without overwriting
+    // user-created scripts.
+    let mut script_hasher = std::collections::hash_map::DefaultHasher::new();
+    for (_, file_name) in &entries {
+        let path = scripts_dir.join(file_name);
+        file_name.hash(&mut script_hasher);
+        fs::read(&path).unwrap().hash(&mut script_hasher);
+    }
+    let scripts_version = format!(
+        "{}-{:016x}",
+        env::var("CARGO_PKG_VERSION").unwrap(),
+        script_hasher.finish()
+    );
+
     writeln!(out, "pub const EMBEDDED_LUA_SCRIPTS: &[(&str, &str)] = &[").unwrap();
     for (stem, file_name) in &entries {
         writeln!(
@@ -43,7 +60,8 @@ fn main() {
 
     writeln!(
         out,
-        "pub const EMBEDDED_LUA_SCRIPTS_VERSION: &str = env!(\"CARGO_PKG_VERSION\");"
+        "pub const EMBEDDED_LUA_SCRIPTS_VERSION: &str = \"{}\";",
+        scripts_version
     )
     .unwrap();
 
