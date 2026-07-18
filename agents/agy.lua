@@ -43,6 +43,10 @@ local function cache_path(home)
   return praxis.path_join({ home, ".gemini", "antigravity-cli", "cache", "last_conversations.json" })
 end
 
+local function settings_path(home)
+  return praxis.path_join({ home, ".gemini", "antigravity-cli", "settings.json" })
+end
+
 local function read_conversation_cache(home)
   local content = praxis.read_file(cache_path(home))
   local parsed = helpers.parse_json(content or "")
@@ -50,6 +54,33 @@ local function read_conversation_cache(home)
     return parsed
   end
   return {}
+end
+
+--
+-- Agy records trusted roots in its CLI settings and workspaces used by a
+-- conversation in last_conversations.json. Treat both as exact roots rather
+-- than recursively searching their descendants for generic instruction files.
+--
+
+local function discover_known_workspaces(home)
+  local paths = {}
+  local settings = helpers.parse_json(praxis.read_file(settings_path(home)) or "")
+
+  if type(settings) == "table" and type(settings.trustedWorkspaces) == "table" then
+    for _, workspace in ipairs(settings.trustedWorkspaces) do
+      if type(workspace) == "string" and praxis.path_is_dir(workspace) then
+        table.insert(paths, workspace)
+      end
+    end
+  end
+
+  for workspace, _ in pairs(read_conversation_cache(home)) do
+    if type(workspace) == "string" and praxis.path_is_dir(workspace) then
+      table.insert(paths, workspace)
+    end
+  end
+
+  return helpers.dedup(paths)
 end
 
 local function find_conversation_id(working_dir)
@@ -243,7 +274,8 @@ local recon_config = {
   },
 
   context_filenames = { "GEMINI.md", "AGENTS.md" },
-  project_markers = { "/.agents/mcp_config.json", "/.agents/hooks.json", "/GEMINI.md", "/AGENTS.md" },
+  project_markers = { "/.agents/mcp_config.json", "/.agents/hooks.json" },
+  project_discovery = discover_known_workspaces,
 
   project_configs = {
     { path = ".agents/mcp_config.json", type = "project_mcp", mcp = true },

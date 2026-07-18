@@ -21,9 +21,14 @@ Static reconnaissance discovers the documented Agy configuration surface:
 
 - Global settings and keybindings under `~/.gemini/antigravity-cli/`
 - Global MCP and hook definitions under `~/.gemini/config/`
+- Existing workspace roots from Agy's `trustedWorkspaces` setting and conversation cache (stale paths are ignored)
 - Workspace MCP and hook definitions under `.agents/`
-- Global `~/.gemini/GEMINI.md` plus workspace `GEMINI.md` and `AGENTS.md` instruction files
+- Global `~/.gemini/GEMINI.md` plus `GEMINI.md` and `AGENTS.md` instruction files at those workspace roots
 - Global skills from `~/.gemini/antigravity-cli/skills/` and workspace skills from `.agents/skills/`
+
+Recon never recursively treats a generic `GEMINI.md` or `AGENTS.md` as a new
+workspace. This prevents unrelated repositories, nested instruction files, and
+other agents' worktrees from appearing as Agy projects.
 
 MCP servers are read from `mcp_config.json`. The current Antigravity schema uses `mcpServers` and `serverUrl` for remote servers, both of which are recognized by the connector.
 
