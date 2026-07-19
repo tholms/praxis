@@ -1,10 +1,25 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use lapin::{BasicProperties, Channel, PublisherConfirm, options::BasicPublishOptions};
+use lapin::{
+    BasicProperties, Channel, PublisherConfirm,
+    options::{BasicPublishOptions, QueueDeclareOptions},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use uuid::Uuid;
+
+///
+/// Options for named queues shared across connections.
+/// Durable so definitions survive broker restarts and avoid RabbitMQ 4.x
+/// `transient_nonexcl_queues` deprecation (denied by default in 4.3+).
+///
+pub fn durable_queue_options() -> QueueDeclareOptions {
+    QueueDeclareOptions {
+        durable: true,
+        ..QueueDeclareOptions::default()
+    }
+}
 
 /// Node signal queue - nodes send messages here
 pub const NODE_SIGNAL_QUEUE: &str = "NodeSignal";
@@ -130,9 +145,15 @@ pub fn decode_terminal_create_response(
             NodeCommandResult::Terminal(TerminalCommandResult::Created { terminal_id }) => {
                 Some((resp.command_id.clone(), Ok(terminal_id.clone())))
             }
-            NodeCommandResult::Error { message } => {
-                Some((resp.command_id.clone(), Err(message.clone())))
-            }
+            NodeCommandResult::Terminal(_) => Some((
+                resp.command_id.clone(),
+                Err("Unexpected terminal result".into()),
+            )),
+            //
+            // Bare Error is handled by the caller against the pending map —
+            // matching every Error here would swallow intercept (and other)
+            // command failures before they reach their handlers.
+            //
             _ => None,
         }
     } else {
@@ -565,11 +586,30 @@ pub struct NodeRegistrationAck {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientRegistration {
     pub client_id: String,
+    ///
+    /// Correlates this registration attempt with RegistrationAck (ServiceOnline
+    /// re-register and initial connect). Empty for legacy peers.
+    ///
+    #[serde(default)]
+    pub registration_nonce: String,
+    ///
+    /// When re-registering after ServiceOnline, the announced service instance.
+    /// Service echoes it only when it matches (or field is empty).
+    ///
+    #[serde(default)]
+    pub expected_service_instance_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClientRegistrationAck {
     pub client_id: String,
+    /// Opaque service-process identity for clear-generation scoping.
+    /// When this changes (service restart), clients reset their clear epoch.
+    #[serde(default)]
+    pub service_instance_id: String,
+    /// Echo of ClientRegistration.registration_nonce for correlation.
+    #[serde(default)]
+    pub registration_nonce: String,
 }
 
 //
@@ -1652,6 +1692,25 @@ pub enum ClientSignalMessage {
     },
 
     //
+    // Documentation helper agent — a lightweight, doc-seeded conversational
+    // assistant, independent of the orchestrator. Each prompt carries its own
+    // `request_id` for correlation; responses stream back as the
+    // `DocHelper*` direct messages. `context` is optional structured screen
+    // context captured from the active TUI window.
+    //
+    DocHelperPrompt {
+        client_id: String,
+        request_id: String,
+        prompt: String,
+        history: Vec<(String, String)>,
+        context: Option<String>,
+    },
+    DocHelperCancel {
+        client_id: String,
+        request_id: String,
+    },
+
+    //
     // Semantic operations.
     //
     /// Run a semantic operation by name - service looks up the definition
@@ -1817,14 +1876,24 @@ pub enum ClientSignalMessage {
     //
     // Traffic interception.
     //
+    // Each request carries a client-generated `request_id` that is echoed in
+    // the matching response so concurrent same-kind queries cannot be swapped.
+    // `#[serde(default)]` accepts older peers that omit request_id (empty
+    // string); concurrent same-kind traffic queries still require a unique
+    // non-empty id. Mixed CLI/service upgrades should be atomic when possible.
+    //
     /// Request traffic log with filters
     TrafficLogRequest {
         client_id: String,
+        #[serde(default)]
+        request_id: String,
         filters: TrafficLogFilters,
     },
     /// Request traffic matches
     TrafficMatchesRequest {
         client_id: String,
+        #[serde(default)]
+        request_id: String,
         rule_id: Option<i64>,
         limit: usize,
         offset: usize,
@@ -1832,16 +1901,22 @@ pub enum ClientSignalMessage {
     /// Clear all traffic data
     TrafficClear {
         client_id: String,
+        #[serde(default)]
+        request_id: String,
     },
     /// Fetch a single traffic entry by ID (including full request/response bodies).
     /// Used when live broadcast stripped bodies to keep batch payloads small.
     TrafficGetRequest {
         client_id: String,
+        #[serde(default)]
+        request_id: String,
         id: i64,
     },
     /// Search traffic with regex pattern across all fields
     TrafficSearchRequest {
         client_id: String,
+        #[serde(default)]
+        request_id: String,
         filters: TrafficSearchFilters,
     },
     /// Create an intercept rule
@@ -1876,6 +1951,9 @@ pub enum ClientSignalMessage {
     /// Enable interception on a node
     InterceptEnable {
         client_id: String,
+        /// Correlates the service response with this specific client request.
+        #[serde(default)]
+        request_id: String,
         node_id: String,
         /// Interception method (Proxy or VPN). Defaults to Proxy if not specified.
         method: Option<InterceptMethod>,
@@ -1883,6 +1961,9 @@ pub enum ClientSignalMessage {
     /// Disable interception on a node
     InterceptDisable {
         client_id: String,
+        /// Correlates the service response with this specific client request.
+        #[serde(default)]
+        request_id: String,
         node_id: String,
     },
 
@@ -2089,8 +2170,15 @@ pub enum ClientSignalMessage {
 pub enum ClientBroadcastMessage {
     /// Periodic state update with all nodes and their agents
     StateUpdate(SystemState),
-    /// Service has come online - clients should re-register
-    ServiceOnline,
+    ///
+    /// Service process started/restarted. Clients must re-register. The
+    /// `service_instance_id` is the only announced control-plane identity for
+    /// that process; delayed acks for other instances must not rebind.
+    ///
+    ServiceOnline {
+        #[serde(default)]
+        service_instance_id: String,
+    },
     /// Chain execution update (progress, completion, etc.)
     ChainExecutionUpdate(ChainExecutionUpdate),
     /// Semantic operation update (progress, completion, etc.)
@@ -2108,12 +2196,22 @@ pub enum ClientBroadcastMessage {
     // can render and filter the list without a round-trip.
     //
     /// Batch of newly-captured intercepted traffic entries (bodies stripped).
+    /// `generation` is the service clear-epoch at capture; clients ignore
+    /// batches older than their clear epoch.
     InterceptedTrafficBatch {
         entries: Vec<InterceptedTrafficEntry>,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        service_instance_id: String,
     },
     /// Batch of newly-created rule matches (bodies stripped on inner traffic).
     TrafficMatchBatch {
         matches: Vec<TrafficMatchWithDetails>,
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        service_instance_id: String,
     },
 }
 
@@ -2126,6 +2224,29 @@ pub enum ClientDirectMessage {
     TerminalOutput(TerminalOutput),
     /// Streaming session update from an ACP agent transaction
     SessionUpdate(SessionUpdate),
+
+    //
+    // Documentation helper agent streaming responses, correlated by
+    // `request_id`. `DocHelperChunk` carries an incremental text delta;
+    // `DocHelperFollowUp` indicates the helper is consulting documentation
+    // before producing a detailed continuation; `DocHelperComplete` signals
+    // the turn finished (naturally or via cancellation); `DocHelperError`
+    // reports a failure.
+    //
+    DocHelperChunk {
+        request_id: String,
+        delta: String,
+    },
+    DocHelperFollowUp {
+        request_id: String,
+    },
+    DocHelperComplete {
+        request_id: String,
+    },
+    DocHelperError {
+        request_id: String,
+        message: String,
+    },
 
     //
     // Semantic operations responses.
@@ -2237,27 +2358,52 @@ pub enum ClientDirectMessage {
     //
     /// Traffic log response
     TrafficLogResponse {
+        #[serde(default)]
+        request_id: String,
         entries: Vec<InterceptedTrafficEntry>,
         total_count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Traffic search response
     TrafficSearchResponse {
+        #[serde(default)]
+        request_id: String,
         entries: Vec<InterceptedTrafficEntry>,
         total_count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Traffic matches response
     TrafficMatchesResponse {
+        #[serde(default)]
+        request_id: String,
         matches: Vec<TrafficMatchWithDetails>,
         total_count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Traffic cleared
     TrafficCleared {
+        #[serde(default)]
+        request_id: String,
         deleted_count: usize,
+        /// Clear-epoch after a successful clear (clients ignore older live batches).
+        #[serde(default)]
+        generation: u64,
+        #[serde(default)]
+        service_instance_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Single traffic entry fetched by ID (response to TrafficGetRequest).
     TrafficGetResponse {
+        #[serde(default)]
+        request_id: String,
         id: i64,
         entry: Option<InterceptedTrafficEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Intercept rules list
     InterceptRuleListResponse {
@@ -2282,6 +2428,18 @@ pub enum ClientDirectMessage {
     },
     /// Intercept status update for a node
     InterceptStatusUpdate(InterceptStatus),
+    /// Result of InterceptEnable / InterceptDisable for the requesting client.
+    /// On success `error` is None and `status` is populated; on failure the
+    /// reverse. Used so the TUI can await enable/disable instead of fire-and-forget.
+    InterceptCommandResult {
+        #[serde(default)]
+        request_id: String,
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<InterceptStatus>,
+    },
 
     //
     // Node Event Log responses.
@@ -2527,6 +2685,19 @@ pub enum TrafficDirection {
     Receive,
 }
 
+/// Separator used when a captured endpoint can belong to more than one agent.
+pub const TRAFFIC_AGENT_SEPARATOR: char = '|';
+
+pub fn traffic_agent_candidates(label: &str) -> impl Iterator<Item = &str> {
+    label
+        .split(TRAFFIC_AGENT_SEPARATOR)
+        .filter(|candidate| !candidate.is_empty())
+}
+
+pub fn traffic_agent_matches(label: &str, candidate: &str) -> bool {
+    traffic_agent_candidates(label).any(|value| value == candidate)
+}
+
 impl std::fmt::Display for TrafficDirection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2571,6 +2742,9 @@ pub enum RuleScope {
 }
 
 /// Intercepted traffic entry sent from node to service
+pub const MAX_INTERCEPT_CAPTURE_BODY_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_INTERCEPT_HEADER_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InterceptedTrafficEntry {
     /// Optional ID (set by service when stored)
@@ -2603,6 +2777,13 @@ pub struct InterceptedTrafficEntry {
     pub response_body: Option<Vec<u8>>,
 }
 
+impl InterceptedTrafficEntry {
+    pub fn strip_bodies(&mut self) {
+        self.request_body = None;
+        self.response_body = None;
+    }
+}
+
 /// Intercept rule for matching traffic patterns
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct InterceptRule {
@@ -2610,7 +2791,8 @@ pub struct InterceptRule {
     pub id: i64,
     /// Human-readable rule name
     pub name: String,
-    /// Regex pattern to match against URL
+    /// Regex pattern matched against URL, host, method, headers, and UTF-8 bodies
+    /// (respecting rule direction).
     pub regex_pattern: String,
     /// Which direction(s) to match
     pub target_direction: TargetDirection,
@@ -2700,6 +2882,13 @@ pub struct InterceptStatus {
     pub proxy_port: Option<u16>,
     /// Domains being intercepted
     pub intercepted_domains: Vec<String>,
+    ///
+    /// True when enable failed cleanup and owned privileged resources or
+    /// recovery state remain. Re-enable is blocked until Disable/Reset
+    /// cleanup succeeds. Serde-default for older peers.
+    ///
+    #[serde(default)]
+    pub cleanup_required: bool,
 }
 
 //
@@ -2728,6 +2917,9 @@ pub enum NodeDirectMessage {
     /// Reset the node: cancel all operations, tear down state, re-register.
     /// Delivered on a dedicated queue so it is never blocked by handlers.
     Reset,
+    /// Gracefully stop the node: cancel all operations, restore system state,
+    /// and exit without reconnecting. Delivered on the lifecycle control queue.
+    Shutdown,
     /// ACP JSON-RPC frame destined for the node's ACP server
     Acp(AcpFrame),
 }
@@ -2809,6 +3001,12 @@ pub struct NodeState {
     /// Whether interception is supported on this node (Windows + has agent with intercept domain)
     #[serde(default)]
     pub intercept_supported: bool,
+    ///
+    /// Latest full intercept status retained by the service (cleanup_required,
+    /// method, port, domains). Serde-default for older peers.
+    ///
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept_status: Option<InterceptStatus>,
     pub last_update: chrono::DateTime<chrono::Utc>,
     /// Connectivity status, set by the service
     #[serde(default = "default_node_status")]

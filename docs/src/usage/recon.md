@@ -19,26 +19,50 @@ the terminal. From the **Nodes** window (`Ctrl+L`), navigate into the
 detail pane (`→`), select an agent (`↑`/`↓`), and press **`r`** to open
 the recon overlay.
 
-The overlay shows three tabs:
+The overlay is a hierarchical browser (similar to a connectors/MCP
+picker): group headers expand and collapse, leaf items open a detail
+pane on the right, and a filter bar narrows the tree.
 
-1. **Config** — discovered configuration files and their contents
-2. **Tools** — MCP servers, skills, and internal tools
-3. **Sessions** — conversation history with parsed transcripts
+Three tabs:
+
+1. **Config** — config files grouped by type (settings, instructions, …)
+2. **Tools** — MCP servers (with nested tools), skills, and internal tools
+3. **Sessions** — conversation history grouped by project path
 
 | Key | Action |
 |-----|--------|
 | `Tab` / `1` `2` `3` | Switch tab |
-| `↑` / `↓` | Navigate left pane |
-| `PgUp` / `PgDn` | Scroll content |
+| `↑` / `↓` | Move among visible tree rows |
+| `←` / `→` | Collapse / expand (or focus detail) |
+| `Space` / `Enter` | Toggle expand on branches; open leaf detail |
+| `/` | Focus filter bar (type to filter; `Esc` blurs) |
+| `PgUp` / `PgDn` | Scroll detail pane |
 | `r` | Refresh (static recon) |
-| `d` | Discover (semantic recon) |
+| `Ctrl+U` | Discover (semantic recon) |
 | `Ctrl+E` | Edit selected Config file in `$EDITOR` |
-| `Esc` / `q` | Close overlay |
+| `Esc` | Unfocus filter → clear filter → leave detail → close |
+| `Ctrl+Q` | Close overlay |
+
+**Mouse:** click chevrons to expand/collapse; click a row to select (second
+click on a branch toggles expand); hover highlights rows; drag the pane
+split; click the filter bar to type.
 
 On first open, the TUI checks the service cache. If no recon data is
 stored, it triggers an ACP `_praxis/recon` request on the node and polls
 every second until data arrives (60-second timeout). Cached data is
 displayed instantly on re-open.
+
+### Tree layout
+
+- **Tools:** `MCP Servers` → server → tools; peer sections for `Skills`
+  and `Internal`. Servers show transport, tool count, and a status badge
+  (`[ok]` / `[empty]`).
+- **Config:** groups by `config_type` (path suffixes like
+  `project_instructions: /home/...` collapse under a single
+  `project_instructions` node); expand a group to pick a file and view
+  contents (fetched on select).
+- **Sessions:** groups by project `context_path`; session rows show
+  message count and relative time (`2h ago`).
 
 ## What Recon Discovers
 

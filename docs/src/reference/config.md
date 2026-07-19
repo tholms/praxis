@@ -34,7 +34,7 @@ See [Database Configuration](../deployment/database.md) for detailed setup.
 | Variable | Effect |
 |----------|--------|
 | `PRAXIS_NOT_HIDDEN` | Disable hidden desktop for DevTools agents. Defaults to `1` in debug builds (visible for development) and `0` in release builds (hidden for production). Set to `1` to make the browser window visible for debugging. |
-| `PRAXIS_VERSION` | Docker build arg. Version of the prebuilt release tarball to download from GitHub Releases. Defaults to the version pinned in the `Dockerfile`. Usage: `PRAXIS_VERSION=0.9.29 docker compose up --build` |
+| `PRAXIS_VERSION` | Docker build arg. Version of the prebuilt release tarball to download from GitHub Releases. Defaults to the version pinned in the `Dockerfile`. Usage: `PRAXIS_VERSION=1.0.0 docker compose up --build` |
 | `PRAXIS_RELEASE_BASE` | Docker build arg. Base URL for the release download (without trailing `/v<version>/...`). Defaults to `https://github.com/originsec/praxis/releases/download`. Override to pull from a fork or mirror. |
 
 ### Logging
@@ -76,6 +76,17 @@ Access via **Settings** (`Ctrl+S`) > **LLM Providers** in the praxis TUI.
 | `llm.orchestrator.provider` | `anthropic` | Provider for Orchestrator |
 | `llm.orchestrator.model` | `claude-sonnet-4-20250514` | Model for Orchestrator |
 | `llm.orchestrator.api_key` | (encrypted) | API key for provider |
+
+Feature assignment stores the **model definition name** (not provider/model
+pairs) under:
+
+| Key | Description |
+|-----|-------------|
+| `llm_feature_orchestrator` | Model definition for the Orchestrator |
+| `llm_feature_doc_helper` | Model definition for the Help Assistant; falls back to `llm_feature_orchestrator` when unset |
+| `llm_feature_semantic_ops` | Model definition for semantic operations |
+| `llm_feature_semantic_parser` | Model definition for semantic recon parsing |
+| `llm_feature_traffic_parser` | Model definition for intercept traffic summarisation |
 
 ### Prompt Timeout
 

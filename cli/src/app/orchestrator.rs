@@ -9,12 +9,14 @@ pub enum ConversationEntry {
     UserPrompt(String),
     AssistantText(String),
     //
-    // Single entry per tool call. `outcome` is `None` while the call
-    // is in flight (we've sent the request but the result hasn't come
-    // back yet) and is filled in when the result arrives. Render uses
-    // `outcome` to pick the indicator (→ pending / ✓ ok / ✗ failed).
+    // Single entry per tool call. `tool_id` pairs start/result under
+    // concurrency (including two calls with the same tool name).
+    // `outcome` is `None` while the call is in flight and is filled in
+    // when the result arrives. Render uses `outcome` to pick the
+    // indicator (→ pending / ✓ ok / ✗ failed).
     //
     Tool {
+        tool_id: String,
         name: String,
         input: Option<String>,
         outcome: Option<ToolOutcome>,
@@ -34,10 +36,12 @@ pub(crate) fn clone_conversation_entry(e: &ConversationEntry) -> ConversationEnt
         ConversationEntry::UserPrompt(s) => ConversationEntry::UserPrompt(s.clone()),
         ConversationEntry::AssistantText(s) => ConversationEntry::AssistantText(s.clone()),
         ConversationEntry::Tool {
+            tool_id,
             name,
             input,
             outcome,
         } => ConversationEntry::Tool {
+            tool_id: tool_id.clone(),
             name: name.clone(),
             input: input.clone(),
             outcome: outcome.clone(),
@@ -131,6 +135,41 @@ pub struct OrchestratorState {
     // arrives.
     //
     pub configured_model: String,
+    //
+    // Auto-recovery state for a session the service reported lost (e.g.
+    // after a service restart). While `recovering` is true the TUI retries
+    // recreating the session with backoff, resending `recovery_prompt` and
+    // re-seeding `recovery_history` on each attempt, until it succeeds or
+    // `recovery_attempts` reaches the cap.
+    //
+    pub recovering: bool,
+    pub recovery_attempts: u32,
+    pub recovery_prompt: Option<String>,
+    pub recovery_history: Option<Vec<(String, String)>>,
+    //
+    // True while a session/new is outstanding. Prevents a second create
+    // (e.g. first prompt after /clear before SessionCreated arrives) from
+    // racing the first one and dropping the pending prompt onto a session
+    // that is immediately replaced.
+    //
+    pub create_in_flight: bool,
+    //
+    // When a plan is showing, conversation | plan horizontal split.
+    // Percentage is the conversation (left) share.
+    //
+    pub plan_split_percent: u16,
+    pub plan_dragging: bool,
+}
+
+//
+// Recovery retries before giving up, and the per-attempt backoff. The
+// service can be unreachable for ~30-60s after a restart (its MCP backend
+// waits on RabbitMQ), so the schedule needs to span that window.
+//
+pub(crate) const RECOVERY_MAX_ATTEMPTS: u32 = 6;
+
+pub(crate) fn recovery_backoff_ms(attempt: u32) -> u64 {
+    (1500u64 * attempt as u64).min(6000)
 }
 
 impl OrchestratorState {
@@ -163,6 +202,13 @@ impl Default for OrchestratorState {
             pending_seed_messages: None,
             stored: None,
             configured_model: String::new(),
+            recovering: false,
+            recovery_attempts: 0,
+            recovery_prompt: None,
+            recovery_history: None,
+            create_in_flight: false,
+            plan_split_percent: 67,
+            plan_dragging: false,
         }
     }
 }
@@ -241,19 +287,34 @@ impl App {
     }
 
     //
-    // Start a fresh orchestrator conversation in place. Closes the
-    // live service session and clears the local transcript, but leaves
-    // the prior session's record under ~/.praxis/sessions/ so it can
-    // be brought back later with `praxis --resume`.
+    // Start a fresh orchestrator conversation via standard ACP:
+    // session/close (if any) then session/new. The service holds a
+    // shared MCP client, so warm close+new is milliseconds after the
+    // first connect. Prior session files under ~/.praxis/sessions/ are
+    // left for `praxis --resume`.
     //
 
     pub(crate) async fn clear_orchestrator_session(&mut self) {
+        //
+        // Abort any in-flight recovery so a delayed retry cannot
+        // recreate the old conversation after we start fresh.
+        //
+        self.orchestrator.recovering = false;
+        self.orchestrator.recovery_attempts = 0;
+        self.orchestrator.recovery_prompt = None;
+        self.orchestrator.recovery_history = None;
+        self.orchestrator.create_in_flight = false;
+
         let active_sid = self
             .orchestrator
             .active_session()
             .map(|s| s.session_id.clone())
             .filter(|s| !s.is_empty());
         if let Some(sid) = active_sid {
+            //
+            // Await close so session/new cannot race service-side
+            // teardown (bridge commands are otherwise concurrent).
+            //
             let _ = self.acp.close_session(&sid).await;
         }
 
@@ -268,47 +329,116 @@ impl App {
     }
 
     pub(crate) async fn create_new_orchestrator_session(&mut self) {
+        //
+        // A second session/new while one is already outstanding replaces
+        // the first service session and can steal/drop a pending_prompt
+        // that was already attached to the first SessionCreated.
+        //
+        if self.orchestrator.create_in_flight {
+            return;
+        }
+
         let history = self.orchestrator.pending_history.take().unwrap_or_default();
+        self.orchestrator.create_in_flight = true;
         if let Err(e) = self.acp.create_session(".", None, history).await {
-            if let Some(session) = self.orchestrator.active_session_mut() {
-                session.messages.push(ConversationEntry::Error(format!(
-                    "Failed to create session: {}",
-                    e
-                )));
-            }
+            self.orchestrator.create_in_flight = false;
+            self.push_orchestrator_error(format!("Failed to create session: {e}"));
         }
     }
 
-    pub(crate) async fn switch_to_session(&mut self, index: usize) {
-        self.orchestrator.active_session_index = Some(index);
+    //
+    // Attach an error to the active/streaming session, or install a
+    // placeholder empty-id session so the message is visible (e.g.
+    // create failed after /clear left sessions empty).
+    //
+    pub(crate) fn push_orchestrator_error(&mut self, message: String) {
+        let idx = self
+            .orchestrator
+            .sessions
+            .iter()
+            .position(|s| s.is_streaming)
+            .or(self.orchestrator.active_session_index);
+
+        if let Some(session) = idx.and_then(|i| self.orchestrator.sessions.get_mut(i)) {
+            session.is_streaming = false;
+            session.messages.push(ConversationEntry::Error(message));
+            return;
+        }
+
+        let mut session = OrchestratorSessionState::new(String::new(), "Session".to_string());
+        session.loaded = true;
+        session.messages.push(ConversationEntry::Error(message));
+        self.orchestrator.sessions.clear();
+        self.orchestrator.sessions.push(session);
+        self.orchestrator.active_session_index = Some(0);
     }
 
-    pub(crate) async fn close_active_orchestrator_session(&mut self) {
-        if let Some(session) = self.orchestrator.active_session() {
-            let session_id = session.session_id.clone();
-            let _ = self.acp.close_session(&session_id).await;
+    //
+    // Issue a fresh session/new as part of recovering a lost session.
+    // Re-populates pending_prompt/pending_history each call because
+    // create_new_orchestrator_session consumes them, and keeps the current
+    // session in a streaming state so the UI reads as "reconnecting"
+    // rather than a dead turn.
+    //
 
-            //
-            // Remove locally immediately and switch to another session if
-            // one exists.
-            //
+    pub(crate) async fn attempt_orchestrator_recovery(&mut self) {
+        self.orchestrator.pending_prompt = self.orchestrator.recovery_prompt.clone();
+        self.orchestrator.pending_history = self.orchestrator.recovery_history.clone();
 
-            if let Some(idx) = self
+        if let Some(session) = self.orchestrator.active_session_mut() {
+            session.is_streaming = true;
+        }
+
+        //
+        // Recovery must always issue a fresh session/new; clear any stale
+        // in-flight guard left by a prior failed create.
+        //
+        self.orchestrator.create_in_flight = false;
+        self.create_new_orchestrator_session().await;
+    }
+
+    //
+    // A recovery recreate attempt failed (service still starting). Retry
+    // with backoff up to RECOVERY_MAX_ATTEMPTS, then give up with a
+    // visible, actionable error.
+    //
+
+    pub(crate) fn schedule_orchestrator_recovery_retry(&mut self) {
+        self.orchestrator.recovery_attempts += 1;
+        let attempt = self.orchestrator.recovery_attempts;
+
+        if attempt >= RECOVERY_MAX_ATTEMPTS {
+            self.orchestrator.recovering = false;
+            self.orchestrator.recovery_attempts = 0;
+            self.orchestrator.recovery_prompt = None;
+            self.orchestrator.recovery_history = None;
+            self.orchestrator.pending_prompt = None;
+            self.orchestrator.pending_seed_messages = None;
+
+            let idx = self
                 .orchestrator
                 .sessions
                 .iter()
-                .position(|s| s.session_id == session_id)
-            {
-                self.orchestrator.sessions.remove(idx);
-                if self.orchestrator.sessions.is_empty() {
-                    self.orchestrator.active_session_index = None;
-                } else {
-                    let new_idx = idx.min(self.orchestrator.sessions.len() - 1);
-                    self.switch_to_session(new_idx).await;
-                }
+                .position(|s| s.is_streaming)
+                .or(self.orchestrator.active_session_index);
+            if let Some(session) = idx.and_then(|i| self.orchestrator.sessions.get_mut(i)) {
+                session.is_streaming = false;
+                session.messages.push(ConversationEntry::Error(
+                    "Could not reconnect to the orchestrator service after several attempts — it may still be starting. Send another message to retry, or /clear to start fresh.".to_string(),
+                ));
             }
+            return;
+        }
+
+        let delay = recovery_backoff_ms(attempt);
+        if let Some(tx) = self.event_tx.clone() {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                let _ = tx.send(crate::event::AppEvent::OrchestratorRetryRecovery);
+            });
         }
     }
+
     pub(crate) async fn handle_orchestrator_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -345,15 +475,16 @@ impl App {
             }
         }
 
+        if input::wants_newline(key) {
+            input::insert_newline(
+                &mut self.orchestrator.input,
+                &mut self.orchestrator.cursor_pos,
+            );
+            return;
+        }
+
         match key.code {
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                input::insert_char(
-                    &mut self.orchestrator.input,
-                    &mut self.orchestrator.cursor_pos,
-                    '\n',
-                );
-            }
-            KeyCode::Enter => {
+            KeyCode::Enter if input::wants_submit(key) => {
                 let input = self.orchestrator.input.trim().to_string();
                 let is_streaming = self
                     .orchestrator
@@ -380,19 +511,25 @@ impl App {
                     }
 
                     //
-                    // Create a session if none exists. The prompt will be
-                    // sent when SessionCreated arrives.
+                    // Create a session if none exists (or create is still
+                    // outstanding after /clear / init). The prompt is
+                    // held in pending_prompt and sent on SessionCreated.
                     //
 
-                    let needs_create = self
-                        .orchestrator
-                        .active_session()
-                        .map(|s| s.session_id.is_empty())
-                        .unwrap_or(true);
+                    let needs_create = self.orchestrator.create_in_flight
+                        || self
+                            .orchestrator
+                            .active_session()
+                            .map(|s| s.session_id.is_empty())
+                            .unwrap_or(true);
                     if needs_create {
                         self.orchestrator.pending_prompt = Some(input.clone());
                         self.orchestrator.input.clear();
                         self.orchestrator.cursor_pos = 0;
+                        //
+                        // create_new is a no-op when create_in_flight —
+                        // only queue the prompt for the outstanding create.
+                        //
                         self.create_new_orchestrator_session().await;
                         return;
                     }
@@ -420,9 +557,10 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if c != '\n' => {
                 //
                 // Opening / at start of empty input opens command palette.
+                // Literal '\n' is handled by wants_newline above.
                 //
                 input::insert_char(
                     &mut self.orchestrator.input,
@@ -491,22 +629,36 @@ impl App {
                 input::move_end(&self.orchestrator.input, &mut self.orchestrator.cursor_pos);
             }
             KeyCode::Up => {
-                input::history_up(
-                    &mut self.orchestrator.input,
+                //
+                // Prefer line movement inside a multi-line draft; fall
+                // back to history when already on the first line.
+                //
+                if !input::move_line_up(
+                    &self.orchestrator.input,
                     &mut self.orchestrator.cursor_pos,
-                    &self.orchestrator.history,
-                    &mut self.orchestrator.history_index,
-                    &mut self.orchestrator.saved_input,
-                );
+                ) {
+                    input::history_up(
+                        &mut self.orchestrator.input,
+                        &mut self.orchestrator.cursor_pos,
+                        &self.orchestrator.history,
+                        &mut self.orchestrator.history_index,
+                        &mut self.orchestrator.saved_input,
+                    );
+                }
             }
             KeyCode::Down => {
-                input::history_down(
-                    &mut self.orchestrator.input,
+                if !input::move_line_down(
+                    &self.orchestrator.input,
                     &mut self.orchestrator.cursor_pos,
-                    &self.orchestrator.history,
-                    &mut self.orchestrator.history_index,
-                    &self.orchestrator.saved_input,
-                );
+                ) {
+                    input::history_down(
+                        &mut self.orchestrator.input,
+                        &mut self.orchestrator.cursor_pos,
+                        &self.orchestrator.history,
+                        &mut self.orchestrator.history_index,
+                        &self.orchestrator.saved_input,
+                    );
+                }
             }
             KeyCode::Esc => {
                 self.orchestrator.input.clear();
@@ -561,6 +713,8 @@ impl App {
                 // local session state and install the new one.
                 //
 
+                self.orchestrator.create_in_flight = false;
+
                 let label = "Session".to_string();
                 let mut session = OrchestratorSessionState::new(session_id.clone(), label);
                 session.loaded = true;
@@ -585,6 +739,14 @@ impl App {
                 self.orchestrator.sessions.clear();
                 self.orchestrator.sessions.push(session);
                 self.orchestrator.active_session_index = Some(0);
+
+                //
+                // Session is live — clear any in-progress recovery.
+                //
+                self.orchestrator.recovering = false;
+                self.orchestrator.recovery_attempts = 0;
+                self.orchestrator.recovery_prompt = None;
+                self.orchestrator.recovery_history = None;
 
                 //
                 // Initialise the on-disk record for this session. If we
@@ -640,6 +802,58 @@ impl App {
                         }
                     }
                 }
+            }
+
+            AcpNotification::SessionLost { session_id, prompt } => {
+                //
+                // The service no longer has this orchestrator session (it
+                // most likely restarted). Recreate a fresh session and
+                // resend the prompt so the turn isn't dead-ended.
+                //
+                // If we're already recovering, this is a stale duplicate
+                // (e.g. the user sent another prompt to the dead session
+                // mid-recovery) — the in-flight recovery already resends the
+                // original prompt, so ignore it rather than restarting.
+                //
+                if self.orchestrator.recovering {
+                    return;
+                }
+                self.orchestrator.recovering = true;
+                self.orchestrator.recovery_attempts = 0;
+                self.orchestrator.recovery_prompt = Some(prompt.clone());
+
+                //
+                // Preserve the visible transcript across the recreate. Drop
+                // the trailing user prompt — it is resent and re-added when
+                // the new session is confirmed.
+                //
+                let mut seed: Vec<ConversationEntry> = self
+                    .orchestrator
+                    .session_by_id_mut(&session_id)
+                    .map(|s| s.messages.iter().map(clone_conversation_entry).collect())
+                    .unwrap_or_default();
+                if matches!(seed.last(), Some(ConversationEntry::UserPrompt(t)) if *t == prompt) {
+                    seed.pop();
+                }
+                self.orchestrator.pending_seed_messages = Some(seed);
+
+                //
+                // Reseed the model context from the on-disk record so the
+                // recreated service session isn't blank. Held in
+                // recovery_history so it survives across retry attempts.
+                //
+                if let Some(stored) = self.orchestrator.stored.as_ref() {
+                    let history: Vec<(String, String)> = stored
+                        .messages
+                        .iter()
+                        .map(|m| (m.role.clone(), m.text.clone()))
+                        .collect();
+                    if !history.is_empty() {
+                        self.orchestrator.recovery_history = Some(history);
+                    }
+                }
+
+                self.attempt_orchestrator_recovery().await;
             }
 
             AcpNotification::InitializeResult => {}
@@ -708,6 +922,7 @@ impl App {
                         session.active_tool = Some(name.clone());
                         session.active_tool_input = raw_input.clone();
                         session.messages.push(ConversationEntry::Tool {
+                            tool_id,
                             name,
                             input: raw_input,
                             outcome: None,
@@ -726,37 +941,22 @@ impl App {
                     return;
                 }
                 if let Some(session) = self.orchestrator.session_by_id_mut(&session_id) {
-                    let tool_name = session.active_tool.take().unwrap_or(tool_id);
-                    session.active_tool_input = None;
-                    if tool_name != "report_plan" {
-                        //
-                        // Find the most recent in-flight Tool entry and
-                        // fill in its outcome. Falls back to a fresh
-                        // entry if we somehow received a result without
-                        // a preceding request.
-                        //
-                        let updated = session.messages.iter_mut().rev().find_map(|m| match m {
-                            ConversationEntry::Tool {
-                                name: n,
-                                outcome: outcome @ None,
-                                ..
-                            } if *n == tool_name => Some(outcome),
-                            _ => None,
-                        });
-                        if let Some(slot) = updated {
-                            *slot = Some(ToolOutcome {
-                                success,
-                                result: Some(result),
-                            });
-                        } else {
-                            session.messages.push(ConversationEntry::Tool {
-                                name: tool_name,
-                                input: None,
-                                outcome: Some(ToolOutcome {
-                                    success,
-                                    result: Some(result),
-                                }),
-                            });
+                    //
+                    // Pair strictly by tool_call_id. Unmatched results
+                    // (report_plan is never stored as a Tool entry; plan
+                    // arrives via PlanUpdate) are ignored — never fall
+                    // back to active_tool/name matching, which cross-wires
+                    // concurrent same-batch tools.
+                    //
+                    if apply_orchestrator_tool_result(
+                        &mut session.messages,
+                        &tool_id,
+                        success,
+                        result,
+                    ) {
+                        if !has_pending_orchestrator_tool(&session.messages) {
+                            session.active_tool = None;
+                            session.active_tool_input = None;
                         }
                     }
                 }
@@ -782,6 +982,14 @@ impl App {
             }
 
             AcpNotification::PromptComplete { .. } => {
+                //
+                // A turn completed, so any prior session-loss recovery
+                // succeeded — clear the guard.
+                //
+                self.orchestrator.recovering = false;
+                self.orchestrator.recovery_attempts = 0;
+                self.orchestrator.recovery_prompt = None;
+                self.orchestrator.recovery_history = None;
                 //
                 // Find the session that was streaming, flush pending
                 // tools, and snapshot the assistant turn to disk.
@@ -837,20 +1045,22 @@ impl App {
 
             AcpNotification::Error { message } => {
                 //
-                // Show error in the streaming session if one exists,
-                // otherwise the active session.
+                // Create failures also arrive here; release the in-flight
+                // guard so the user can retry (or /clear again).
                 //
-                let idx = self
-                    .orchestrator
-                    .sessions
-                    .iter()
-                    .position(|s| s.is_streaming)
-                    .or(self.orchestrator.active_session_index);
+                self.orchestrator.create_in_flight = false;
 
-                if let Some(session) = idx.and_then(|i| self.orchestrator.sessions.get_mut(i)) {
-                    session.is_streaming = false;
-                    session.messages.push(ConversationEntry::Error(message));
+                //
+                // While recovering, an error means the recreate attempt
+                // failed (the service is still coming up). Retry with
+                // backoff rather than surfacing it, until the attempt cap.
+                //
+                if self.orchestrator.recovering {
+                    self.schedule_orchestrator_recovery_retry();
+                    return;
                 }
+
+                self.push_orchestrator_error(message);
             }
         }
     }
@@ -953,116 +1163,154 @@ impl App {
         }
     }
 
-    pub(crate) async fn handle_orchestrator_mouse(
-        &mut self,
-        mouse: MouseEvent,
-        content_area: Rect,
-    ) {
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            let active_session = self.orchestrator.active_session();
-            let show_tabs = self.orchestrator.sessions.len() > 1;
-            let plan_height = active_session
-                .and_then(|s| s.current_plan.as_ref())
-                .map(|plan| (plan.steps.len() as u16 + 2).min(12))
-                .unwrap_or(0);
-            let plan_spacer = if plan_height > 0 { 1 } else { 0 };
-            let is_streaming = active_session.map(|s| s.is_streaming).unwrap_or(false);
+}
 
-            let tab_height = if show_tabs { 1 } else { 0 };
+//
+// Pair a tool-result notification to a pending Tool conversation entry by
+// tool_call_id only. Returns true when an entry was updated.
+//
+// Unmatched ids (e.g. report_plan, which is never pushed as a Tool entry)
+// are intentionally ignored — never match by name / active_tool, which
+// would attach a report_plan result onto a concurrent sibling tool.
+//
+fn apply_orchestrator_tool_result(
+    messages: &mut [ConversationEntry],
+    tool_id: &str,
+    success: bool,
+    result: String,
+) -> bool {
+    let matched = messages.iter_mut().find_map(|m| match m {
+        ConversationEntry::Tool {
+            tool_id: id,
+            outcome: outcome @ None,
+            ..
+        } if *id == tool_id => Some(outcome),
+        _ => None,
+    });
+    if let Some(slot) = matched {
+        *slot = Some(ToolOutcome {
+            success,
+            result: Some(result),
+        });
+        true
+    } else {
+        false
+    }
+}
 
-            let orch_chunks = Layout::vertical([
-                Constraint::Length(tab_height),
-                Constraint::Min(1),
-                Constraint::Length(plan_spacer),
-                Constraint::Length(plan_height),
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(content_area);
-
-            //
-            // Tab bar click — switch sessions.
-            //
-
-            if show_tabs && mouse.row == orch_chunks[0].y {
-                let col = mouse.column.saturating_sub(orch_chunks[0].x) as usize;
-                let mut x = 0usize;
-                for (i, session) in self.orchestrator.sessions.iter().enumerate() {
-                    let is_active = self.orchestrator.active_session_index == Some(i);
-                    let label_len = if session.is_streaming {
-                        session.label.len() + 4 // " ● Label "
-                    } else {
-                        session.label.len() + 2 // " Label "
-                    };
-                    let tab_width = if is_active { label_len + 2 } else { label_len }; // brackets
-                    let total_width = tab_width + 1; // trailing space
-                    if col >= x && col < x + total_width {
-                        self.orchestrator.active_session_index = Some(i);
-                        return;
-                    }
-                    x += total_width;
-                }
-                return;
+fn has_pending_orchestrator_tool(messages: &[ConversationEntry]) -> bool {
+    messages.iter().any(|m| {
+        matches!(
+            m,
+            ConversationEntry::Tool {
+                outcome: None,
+                ..
             }
+        )
+    })
+}
 
-            let model_area = orch_chunks[4];
-            let _tokens_area = orch_chunks[7];
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            //
-            // Model info line click — open model select.
-            //
-            if mouse.row == model_area.y {
-                let padded_x = model_area.x + 1;
-                let padded_w = model_area.width.saturating_sub(2);
-                let rel = mouse.column.saturating_sub(padded_x) as usize;
+    fn pending_tool(tool_id: &str, name: &str) -> ConversationEntry {
+        ConversationEntry::Tool {
+            tool_id: tool_id.to_string(),
+            name: name.to_string(),
+            input: None,
+            outcome: None,
+        }
+    }
 
-                let (provider, model) = active_session
-                    .map(|s| (s.provider.as_deref(), s.model.as_deref()))
-                    .unwrap_or((None, None));
-                let model_text = match (provider, model) {
-                    (Some(p), Some(m)) => format!("{} / {}", p, m),
-                    _ => "No session".to_string(),
-                };
-                let full_line = format!("^e/^!e tools  ^w save   {} ", model_text);
-                let full_len = full_line.len();
+    #[test]
+    fn pairs_result_by_tool_id_not_name() {
+        let mut messages = vec![
+            pending_tool("uuid-a", "node_list"),
+            pending_tool("uuid-b", "node_list"),
+        ];
 
-                let line_start = if (padded_w as usize) > full_len {
-                    padded_w as usize - full_len
-                } else {
-                    0
-                };
+        assert!(apply_orchestrator_tool_result(
+            &mut messages,
+            "uuid-b",
+            true,
+            "second".into(),
+        ));
 
-                if rel >= line_start {
-                    let line_rel = rel - line_start;
-                    if line_rel < 14 {
-                        self.cycle_tools_display();
-                    } else if line_rel >= 16 && line_rel < 23 {
-                        self.open_save_session();
-                    } else if line_rel >= 24 {
-                        self.open_model_select().await;
-                    }
-                }
-                return;
+        match &messages[0] {
+            ConversationEntry::Tool {
+                tool_id,
+                outcome: None,
+                ..
+            } => assert_eq!(tool_id, "uuid-a"),
+            other => panic!("first entry should still be pending: {:?}", other_debug(other)),
+        }
+        match &messages[1] {
+            ConversationEntry::Tool {
+                tool_id,
+                outcome: Some(o),
+                ..
+            } => {
+                assert_eq!(tool_id, "uuid-b");
+                assert!(o.success);
+                assert_eq!(o.result.as_deref(), Some("second"));
             }
+            _ => panic!("second entry should be completed"),
+        }
+    }
 
-            //
-            // Input area click — position cursor.
-            //
-            let input_area = orch_chunks[5];
-            if mouse.row >= input_area.y
-                && mouse.row < input_area.y.saturating_add(input_area.height)
-                && mouse.column >= input_area.x
-                && mouse.column < input_area.x.saturating_add(input_area.width)
-                && !is_streaming
-            {
-                let text_start = input_area.x + 3;
-                let click_offset = mouse.column.saturating_sub(text_start) as usize;
-                let len = self.orchestrator.input.len();
-                self.orchestrator.cursor_pos = click_offset.min(len);
-                return;
+    #[test]
+    fn report_plan_result_does_not_consume_pending_sibling() {
+        //
+        // report_plan ToolCall is never stored; its ToolResult must be a
+        // no-op and must not fill the pending node_list entry.
+        //
+        let mut messages = vec![pending_tool("uuid-node", "node_list")];
+
+        assert!(!apply_orchestrator_tool_result(
+            &mut messages,
+            "uuid-plan",
+            true,
+            r#"{"status":"success"}"#.into(),
+        ));
+
+        match &messages[0] {
+            ConversationEntry::Tool {
+                tool_id,
+                name,
+                outcome: None,
+                ..
+            } => {
+                assert_eq!(tool_id, "uuid-node");
+                assert_eq!(name, "node_list");
             }
+            _ => panic!("node_list must remain pending after unmatched report_plan result"),
+        }
+        assert!(has_pending_orchestrator_tool(&messages));
+    }
+
+    #[test]
+    fn unmatched_result_does_not_create_ghost_entry() {
+        let mut messages = vec![pending_tool("uuid-a", "agent_list")];
+        assert!(!apply_orchestrator_tool_result(
+            &mut messages,
+            "unknown-id",
+            false,
+            "err".into(),
+        ));
+        assert_eq!(messages.len(), 1);
+        assert!(has_pending_orchestrator_tool(&messages));
+    }
+
+    fn other_debug(entry: &ConversationEntry) -> String {
+        match entry {
+            ConversationEntry::Tool { tool_id, name, outcome, .. } => {
+                format!("Tool {{ tool_id={tool_id}, name={name}, outcome={} }}", outcome.is_some())
+            }
+            ConversationEntry::UserPrompt(_) => "UserPrompt".into(),
+            ConversationEntry::AssistantText(_) => "AssistantText".into(),
+            ConversationEntry::Info(_) => "Info".into(),
+            ConversationEntry::Error(_) => "Error".into(),
         }
     }
 }

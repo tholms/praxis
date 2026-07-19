@@ -48,8 +48,8 @@ Sessions. Press `r` to refresh static recon.
 
 ### Semantic Recon
 
-For deeper discovery, press `d` to run semantic recon (requires an LLM
-configured for "Semantic Parser"). This uses the LLM to parse
+For deeper discovery, press `Ctrl+U` to run semantic recon (requires an
+LLM configured for "Semantic Parser"). This uses the LLM to parse
 configuration files and extract tool definitions that might not be
 obvious from static analysis. It also creates sessions and communicates
 directly with the agent to discover its full capabilities, so it takes
@@ -119,7 +119,7 @@ For more complex workflows, you can chain multiple operations together. See [Sem
 ## Step 7: Enable Interception (Optional)
 
 To see the traffic between the agent and its LLM backend, open the
-**Intercept** window (`Ctrl+I`):
+**Intercept** window (`Ctrl+T`):
 
 1. Select your node
 2. Choose a method:

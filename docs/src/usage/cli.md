@@ -49,6 +49,9 @@ LLM-powered conversation interface for coordinating operations across the Praxis
 - Single orchestrator session per TUI run — the conversation lifetime equals the TUI process lifetime. Use `praxis --continue` or `praxis --resume` on the next launch to bring it back. `Ctrl+Alt+W` exports the transcript to markdown.
 - `Ctrl+C` cancels the in-flight prompt
 - `Ctrl+E` toggles the tools panel; `Ctrl+Alt+E` expands it fully
+- `Shift+Enter` (or `Alt+Enter`) inserts a newline in the prompt; bare
+  `Enter` sends. Multi-line drafts grow the input box; `↑`/`↓` move
+  between lines first, then through command history.
 
 ### Nodes (`Ctrl+L`)
 
@@ -56,13 +59,16 @@ Node and agent management with integrated session chat and terminal access:
 - Node list with status indicators (active/warning/inactive), OS details, and agent counts
 - Agent selection and concurrent ACP session management
 - **Session Chat** — direct conversation with agents, with YOLO mode and working directory selection
-- **Active Sessions** overlay (`Ctrl+W`) — see every live session across nodes and connectors; Enter to resume, `d` / `Del` to discard, Esc to dismiss
-- **Terminal** (`Ctrl+R` to create, `Ctrl+T` to toggle) — full PTY terminal emulation with scrollback
+- **Active Sessions** overlay (`Ctrl+W`) — see every live session across nodes and connectors; Enter to resume, `Ctrl+D` / `Del` to discard, Esc to dismiss
+- **Terminal** (`Ctrl+Y` to toggle) — full PTY terminal emulation with scrollback
 - **Recon** (`r` with an agent selected in the detail pane) — view reconnaissance results directly in the terminal
 
 Inside a chat view, `Esc` or `Ctrl+W` **pauses** the session (leaves it
 running on the node; resume from the Active Sessions overlay). `Ctrl+C`
 cancels an in-flight prompt, or closes the session if the agent is idle.
+`Shift+Enter` (or `Alt+Enter`) inserts a newline; bare `Enter` sends.
+Multi-line drafts grow the input box; `↑`/`↓` move between lines first,
+then through history.
 The status bar shows `N sessions` whenever any concurrent sessions are
 live. On first connect, whenever you open the Nodes window, and after a
 node reset, the TUI calls `session/list` on each node to pick up
@@ -71,69 +77,68 @@ sessions left alive from previous runs or other clients.
 #### Recon Overlay
 
 The recon overlay opens as a full-screen modal from the Nodes detail
-pane. It shows config files, tools, and sessions in a tabbed terminal
-interface.
+pane. It is a hierarchical browser (expand/collapse groups, filter bar,
+detail pane) with three tabs: **Config**, **Tools**, and **Sessions**.
+See [Reconnaissance](./recon.md#tui) for the full tree layout and key
+table.
 
 | Key | Action |
 |-----|--------|
 | `Tab` / `1` `2` `3` | Switch tab (Config / Tools / Sessions) |
-| `↑` / `↓` | Navigate left pane list |
-| `PgUp` / `PgDn` | Scroll right pane content |
-| `r` | Trigger static recon refresh |
-| `d` | Trigger semantic recon (Discover) |
+| `↑` / `↓` | Move among visible tree rows |
+| `←` / `→` | Collapse / expand or focus detail |
+| `Space` / `Enter` | Toggle expand on branches; open leaf detail |
+| `PgUp` / `PgDn` | Scroll detail pane |
+| `/` | Focus filter bar |
+| `r` | Static recon refresh |
+| `Ctrl+U` | Semantic recon (Discover) |
 | `Ctrl+E` | Edit selected Config file in `$EDITOR` (Config tab only) |
-| `Esc` / `q` | Close overlay |
+| `Esc` | Unfocus filter → clear filter → leave detail → close |
+| `Ctrl+Q` | Close overlay |
 
 When opened, the TUI first checks the service cache for existing recon
 data. If none is cached, it sends an ACP `_praxis/recon` request to the
 node and polls `request_recon` every second for up to 60 seconds. Cached
 recon data appears instantly on re-open.
 
-The **Config** tab shows discovered configuration files in the left pane
-and the selected file's contents in the right pane. Pre-fetched contents
-are shown inline; files discovered by static recon but not yet fetched
-display a placeholder. Press `Ctrl+E` to open the selected file in
+Press `Ctrl+E` on a Config leaf to open the selected file in
 `$VISUAL`/`$EDITOR`; on a clean exit with changes, the new contents are
-written back to the node and the right pane refreshes (a transient
-"Saved" / "No changes" / error status shows in the recon header).
+written back to the node and the detail pane refreshes.
 
-The **Tools** tab has three categories: MCP Servers, Skills, and Internal
-tools. The left pane shows the category list; the right pane shows
-server details and tool lists for MCP, or flat tool lists for Skills and
-Internal.
+### Intercept (`Ctrl+T`)
 
-The **Sessions** tab shows discovered session files on the left and parsed
-conversation transcripts on the right. Session content is parsed as
-JSONL, JSON array, or raw text depending on the agent's format.
+Live traffic interception with three tabs (`Tab` / `Shift+Tab` to switch).
+Enable/disable interception from the **Nodes** window with **`i`** (not
+from this window).
 
-### Intercept (`Ctrl+I`)
-
-Live traffic interception with three tabs (`Tab` / `Shift+Tab` to switch):
-
-- **Log** — incoming traffic streams from every node into a ring buffer.
-  HTTP entries show individually; WebSocket and HTTP/2 frames group by
-  `(node, url)` so streaming endpoints don't flood the list.
+- **Traffic** — incoming traffic streams from every node into a ring buffer
+  (2,000-entry cap; bodies load lazily on selection; 64 MiB body cache).
+  HTTP entries show individually; WebSocket frames group by flow id and
+  HTTP/2 by flow+stream so concurrent sockets don't flood the list.
 - **Rules** — create, edit, delete, and toggle intercept rules (regex
-  patterns with direction and scope). Rules can carry an optional LLM
-  summarisation prompt.
+  patterns with direction and scope). List on the left; selected-rule
+  detail on the right (prompt, scope, match count). Rules can carry an
+  optional LLM summarisation prompt.
 - **Matches** — matched-traffic review with AI summaries (when a rule
   has a summarisation prompt).
 
-#### Log tab
+#### Traffic tab
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Focus detail pane (then `↑`/`↓` scrolls detail) |
-| `Esc` | Unfocus detail / clear search |
-| `/` | Focus search box (regex, falls back to substring) |
-| `f` | Cycle protocol filter: all → http → ws → h2 |
-| `n` | Cycle node filter (no popup; `Esc` clears) |
+| `Enter` / `→` | Focus detail pane (then `↑`/`↓` scrolls detail) |
+| `Esc` / `←` | Unfocus detail / clear filter (Esc ladder) |
+| `/` | Focus filter box (regex, falls back to substring) |
+| `Ctrl+Enter` | Server-side traffic search (while filter focused) |
+| `n` | Cycle node filter |
 | `a` | Cycle agent filter |
 | `p` | Pause / resume the live stream |
+| `t` | Toggle follow-tail |
 | `r` | Re-request the initial page from the service |
-| `c` | Clear ALL traffic (with confirmation) |
-| `H` | Cycle body render mode: pretty → raw → hex |
-| `i` | Toggle interception on the selected entry's node |
+| `Ctrl+X` | Clear ALL traffic (with confirmation) |
+| `b` | Cycle body render mode: pretty → raw → hex |
+| `y` | Copy selected URL |
+| `m` | Jump to Matches for the selected traffic row |
 
 Request and response bodies arrive via a second fetch on selection to
 keep the broadcast payload small — large bodies load within a few
@@ -143,26 +148,43 @@ hundred milliseconds after you navigate to an entry.
 
 | Key | Action |
 |-----|--------|
-| `n` | Create a new rule |
-| `e` | Edit the selected rule |
-| `d` | Delete the selected rule (with confirmation) |
+| `→` | Focus rule detail pane (then `↑`/`↓` scrolls detail) |
+| `←` / `Esc` | Unfocus detail |
+| `Ctrl+N` | Create a new rule |
+| `Ctrl+E` | Edit the selected rule |
+| `Ctrl+D` | Delete the selected rule (with confirmation) |
+| `Ctrl+U` | Duplicate selected rule |
 | `Space` | Toggle enabled / disabled |
 | `Enter` | Jump to the Matches tab filtered to this rule |
 | `r` | Refresh the rules list |
+| `/` | Filter rules by name/pattern |
 
-The rule form (open via `n` or `e`) fields: Name, Regex, Direction
+The rule form (open via `Ctrl+N` / `Ctrl+E`) fields: Name, Regex
+(must compile — invalid patterns are rejected), Direction
 (`send` / `receive` / `both`), Scope (`all` / `node` / `agent`), and an
 optional LLM summary prompt. `Tab` moves between fields, `Space` /
 `←` / `→` cycles select-style fields, `Ctrl+S` saves, `Esc` cancels.
+
+Noninteractive commands:
+
+```bash
+praxis_cli intercept status
+praxis_cli intercept enable <node-prefix> [--method tproxy|vpn|proxy|hosts]
+praxis_cli intercept disable <node-prefix>
+```
 
 #### Matches tab
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Focus match detail pane |
+| `Enter` / `→` | Focus match detail pane |
 | `f` | Cycle rule filter |
-| `Esc` | Clear rule filter / unfocus detail |
+| `Esc` / `←` | Unfocus detail / clear filters |
 | `r` | Refresh |
+| `/` | Filter matches |
+| `y` | Copy URL |
+| `b` | Cycle body mode |
+| `Ctrl+N` | Create rule from match |
 
 ### Log Query (`Ctrl+G`)
 
@@ -171,8 +193,11 @@ logs, recon results, operations history, and more — 12 virtual tables in
 total). See [Log Query](./log-query.md) for the full query reference.
 
 - Multi-line editor with basic KQL keyword highlighting
-- `Ctrl+Enter` runs the query; the spinner in the hint line indicates
-  in-flight execution
+- `Ctrl+R` runs the query (`Ctrl+Enter` is kept as an alias); the spinner
+  in the hint line indicates in-flight execution
+- `Ctrl+E` opens the current query in `$VISUAL` / `$EDITOR` (falls back
+  to `vi` / `notepad`). Save and quit cleanly to replace the in-app
+  editor buffer with the saved text
 - `Tab` opens a context-aware autocomplete popup (tables at start of
   query, operators after `|`, columns inside `where` / `project` /
   `sort`, functions & keywords inline). `↑`/`↓` navigate, `Enter`
@@ -180,7 +205,8 @@ total). See [Log Query](./log-query.md) for the full query reference.
 - `?` toggles a schema sidebar listing every available table with its
   columns and descriptions
 - `Esc` from the editor moves focus to the results; `i` from the results
-  moves focus back to the editor
+  moves focus back to the editor (Log Query is the exception to the
+  list/detail focus model — it is editor-first)
 
 Results pane:
 
@@ -188,11 +214,11 @@ Results pane:
 |-----|--------|
 | `↑` `↓` `PgUp` `PgDn` `g` `G` | Row navigation |
 | `Enter` | Expand the selected row into a key/value detail pane (JSON fields pretty-printed) |
-| `/` | Open a row-search filter (substring match across all cells) |
+| `/` | Open a row filter (substring match across all cells) |
 | `s` | Cycle the sort column |
 | `S` | Toggle sort direction |
 | `r` | Re-run the last query |
-| `Esc` | Close expanded row / clear search / return to editor |
+| `Esc` | Close expanded row / clear filter / return to editor |
 
 Response bodies in `TrafficLogs` and JSON columns like
 `ToolkitActionsLog.details_json` auto-pretty-print in the detail pane.
@@ -207,7 +233,7 @@ Operation and chain management with three tabs (`Tab` / `Shift+Tab` to switch):
 
 Common actions:
 - Create new operations inline (`Ctrl+N` on the Library tab)
-- Create new chains via the chain builder (`Ctrl+Alt+N` on the Library tab, or click `^! newchain` in the hint bar)
+- Create new chains via the chain builder (`Ctrl+Alt+N` on the Library tab, or click `^!n new chain` in the hint bar)
 - Edit an existing op or chain (`Ctrl+E` with the row selected — opens the op form for ops, the chain builder for chains)
 - Run operations and chains with node/agent selection and YOLO mode (`Ctrl+R`)
 - Delete the selected op or chain (`Ctrl+D`)
@@ -215,18 +241,21 @@ Common actions:
 
 #### Library tab — chain builder
 
-The chain builder is a visual canvas with draggable element blocks and
-orthogonal line connectors between ports. It is mouse-first:
+The chain builder is a full-screen TUI canvas with draggable element blocks and
+orthogonal line connectors between ports. It is mouse-first but fully usable
+from the keyboard for core authoring actions.
 
-- **Canvas** — drag a block by its body to move it; drag empty space to pan; the mouse wheel scrolls vertically. Block positions persist in `ChainDefinitionInput.positions` so each chain remembers its layout.
-- **Ports** — every block exposes filled circles `●` on its left (input) and right (output) edges. Click an output port and drag to an input port on another block to create a connection. A rubber-band line follows the cursor while you drag.
-- **Selection** — single-click a block to select it; click a connector segment to select that connection. The selected item's fields appear in the properties strip below the canvas.
-- **Properties strip** — for blocks: click any field to edit inline; the kind cycler `◂ Kind ▸` changes the element type; `[Delete]` removes the block (and any incident connections). For connections: the condition cycler toggles `any` / `on success` / `on failure`; the port numbers are editable.
-- **Header strip** — `Name`, `Category`, `Timeout`, and `Description` text fields are at the top of the modal; click to edit.
-- **Palette** — the row of `[+ TRG]`, `[+ OP]`, … buttons along the bottom drops a new element of that kind at the centre of the visible canvas.
-- **Save / Cancel** — buttons in the top-right corner of the modal; `Ctrl+S` and `Esc` are keyboard equivalents.
+- **Canvas** — drag a block by its body to move it (drag starts only after a small movement threshold so a plain click does not nudge the block); drag empty space to pan; the mouse wheel scrolls vertically. Block positions persist in `ChainDefinitionInput.positions` so each chain remembers its layout.
+- **Ports** — every block exposes filled circles `●` on its left (input) and right (output) edges. Ports and connector segments hit-test with a multi-cell tolerance. Click an output port and drag to an input port on another block to create a connection. A rubber-band line follows the cursor while you drag. Loop outputs are labeled `r` (retry / port 0) and `x` (exit / port 1).
+- **Selection** — single-click a block or connector segment to select it. `Enter` or double-click opens the **properties modal** for that selection.
+- **Properties modal** — for blocks: click fields to edit inline; prompts and tool params accept multi-line input (`Shift+Enter` inserts a newline); pickers for operation / model / tool / payload / session group; kind cycler `◂ Kind ▸` only among body kinds (Trigger and Termination stay fixed); memory mode store/retrieve; session group + per-block config (max runtime, YOLO, working dir, require-all-inputs). For connections: condition cycler toggles `any` / `on success` / `on failure` (also shown as ✓/✗ glyphs on the edge); `c` cycles condition when a connection is selected.
+- **Header strip** — `Name`, `Category`, `Timeout`, and `Description` at the top; click to edit. Incomplete blocks show a `!` badge on the canvas; save rejects invalid graphs with a clear error list.
+- **Palette** — `[+ OP]`, `[+ TXR]`, … buttons along the bottom. New blocks place to the right of the current selection (when one exists) and auto-wire into the graph. New chains pre-select the Trigger so the first add wires in automatically. Adding an Operation opens the op picker immediately. Keyboard (canvas only, not while the properties modal is open): `o` op, `t` transform, `g` generic prompt, `m` memory, `p` loop, `k` tool, `y` payload.
+- **Keyboard selection** — `Tab` / `Shift+Tab` cycle selection through blocks then connections (no mouse required). `Enter` opens properties for the selection. `c` selects the first connection if needed and cycles its condition (`any` / on success / on failure).
+- **Layout** — `Layout` button or `l` re-runs left-to-right auto-layout from triggers.
+- **Save / Cancel** — top-right buttons; `Ctrl+S` saves; `Esc` closes the properties modal first, then cancels the form (confirms if there are unsaved changes). A dirty `*` marker appears in the hint bar while editing.
 
-A newly created chain is seeded with a connected `Trigger → Termination` pair so the graph is valid out of the box; auto-layout (left-to-right BFS from triggers) is applied to existing chains that don't yet have stored positions.
+A newly created chain is seeded with a connected `Trigger → Termination` pair so the graph is valid out of the box; auto-layout is applied to existing chains that don't yet have stored positions.
 
 #### Triggers tab
 
@@ -244,9 +273,15 @@ In the trigger form, `↑/↓` or `Tab`/`Shift+Tab` move between fields, `←/�
 ### Settings (`Ctrl+S`)
 
 Configuration management:
-- **LLM** — model definitions, provider selection, API keys, and feature assignment (orchestrator, semantic ops, semantic parser, traffic parser)
+- **LLM** — model definitions, provider selection, API keys, and feature assignment (orchestrator, documentation helper, semantic ops, semantic parser, traffic parser)
 - **Service** — MCP server toggle, MCP port, Claude Bridge settings (CCRv1/CCRv2 enable and port configuration), logging, log query row limits, prompt timeout
 - **About** — connection info
+
+### Help Assistant (`Ctrl+H`)
+
+Press `Ctrl+H` from **any** window to open the floating [Help Assistant](./help-assistant.md)
+overlay — a documentation-aware chat that answers questions about Praxis
+without leaving the TUI. Press `Ctrl+H` again or `Esc` to dismiss.
 
 ### Mouse Support
 
@@ -265,15 +300,35 @@ Mouse interactions work alongside keyboard controls in all windows and popups.
 |-----|--------|
 | `Ctrl+O` | Orchestrator window |
 | `Ctrl+L` | Nodes window |
-| `Ctrl+I` | Intercept window |
 | `Ctrl+P` | Operations window |
+| `Ctrl+T` | Intercept window |
+| `Ctrl+G` | Log Query window |
 | `Ctrl+S` | Settings window |
-| `Ctrl+T` | Toggle terminal mode |
+| `Ctrl+H` | Help Assistant overlay (any window) |
+| `Ctrl+Y` | Toggle terminal mode (Nodes) |
 | `Ctrl+Q` | Quit |
 
+Status bar short labels: `orchestrator · nodes · ops · intercept · logs · settings`.
+
 `Ctrl+W` is window-scoped: in Nodes it toggles the Active Sessions
-overlay (or pauses the current chat session), in Orchestrator it closes
-the active orchestrator session.
+overlay (or pauses the current chat session).
+
+### Keybinding grammar
+
+The TUI uses a consistent two-layer grammar:
+
+| Layer | Keys | Use |
+|-------|------|-----|
+| **Navigate / view** | bare keys, arrows, `Tab`, `/`, `Enter`, `Esc` | Move around lists, filter, soft toggles (pause, body mode, expand) |
+| **Change data / app** | always **Ctrl+** | Create (`^n`), edit (`^e`), delete (`^d`), run (`^r`), save (`^s`), clear-all (`^x`), windows, quit |
+
+Further conventions:
+
+- **`/`** opens a **filter** on list panes (local narrowing). Intercept Traffic also supports **server search** via `Ctrl+Enter` while the filter is focused.
+- **Esc ladder:** leave filter typing → clear filter → unfocus detail → close overlay.
+- **List + detail:** `Enter` / `→` focuses detail; `Esc` / `←` returns to the list (does not toggle).
+- **`r`** refreshes/reloads live data; **`Ctrl+R`** runs/executes (Operations Library, Log Query).
+- **Log Query exception:** `i` / `Esc` move between editor and results (editor-first window).
 
 ## Non-Interactive Mode
 
@@ -283,6 +338,7 @@ Use `-C` to run a single command and exit:
 
 ```bash
 praxis_cli -C "node list"
+praxis_cli -C "intercept enable abc123 --method tproxy"
 praxis_cli -C "session create --node abc123 --agent codex --yolo"
 ```
 
@@ -292,6 +348,7 @@ Subcommands can also be passed directly:
 
 ```bash
 praxis_cli node list
+praxis_cli intercept status
 praxis_cli session create --node abc123 --agent codex --yolo
 ```
 
@@ -321,6 +378,18 @@ session create --node <prefix> --agent <name> [--yolo] [--project <path>] [--tim
 session prompt --node <prefix> <text>
 session close --node <prefix>
 ```
+
+**Traffic Interception:**
+```bash
+intercept status [node-prefix]                    # Show interception state
+intercept enable <node-prefix> [--method proxy|vpn|hosts|tproxy]
+intercept disable <node-prefix>
+```
+
+Enable and disable wait for the selected node to finish setup or cleanup and
+return the node's error if the operation fails. Independent node commands are
+correlated separately, so concurrent callers cannot consume one another's
+responses.
 
 Every command that needs an agent takes `--agent` explicitly; ACP
 sessions are per-agent, so the same node can host concurrent sessions
@@ -380,4 +449,3 @@ To reset local state:
 ```bash
 praxis_cli --clear
 ```
-

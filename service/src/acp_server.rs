@@ -442,7 +442,8 @@ impl AcpServer {
             .unwrap_or_else(|| ("unknown".into(), "unknown".into()));
         drop(config);
 
-        self.orchestrator_manager
+        let created = self
+            .orchestrator_manager
             .create_session(
                 client_id,
                 &session_id,
@@ -453,19 +454,38 @@ impl AcpServer {
             )
             .await;
 
-        if let Some(id) = id {
-            let model_id = format!("{}/{}", provider, model_name);
-            let model_state = acp::schema::SessionModelState::new(
-                model_id.clone(),
-                vec![acp::schema::ModelInfo::new(model_id, model_name.clone())],
-            );
-            let resp = NewSessionResponse::new(session_id).models(model_state);
-            let _ = send_to_client(
-                publish_channel,
-                client_id,
-                acp_response(id, serde_json::to_value(resp).unwrap()),
-            )
-            .await;
+        //
+        // Only confirm the session when it is actually live. On failure,
+        // report the real reason against the request id so the client shows
+        // it, instead of a bare success response that leaves the client with
+        // a session the service never created.
+        //
+
+        let Some(id) = id else { return };
+
+        match created {
+            Ok(()) => {
+                let model_id = format!("{}/{}", provider, model_name);
+                let model_state = acp::schema::SessionModelState::new(
+                    model_id.clone(),
+                    vec![acp::schema::ModelInfo::new(model_id, model_name.clone())],
+                );
+                let resp = NewSessionResponse::new(session_id).models(model_state);
+                let _ = send_to_client(
+                    publish_channel,
+                    client_id,
+                    acp_response(id, serde_json::to_value(resp).unwrap()),
+                )
+                .await;
+            }
+            Err(message) => {
+                let _ = send_to_client(
+                    publish_channel,
+                    client_id,
+                    acp_error_response(id, -32000, &message),
+                )
+                .await;
+            }
         }
     }
 
@@ -591,12 +611,17 @@ pub fn session_update_user_text(session_id: &str, text: impl Into<String>) -> Cl
     )
 }
 
+//
+// `tool_call_id` must be the same value on start and result so clients can
+// pair concurrent calls (including same-name tools).
+//
 pub fn session_update_tool_call(
     session_id: &str,
+    tool_call_id: &str,
     tool_name: &str,
     tool_input: Option<Value>,
 ) -> ClientDirectMessage {
-    let mut tc = acp::schema::ToolCall::new(uuid::Uuid::new_v4().to_string(), tool_name);
+    let mut tc = acp::schema::ToolCall::new(tool_call_id.to_string(), tool_name);
     if let Some(input) = tool_input {
         tc = tc.raw_input(input);
     }
@@ -605,7 +630,7 @@ pub fn session_update_tool_call(
 
 pub fn session_update_tool_result(
     session_id: &str,
-    tool_name: &str,
+    tool_call_id: &str,
     result: &str,
     is_error: bool,
 ) -> ClientDirectMessage {
@@ -619,7 +644,7 @@ pub fn session_update_tool_result(
         .content(vec![acp::schema::ToolCallContent::Content(
             acp::schema::Content::new(result),
         )]);
-    let update = acp::schema::ToolCallUpdate::new(tool_name.to_string(), fields);
+    let update = acp::schema::ToolCallUpdate::new(tool_call_id.to_string(), fields);
     session_notification(
         session_id,
         acp::schema::SessionUpdate::ToolCallUpdate(update),

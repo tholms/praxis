@@ -50,7 +50,9 @@ Bridge nodes are created by enabling the Claude Bridge in Settings and launching
 
 ### Removing Nodes
 
-If a node disconnects and you want to remove it from the list, click the remove button. This clears the node from the service's tracking. If the node reconnects, it will appear again.
+Removing an online deployed node sends it a graceful shutdown request, which cancels active work, restores interception settings, and exits the node process before the service removes it from the list. Start the node binary again to reconnect it.
+
+Removing an offline or stale node only clears it from the service's tracking, so a future intentional restart can register normally.
 
 ### Resetting Nodes
 
@@ -68,12 +70,15 @@ Use the reset button (↻) in the node card header, the CLI command `node reset 
 
 Agents are the AI assistants detected on each node. When a node fingerprints successfully, you'll see agents like:
 
+- **Antigravity (Agy) CLI** - Google's terminal AI-agent interface (macOS, Linux, Windows)
 - **Claude Code** - Anthropic's CLI assistant
 - **Claude Desktop** - Anthropic's desktop app (Windows only)
 - **Codex CLI** - OpenAI's CLI assistant
 - **Cursor Agent** - Cursor's background agent CLI (Linux only)
 - **Gemini CLI** - Google's CLI assistant
 - **M365 Copilot** - Microsoft 365 Copilot (Windows only)
+
+See [Agent Connectors](../connectors/overview.md) for the full connector list and platform notes.
 
 ### Agent Selection
 

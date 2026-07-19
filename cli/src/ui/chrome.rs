@@ -10,7 +10,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use super::theme::{ACCENT, BG, BG_ELEMENT, BG_MENU, BORDER_SUBTLE, DIM, MUTED, TEXT, TEXT_BRIGHT};
+use super::theme::{
+    ACCENT, BG, BG_ELEMENT, BORDER, DIM, MUTED, TEXT, TEXT_BRIGHT,
+};
 
 //
 // "Bright key, muted label" hint segment with a leading-muted variant
@@ -53,6 +55,23 @@ pub fn dot(color: Color) -> Span<'static> {
 
 pub fn diamond(color: Color) -> Span<'static> {
     Span::styled("\u{25c6}", Style::default().fg(color))
+}
+
+//
+// Centered down-chevron shown above the input when a transcript is
+// scrolled up, signalling that newer content is below.
+//
+
+pub fn scroll_down_indicator(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = Line::from(Span::styled(
+        "\u{25bc}",
+        Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+    ))
+    .centered();
+    f.render_widget(Paragraph::new(line), area);
 }
 
 //
@@ -119,6 +138,19 @@ pub fn rubric(title: &str) -> Line<'static> {
 // (counts, badges) follow in DIM.
 //
 
+/// Width in terminal columns for a tab pill (label + optional count).
+pub fn tab_width(label: &str, count: Option<usize>) -> u16 {
+    let mut w = label.len() + 2; // surrounding spaces in " {} "
+    if let Some(n) = count {
+        w += n.to_string().len() + 1;
+    }
+    w as u16
+}
+
+pub fn tab_sep_width() -> u16 {
+    5 // "  ·  "
+}
+
 pub fn tab(label: &str, count: Option<usize>, active: bool) -> Vec<Span<'static>> {
     let label_style = if active {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
@@ -137,19 +169,38 @@ pub fn tab_sep() -> Span<'static> {
 }
 
 //
-// Standard modal/popup chrome. Clears `area`, paints the menu-tinted
-// background, renders a bold title on the top row with an optional
+// Standard modal/popup chrome. Clears `area`, paints the elevated
+// BG_ELEMENT fill, renders a bold title on the top row with an optional
 // dismiss hint right-aligned, draws a slim divider below, and returns
 // the body rect for the caller to draw into.
 //
 // All modal-style overlays (settings forms, popups, sessions list,
-// confirm dialogs) should use this so they share the same chrome —
-// keep titles plain (no leading symbol) and let the bold weight do
-// the work.
+// confirm dialogs, chain builder props) should use this so they share
+// the same chrome — keep titles plain (no leading symbol) and let the
+// bold weight + fill elevation do the work. No accent border.
 //
 
 pub fn modal_panel(f: &mut Frame, area: Rect, title: &str, esc_hint: &str) -> Rect {
     modal_panel_line(f, area, modal_title(title), esc_hint)
+}
+
+//
+// Geometry-only counterpart of `modal_panel` — the body rect where
+// content is painted after the title + divider. Hit registration uses
+// this so mouse targets match paint without re-deriving the layout.
+//
+pub fn modal_content_rect(area: Rect) -> Rect {
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
+    };
+    Rect {
+        y: inner.y.saturating_add(2),
+        height: inner.height.saturating_sub(2),
+        ..inner
+    }
 }
 
 //
@@ -160,9 +211,16 @@ pub fn modal_panel(f: &mut Frame, area: Rect, title: &str, esc_hint: &str) -> Re
 //
 
 pub fn modal_panel_line(f: &mut Frame, area: Rect, title: Line<'static>, esc_hint: &str) -> Rect {
+    //
+    // Elevated panel over the page: clear the footprint and fill with
+    // BG_ELEMENT (one step lighter than canvas greys). No border box —
+    // fill + title weight separate the modal from the page.
+    //
     f.render_widget(Clear, area);
-    let block = Block::default().style(Style::default().bg(BG_MENU));
-    f.render_widget(block, area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(BG_ELEMENT)),
+        area,
+    );
 
     let inner = Rect {
         x: area.x + 2,
@@ -187,7 +245,7 @@ pub fn modal_panel_line(f: &mut Frame, area: Rect, title: Line<'static>, esc_hin
         Layout::horizontal([Constraint::Min(1), Constraint::Length(hint_width)]).split(header[0]);
 
     f.render_widget(
-        Paragraph::new(title).style(Style::default().bg(BG_MENU)),
+        Paragraph::new(title).style(Style::default().bg(BG_ELEMENT)),
         header_chunks[0],
     );
 
@@ -197,7 +255,7 @@ pub fn modal_panel_line(f: &mut Frame, area: Rect, title: Line<'static>, esc_hin
                 esc_hint.to_string(),
                 Style::default().fg(MUTED),
             )))
-            .style(Style::default().bg(BG_MENU)),
+            .style(Style::default().bg(BG_ELEMENT)),
             header_chunks[1],
         );
     }
@@ -205,9 +263,9 @@ pub fn modal_panel_line(f: &mut Frame, area: Rect, title: Line<'static>, esc_hin
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "\u{2500}".repeat(inner.width as usize),
-            Style::default().fg(BORDER_SUBTLE),
+            Style::default().fg(BORDER),
         )))
-        .style(Style::default().bg(BG_MENU)),
+        .style(Style::default().bg(BG_ELEMENT)),
         header[1],
     );
 

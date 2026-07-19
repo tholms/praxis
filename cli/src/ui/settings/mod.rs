@@ -5,8 +5,10 @@ mod intercept;
 mod llm;
 mod service;
 
-use crate::app::{SettingsState, SettingsTab};
+use crate::app::{App, SettingsState, SettingsTab};
 use crate::ui::chrome;
+use crate::ui::hits::MouseAction;
+use crate::ui::overlay_hits;
 use crate::ui::theme::{
     ACCENT, BG_SELECTED, BORDER_SUBTLE, DIM, MUTED, OK, STATUS_FAIL, TEXT_BRIGHT,
 };
@@ -18,16 +20,25 @@ use ratatui::widgets::Paragraph;
 
 pub(super) const EDIT_FG: Color = Color::Rgb(225, 228, 232);
 
-pub fn render(f: &mut Frame, area: Rect, state: &SettingsState) {
+pub fn content_area(body: Rect) -> Rect {
+    Rect {
+        x: body.x + 2,
+        width: body.width.saturating_sub(4),
+        ..body
+    }
+}
+
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let state = &app.settings;
     let chunks = Layout::vertical([
         Constraint::Length(1), // tabs
         Constraint::Length(1), // divider
         Constraint::Min(1),    // content
-        Constraint::Length(1), // status
+        Constraint::Length(1), // hints / status
     ])
     .split(area);
 
-    render_tabs(f, chunks[0], state);
+    render_tabs(f, chunks[0], app, state);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "\u{2500}".repeat(chunks[1].width as usize),
@@ -42,6 +53,10 @@ pub fn render(f: &mut Frame, area: Rect, state: &SettingsState) {
         ..chunks[2]
     };
 
+    if state.model_form.is_none() && !state.dropdown_open {
+        overlay_hits::register_settings_content_hits(app, content);
+    }
+
     match state.tab {
         SettingsTab::Llm => llm::render_llm(f, content, state),
         SettingsTab::Agents => agents::render_agents(f, content, state),
@@ -52,10 +67,12 @@ pub fn render(f: &mut Frame, area: Rect, state: &SettingsState) {
 
     if state.dropdown_open {
         forms::render_model_dropdown(f, area, state);
+        crate::ui::overlay_hits::register_settings_dropdown_hits(app, area, state);
     }
 
     if let Some(ref form) = state.model_form {
         forms::render_model_form(f, area, form);
+        crate::ui::overlay_hits::register_settings_model_form_hits(app, area, form);
     }
 
     if let Some(ref msg) = state.status_message {
@@ -75,11 +92,34 @@ pub fn render(f: &mut Frame, area: Rect, state: &SettingsState) {
             Span::styled(msg.as_str(), style),
         ]);
         f.render_widget(Paragraph::new(line), chunks[3]);
+    } else if state.model_form.is_none() && !state.dropdown_open {
+        render_settings_hints(f, chunks[3], state);
     }
 }
 
-fn render_tabs(f: &mut Frame, area: Rect, state: &SettingsState) {
-    let mut spans: Vec<Span> = Vec::new();
+fn render_settings_hints(f: &mut Frame, area: Rect, state: &SettingsState) {
+    use crate::keymap::action;
+    use crate::ui::hint_row::{self, HintItem};
+
+    let mut items = vec![
+        HintItem::new(action::ARROWS, "select"),
+        HintItem::new(action::ENTER, "edit"),
+        HintItem::new(action::TAB, "switch"),
+    ];
+    match state.tab {
+        SettingsTab::Llm => {
+            items.push(HintItem::new(action::DELETE, "delete model"));
+        }
+        SettingsTab::Agents => {
+            items.push(HintItem::new(action::SPACE, "toggle script"));
+            items.push(HintItem::new(action::DELETE, "delete script"));
+        }
+        _ => {}
+    }
+    hint_row::render(f, area, &items, None);
+}
+
+fn render_tabs(f: &mut Frame, area: Rect, app: &App, state: &SettingsState) {
     let pairs: &[(SettingsTab, &str)] = &[
         (SettingsTab::Llm, "LLM"),
         (SettingsTab::Agents, "Agents"),
@@ -87,6 +127,20 @@ fn render_tabs(f: &mut Frame, area: Rect, state: &SettingsState) {
         (SettingsTab::Service, "Service"),
         (SettingsTab::About, "About"),
     ];
+    let mut x = 0u16;
+    for (i, (tab, label)) in pairs.iter().enumerate() {
+        let w = chrome::tab_width(label, None);
+        app.hits_register(
+            Rect::new(area.x.saturating_add(x), area.y, w, 1),
+            MouseAction::SettingsTab(*tab),
+        );
+        x += w;
+        if i + 1 < pairs.len() {
+            x += chrome::tab_sep_width();
+        }
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
     for (i, (tab, label)) in pairs.iter().enumerate() {
         if i > 0 {
             spans.push(chrome::tab_sep());

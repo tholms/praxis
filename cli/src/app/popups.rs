@@ -11,6 +11,7 @@ pub struct Popup {
     pub selected: usize,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
     CommandPalette,
     ModelSelect,
@@ -41,6 +42,7 @@ pub enum ConfirmKind {
     },
     DeleteTrigger(String), // trigger_id
     DeleteChain(String),   // chain_id
+    DiscardChainForm,
     Info,
 }
 
@@ -226,14 +228,51 @@ impl App {
                 enable,
                 method,
             } => {
-                let result = if enable {
-                    self.client.enable_intercept(node_id, method).await
-                } else {
-                    self.client.disable_intercept(node_id).await
+                //
+                // Enable/disable is a round-trip to the node (cert install,
+                // proxy setup) that can take seconds. Run it off the event
+                // loop and report the outcome via an event so the TUI stays
+                // responsive; live InterceptStatusUpdate still updates
+                // intercept_statuses / node.intercept_active for the
+                // Nodes detail pane.
+                //
+                // pending_toggles is only cleared when the InterceptToggleResult
+                // event is handled, so we must not enter the tracked path
+                // without an event channel — otherwise the node is stranded
+                // "pending" forever. With no channel, fire-and-forget.
+                //
+                let client = self.client.clone();
+                let Some(tx) = self.event_tx.clone() else {
+                    tokio::spawn(async move {
+                        let _ = if enable {
+                            client.enable_intercept(node_id, method).await
+                        } else {
+                            client.disable_intercept(node_id).await
+                        };
+                    });
+                    return;
                 };
-                if let Err(e) = result {
-                    self.intercept.set_error(format!("Intercept toggle: {}", e));
+                if !self.intercept.pending_toggles.insert(node_id.clone()) {
+                    self.intercept
+                        .set_error("An intercept command is already pending for this node");
+                    return;
                 }
+                let result_node_id = node_id.clone();
+                tokio::spawn(async move {
+                    let result = if enable {
+                        client.enable_intercept(node_id, method).await
+                    } else {
+                        client.disable_intercept(node_id).await
+                    };
+                    let _ = tx.send(crate::event::AppEvent::InterceptToggleResult {
+                        node_id: result_node_id,
+                        enable,
+                        result: result.map_err(|e| e.to_string()),
+                    });
+                });
+            }
+            ConfirmKind::DiscardChainForm => {
+                self.chain_form = None;
             }
             ConfirmKind::DeleteChain(chain_id) => {
                 if let Err(e) = self.client.delete_chain_def(chain_id).await {
@@ -429,19 +468,32 @@ impl App {
     }
 
     pub(crate) async fn select_model(&mut self, model_name: &str) {
-        self.close_active_orchestrator_session().await;
-
+        //
+        // Standard ACP: close current session if any, then session/new
+        // with the selected model. Shared MCP keeps this fast.
+        //
+        if let Some(sid) = self
+            .orchestrator
+            .active_session()
+            .map(|s| s.session_id.clone())
+            .filter(|s| !s.is_empty())
+        {
+            let _ = self.acp.close_session(&sid).await;
+        }
+        self.orchestrator.pending_history = None;
+        self.orchestrator.pending_seed_messages = None;
+        self.orchestrator.pending_prompt = None;
+        if self.orchestrator.create_in_flight {
+            return;
+        }
+        self.orchestrator.create_in_flight = true;
         if let Err(e) = self
             .acp
             .create_session(".", Some(model_name), Vec::new())
             .await
         {
-            if let Some(session) = self.orchestrator.active_session_mut() {
-                session.messages.push(ConversationEntry::Error(format!(
-                    "Failed to create session: {}",
-                    e
-                )));
-            }
+            self.orchestrator.create_in_flight = false;
+            self.push_orchestrator_error(format!("Failed to create session: {e}"));
         }
     }
 

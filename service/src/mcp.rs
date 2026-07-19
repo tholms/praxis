@@ -50,7 +50,8 @@ struct ClientState {
     system_state: Option<SystemState>,
     pending_acp: HashMap<String, PendingAcp>,
     pending_semantic_ops: HashMap<String, Option<String>>,
-    pending_traffic_search: Option<(Vec<InterceptedTrafficEntry>, usize)>,
+    pending_traffic_search:
+        HashMap<String, Result<(Vec<InterceptedTrafficEntry>, usize), String>>,
     pending_recon_get: Option<Option<ReconResult>>,
     pending_op_def_add: Option<Result<String, String>>,
     pending_op_def_delete: Option<Result<String, String>>,
@@ -72,17 +73,19 @@ impl ServiceMcpClient {
 
         let direct_state = Arc::clone(&state);
         let broadcast_state = Arc::clone(&state);
-        transport.start_consuming(
-            "mcp",
-            move |data| {
-                let state = Arc::clone(&direct_state);
-                async move { Self::handle_direct_message(&state, &data).await }
-            },
-            move |data| {
-                let state = Arc::clone(&broadcast_state);
-                async move { Self::handle_broadcast_message(&state, &data).await }
-            },
-        );
+        transport
+            .start_consuming(
+                "mcp",
+                move |data| {
+                    let state = Arc::clone(&direct_state);
+                    async move { Self::handle_direct_message(&state, &data).await }
+                },
+                move |data| {
+                    let state = Arc::clone(&broadcast_state);
+                    async move { Self::handle_broadcast_message(&state, &data).await }
+                },
+            )
+            .await?;
 
         let client = Self {
             channel: transport.channel().clone(),
@@ -139,10 +142,18 @@ impl ServiceMcpClient {
                 state.operations = operations;
             }
             ClientDirectMessage::TrafficSearchResponse {
+                request_id,
                 entries,
                 total_count,
+                error,
             } => {
-                state.pending_traffic_search = Some((entries, total_count));
+                state.pending_traffic_search.insert(
+                    request_id,
+                    match error {
+                        Some(error) => Err(error),
+                        None => Ok((entries, total_count)),
+                    },
+                );
             }
             ClientDirectMessage::OpDefListResponse { definitions } => {
                 state.operation_definitions = definitions;
@@ -338,6 +349,8 @@ impl ServiceMcpClient {
     async fn register(&self) -> Result<()> {
         let registration = ClientRegistration {
             client_id: self.client_id.clone(),
+            registration_nonce: String::new(),
+            expected_service_instance_id: String::new(),
         };
         let message = ClientSignalMessage::Registration(registration);
         self.publish_signal(message).await?;
@@ -559,24 +572,23 @@ impl McpClient for ServiceMcpClient {
         &self,
         filters: TrafficSearchFilters,
     ) -> Result<(Vec<InterceptedTrafficEntry>, usize)> {
-        {
-            let mut state = self.state.lock().await;
-            state.pending_traffic_search = None;
-        }
-
+        let request_id = Uuid::new_v4().to_string();
         let message = ClientSignalMessage::TrafficSearchRequest {
             client_id: self.client_id.clone(),
+            request_id: request_id.clone(),
             filters,
         };
 
         self.publish_signal(message).await?;
 
+        let request_id_for_poll = request_id.clone();
         self.poll_pending(
             100,
-            |s| s.pending_traffic_search.take(),
+            move |s| s.pending_traffic_search.remove(&request_id_for_poll),
             "traffic search response",
         )
-        .await
+        .await?
+        .map_err(anyhow::Error::msg)
     }
 
     async fn run_semantic_op(
@@ -871,20 +883,42 @@ impl McpClient for ServiceMcpClient {
 // MCP server manager that starts/stops the SSE server based on config.
 //
 
+struct RunningMcpServer {
+    port: u16,
+    cancel: CancellationToken,
+    serve_task: tokio::task::JoinHandle<()>,
+}
+
 pub struct McpServerManager {
-    cancellation_token: RwLock<Option<CancellationToken>>,
+    running: RwLock<Option<RunningMcpServer>>,
 }
 
 impl McpServerManager {
     pub fn new() -> Self {
         Self {
-            cancellation_token: RwLock::new(None),
+            running: RwLock::new(None),
         }
     }
 
     pub async fn start(&self, rabbitmq_url: &str, port: u16) -> Result<()> {
         //
-        // Stop existing server if running.
+        // If a server is already running on the requested port there is
+        // nothing to do. A single settings save writes one config key at a
+        // time, so the config-change handler can fire several start() calls
+        // in a burst; without this guard each one would tear the listener
+        // down and rebind, racing the OS socket release and failing the
+        // rebind with "address already in use" — leaving no server running.
+        //
+
+        if let Some(r) = self.running.read().await.as_ref() {
+            if r.port == port {
+                return Ok(());
+            }
+        }
+
+        //
+        // Stop any server on a different port. stop() now waits for the old
+        // listener to fully release the socket before we rebind below.
         //
 
         self.stop().await;
@@ -902,6 +936,21 @@ impl McpServerManager {
         let rabbitmq_url = rabbitmq_url.to_string();
 
         let service_ct = ct.clone();
+
+        //
+        // Orchestrator (and other) MCP clients hold a session for the life of
+        // a conversation — often idle for long stretches between prompts.
+        // rmcp's default LocalSessionManager keep_alive is 5 minutes of
+        // inactivity, which kills the session worker and leaves the client
+        // reconnecting to a deleted session (404 spam) while tool calls fail.
+        // Session lifetime is already owned by the orchestrator task (it drops
+        // the RunningService on close/replace), so disable the inactivity
+        // timeout here.
+        //
+        let mut session_manager =
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default();
+        session_manager.session_config.keep_alive = None;
+
         let service: rmcp::transport::streamable_http_server::StreamableHttpService<
             PraxisServer<ServiceMcpClient>,
             rmcp::transport::streamable_http_server::session::local::LocalSessionManager,
@@ -921,9 +970,7 @@ impl McpServerManager {
                     }
                 }
             },
-            std::sync::Arc::new(
-                rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
-            ),
+            std::sync::Arc::new(session_manager),
             rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
                 .with_cancellation_token(service_ct),
         );
@@ -931,13 +978,17 @@ impl McpServerManager {
         let router = axum::Router::new().nest_service("/mcp", service);
         let listener = tokio::net::TcpListener::bind(bind_addr).await?;
         let shutdown_ct = ct.clone();
-        tokio::spawn(async move {
+        let serve_task = tokio::spawn(async move {
             let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async move { shutdown_ct.cancelled_owned().await })
                 .await;
         });
 
-        *self.cancellation_token.write().await = Some(ct);
+        *self.running.write().await = Some(RunningMcpServer {
+            port,
+            cancel: ct,
+            serve_task,
+        });
 
         common::log_info!(
             "MCP streamable-http server started on port {} (endpoint /mcp)",
@@ -947,10 +998,38 @@ impl McpServerManager {
     }
 
     pub async fn stop(&self) {
-        let mut guard = self.cancellation_token.write().await;
-        if let Some(ct) = guard.take() {
-            common::log_info!("Stopping MCP SSE server");
-            ct.cancel();
+        //
+        // Take the handle out of the lock before awaiting so a concurrent
+        // start() can't deadlock waiting on the write lock we'd otherwise
+        // hold across the await.
+        //
+
+        let running = self.running.write().await.take();
+        let Some(running) = running else {
+            return;
+        };
+
+        common::log_info!("Stopping MCP streamable-http server");
+        running.cancel.cancel();
+
+        //
+        // Wait for the serve task to actually exit so the listening socket is
+        // released before any subsequent bind. The graceful-shutdown future
+        // fires on cancel but hyper still drains in-flight connections, and
+        // the orchestrator holds a long-lived MCP session that will not close
+        // on its own — so bound the wait and abort the task (which drops the
+        // listener and frees the port) if it overruns.
+        //
+
+        let abort = running.serve_task.abort_handle();
+        if tokio::time::timeout(Duration::from_secs(5), running.serve_task)
+            .await
+            .is_err()
+        {
+            common::log_warn!(
+                "MCP server did not shut down within 5s; aborting serve task to free the port"
+            );
+            abort.abort();
         }
     }
 }

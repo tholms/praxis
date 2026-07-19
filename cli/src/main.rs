@@ -4,6 +4,8 @@ mod client;
 mod commands;
 mod config;
 mod event;
+mod intercept_live;
+mod keymap;
 mod markdown;
 mod output;
 mod session_store;
@@ -73,6 +75,12 @@ enum Commands {
         command: commands::agent::AgentCommand,
     },
 
+    /// Traffic interception commands
+    Intercept {
+        #[command(subcommand)]
+        command: commands::intercept::InterceptCommand,
+    },
+
     /// Session management commands
     Session {
         #[command(subcommand)]
@@ -96,6 +104,7 @@ impl Commands {
         match self {
             Commands::Node { command } => commands::node::execute(client, command).await,
             Commands::Agent { command } => commands::agent::execute(client, command).await,
+            Commands::Intercept { command } => commands::intercept::execute(client, command).await,
             Commands::Session { command } => commands::session::execute(client, command).await,
             Commands::SetRabbitmqUrl { .. } | Commands::Config => {
                 unreachable!("config subcommands handled before connecting to a client")
@@ -276,8 +285,12 @@ fn select_session_interactive() -> Result<Option<session_store::StoredSession>> 
 }
 
 async fn run_status(rabbitmq_url: &str, timeout: u64) -> Result<()> {
-    let mut cli_state = state::CliState::load()?;
-    let client_id = cli_state.get_or_create_client_id()?;
+    //
+    // Ephemeral client id so --status never joins the TUI's RabbitMQ
+    // consumer group (shared ids load-balance ACP responses and hang
+    // session creation).
+    //
+    let client_id = ephemeral_client_id("status");
     let short_id = output::format_short_id(&client_id);
 
     let client = client::Client::connect(rabbitmq_url, timeout, client_id).await?;
@@ -298,12 +311,22 @@ async fn run_command_string(rabbitmq_url: &str, timeout: u64, command_string: &s
 }
 
 async fn run_command(rabbitmq_url: &str, timeout: u64, command: Commands) -> Result<()> {
-    let mut cli_state = state::CliState::load()?;
-    let client_id = cli_state.get_or_create_client_id()?;
+    //
+    // Non-interactive commands use a one-shot client id. Reusing the
+    // persistent TUI id attaches a second consumer to Client_<id>, and
+    // RabbitMQ round-robins replies — session/new responses land on the
+    // wrong process and the other side sits on "connecting…".
+    //
+    let client_id = ephemeral_client_id("cmd");
     let client = client::Client::connect(rabbitmq_url, timeout, client_id).await?;
     let result = command.execute(&client).await;
     client.disconnect().await;
     result
+}
+
+fn ephemeral_client_id(prefix: &str) -> String {
+    let uid = uuid::Uuid::new_v4().to_string();
+    format!("cli_{}_{}", prefix, &uid[..8])
 }
 
 async fn run_acp_proxy(rabbitmq_url: &str, timeout: u64) -> Result<()> {
@@ -424,28 +447,43 @@ async fn run_tui(
     let client = client::Client::connect(rabbitmq_url, timeout, client_id.clone()).await?;
     let client = Arc::new(client);
 
+    //
+    // The Kitty keyboard protocol enhancement is unsupported on the legacy
+    // Windows console API, where crossterm returns an error rather than
+    // silently ignoring the request. Probe support up front and only push
+    // (and later pop) the flags when the terminal actually supports them, so
+    // launch does not fail on legacy Windows consoles.
+    //
+    let keyboard_enhancement =
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(
-            io::stdout(),
-            crossterm::event::PopKeyboardEnhancementFlags,
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-        );
+        if keyboard_enhancement {
+            let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+        }
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         original_hook(info);
     }));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        crossterm::event::PushKeyboardEnhancementFlags(
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-        ),
-    )?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if keyboard_enhancement {
+        //
+        // DISAMBIGUATE lets Shift/Alt+Enter report as Enter+modifiers
+        // (needed for multi-line prompts). REPORT_EVENT_TYPES pairs with
+        // our KeyEventKind::Press filter so release events are ignored.
+        //
+        execute!(
+            stdout,
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+            ),
+        )?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -506,9 +544,14 @@ async fn run_tui(
     }
 
     disable_raw_mode()?;
+    if keyboard_enhancement {
+        execute!(
+            terminal.backend_mut(),
+            crossterm::event::PopKeyboardEnhancementFlags,
+        )?;
+    }
     execute!(
         terminal.backend_mut(),
-        crossterm::event::PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture,
     )?;

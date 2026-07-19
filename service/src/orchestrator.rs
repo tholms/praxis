@@ -8,9 +8,10 @@ use tokio::sync::{RwLock, mpsc};
 
 use futures_util::StreamExt;
 
+use common::acp_ext::ERR_ORCHESTRATOR_SESSION_NOT_FOUND;
 use common::ai::{
     ChatCompletionRequest, Message, Provider, Tool, Usage, create_ai_client,
-    get_system_prompt_with_tools, parse_manual_tool_call,
+    get_system_prompt_with_tools, parse_manual_tool_calls,
 };
 use common::{OrchestratorPlan, PlanStep, PlanStepStatus};
 use rmcp::{
@@ -31,11 +32,30 @@ const ORCHESTRATOR_PROMPT: &str = include_str!("prompts/orchestrator.prompt");
 
 //
 // One orchestrator session per client. The service holds no persistent
-// state — when the client disconnects or the session is closed, the
-// in-memory conversation is dropped. Clients are responsible for any
-// history persistence they want and may seed a new session with prior
-// messages via the `history` argument to create_session.
+// conversation state — when the client disconnects or the session is
+// closed, the in-memory conversation is dropped. Clients are responsible
+// for any history persistence they want and may seed a new session with
+// prior messages via the `history` argument to create_session.
 //
+// MCP is process-wide and shared across sessions: session/close tears
+// down conversation only; session/new reuses the warm MCP client so
+// close+new (e.g. /clear) stays milliseconds after the first connect.
+//
+
+//
+// Long-lived MCP client + tool list. Owned by OrchestratorManager, not by
+// individual sessions. Dropped on service shutdown or invalidate.
+//
+
+struct SharedMcp {
+    //
+    // Keeps the streamable-http client (and its RabbitMQ-backed server
+    // session) alive. Sessions only hold a Peer clone.
+    //
+    _service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    peer: rmcp::service::Peer<rmcp::RoleClient>,
+    tools: Vec<Tool>,
+}
 
 struct OrchestratorSession {
     session_id: String,
@@ -57,17 +77,94 @@ impl OrchestratorSession {
 }
 
 //
-// Manages orchestrator sessions, one per client_id.
+// Manages orchestrator sessions, one per client_id, plus a shared MCP
+// connection used by every session.
 //
 
 pub struct OrchestratorManager {
     sessions: RwLock<HashMap<String, OrchestratorSession>>,
+    shared_mcp: RwLock<Option<SharedMcp>>,
 }
 
 impl OrchestratorManager {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            shared_mcp: RwLock::new(None),
+        }
+    }
+
+    //
+    // Connect to the MCP server once and cache peer + tools. Subsequent
+    // session/new calls hit this cache (warm path for /clear).
+    //
+
+    async fn ensure_shared_mcp(&self, mcp_port: u16) -> Result<(rmcp::service::Peer<rmcp::RoleClient>, Vec<Tool>), String> {
+        {
+            let guard = self.shared_mcp.read().await;
+            if let Some(shared) = guard.as_ref() {
+                return Ok((shared.peer.clone(), shared.tools.clone()));
+            }
+        }
+
+        let mut guard = self.shared_mcp.write().await;
+        //
+        // Double-check after acquiring the write lock so concurrent
+        // session/new only pay for one cold connect.
+        //
+        if let Some(shared) = guard.as_ref() {
+            return Ok((shared.peer.clone(), shared.tools.clone()));
+        }
+
+        let mcp_url = format!("http://127.0.0.1:{}/mcp", mcp_port);
+        common::log_info!("Orchestrator connecting to MCP server at {}", mcp_url);
+
+        let service = connect_orchestrator_mcp(&mcp_url).await?;
+        let peer = service.peer().clone();
+
+        let mcp_tools =
+            match tokio::time::timeout(std::time::Duration::from_secs(20), peer.list_all_tools())
+                .await
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    common::log_error!("Failed to list MCP tools: {}", e);
+                    return Err(format!(
+                        "Connected to the MCP server but failed to load its tools: {e}"
+                    ));
+                }
+                Err(_) => {
+                    common::log_error!("Timed out listing MCP tools");
+                    return Err(
+                        "Connected to the MCP server but timed out loading its tools.".to_string(),
+                    );
+                }
+            };
+
+        common::log_info!(
+            "Orchestrator fetched {} tools from MCP server (shared)",
+            mcp_tools.len()
+        );
+
+        let tools = convert_mcp_tools(mcp_tools);
+        *guard = Some(SharedMcp {
+            _service: service,
+            peer: peer.clone(),
+            tools: tools.clone(),
+        });
+
+        Ok((peer, tools))
+    }
+
+    //
+    // Drop the shared MCP so the next ensure reconnects. Used on shutdown
+    // and when the transport is known dead.
+    //
+
+    async fn invalidate_shared_mcp(&self) {
+        let mut guard = self.shared_mcp.write().await;
+        if guard.take().is_some() {
+            common::log_info!("Orchestrator shared MCP connection invalidated");
         }
     }
 
@@ -75,6 +172,14 @@ impl OrchestratorManager {
     // Create (or replace) the orchestrator session for `client_id`.
     // `history` seeds the model conversation with prior turns when the
     // client is resuming from local storage.
+    //
+
+    //
+    // Returns Ok(()) once the session is fully live (MCP connected, tools
+    // loaded, task spawned). On any setup failure it returns Err with a
+    // user-facing message and registers no session, so the caller can report
+    // the real reason on the session/new response instead of leaving a dead
+    // session that fails later prompts with an opaque error.
     //
 
     pub async fn create_session(
@@ -85,20 +190,11 @@ impl OrchestratorManager {
         history: Vec<(String, String)>,
         service_config: &Arc<RwLock<ServiceConfig>>,
         publish_channel: &Channel,
-    ) {
+    ) -> Result<(), String> {
         let config = service_config.read().await;
 
         if !config.is_mcp_server_enabled() {
-            let _ = send_to_client(
-                publish_channel,
-                client_id,
-                acp_error_response(
-                    Value::Null,
-                    -32000,
-                    "MCP server is not enabled. Go to Settings > MCP Server to enable it before using the Orchestrator.",
-                ),
-            ).await;
-            return;
+            return Err("MCP server is not enabled. Go to Settings > MCP Server to enable it before using the Orchestrator.".to_string());
         }
 
         let mcp_port = config.get_mcp_server_port();
@@ -109,16 +205,7 @@ impl OrchestratorManager {
         {
             Some(def) => def,
             None => {
-                let _ = send_to_client(
-                    publish_channel,
-                    client_id,
-                    acp_error_response(
-                        Value::Null,
-                        -32000,
-                        "No model selected for Orchestrator. Go to Settings > LLM Providers > Feature Selection to configure.",
-                    ),
-                ).await;
-                return;
+                return Err("No model selected for Orchestrator. Go to Settings > LLM Providers > Feature Selection to configure.".to_string());
             }
         };
 
@@ -127,16 +214,7 @@ impl OrchestratorManager {
             .unwrap_or(true);
 
         if model_def.api_key.is_empty() && provider_needs_key {
-            let _ = send_to_client(
-                publish_channel,
-                client_id,
-                acp_error_response(
-                    Value::Null,
-                    -32000,
-                    "No API key configured for the selected model. Go to Settings > LLM Providers to configure.",
-                ),
-            ).await;
-            return;
+            return Err("No API key configured for the selected model. Go to Settings > LLM Providers to configure.".to_string());
         }
 
         let max_tokens: u32 = config
@@ -157,23 +235,57 @@ impl OrchestratorManager {
         ) {
             Ok(c) => c,
             Err(e) => {
-                let _ = send_to_client(
-                    publish_channel,
-                    client_id,
-                    acp_error_response(
-                        Value::Null,
-                        -32000,
-                        &format!("Failed to create AI client: {}", e),
-                    ),
-                )
-                .await;
-                return;
+                return Err(format!("Failed to create AI client: {}", e));
             }
         };
 
+        let model = model_def.model.clone();
+        let session_id_owned = session_id.to_string();
+
         //
-        // If this client already has a session, stop it before installing
-        // the new one. One session per client.
+        // Shared MCP: first session/new pays for connect + list tools;
+        // subsequent creates (close+new /clear) reuse the warm client.
+        // Failure is still reported on session/new before we register a
+        // session, so the client never gets a dead session id.
+        //
+
+        let (peer, mcp_tools) = self.ensure_shared_mcp(mcp_port).await?;
+
+        let mut tools = mcp_tools;
+        tools.extend(get_local_tool_definitions());
+
+        let system_prompt = get_system_prompt_with_tools(ORCHESTRATOR_PROMPT, &tools);
+
+        common::log_info!(
+            "Orchestrator ready for client {} session {} with provider {:?}, model {}, max_tokens {}, tools {}, history {}",
+            common::short_id(client_id),
+            common::short_id(&session_id_owned),
+            provider,
+            model,
+            max_tokens,
+            tools.len(),
+            history.len()
+        );
+
+        //
+        // Build the initial conversation: system prompt + any resumed turns.
+        //
+
+        let mut conversation_history: Vec<Message> = Vec::new();
+        conversation_history.push(Message::system(&system_prompt));
+        for (role, text) in history {
+            match role.as_str() {
+                "user" => conversation_history.push(Message::user(&text)),
+                "assistant" => conversation_history.push(Message::assistant(&text)),
+                _ => {}
+            }
+        }
+
+        //
+        // MCP ensure succeeded — now replace any prior session for this
+        // client (one session per client). Done after ensure so a failed
+        // create never tears down a still-working session. Shared MCP is
+        // not tied to the previous session.
         //
 
         {
@@ -182,9 +294,6 @@ impl OrchestratorManager {
                 prev.stop();
             }
         }
-
-        let model = model_def.model.clone();
-        let session_id_owned = session_id.to_string();
 
         let (prompt_tx, mut prompt_rx) = mpsc::channel::<(String, String)>(32);
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -198,82 +307,15 @@ impl OrchestratorManager {
 
         //
         // The session task is detached: dropping a JoinHandle does not abort
-        // the task; it exits via the stop flag / prompt channel closing.
+        // the task; it exits via the stop flag / prompt channel closing. It
+        // owns the conversation history and uses the shared MCP peer for
+        // tools (MCP lifetime is independent of this task).
         //
         tokio::spawn(async move {
             macro_rules! send_msg {
                 ($msg:expr) => {{
                     let _ = send_to_client(&publish_channel_clone, &client_id_owned, $msg).await;
                 }};
-            }
-
-            let mcp_url = format!("http://127.0.0.1:{}/mcp", mcp_port);
-            common::log_info!("Orchestrator connecting to MCP server at {}", mcp_url);
-
-            let transport = StreamableHttpClientTransport::from_uri(mcp_url.as_str());
-
-            let mcp_service = match ().serve(transport).await {
-                Ok(s) => s,
-                Err(e) => {
-                    common::log_error!("Failed to initialize MCP client: {}", e);
-                    send_msg!(acp_error_response(
-                        Value::Null,
-                        -32000,
-                        &format!("Failed to initialize MCP client: {}", e),
-                    ));
-                    return;
-                }
-            };
-
-            let peer = mcp_service.peer().clone();
-
-            let mcp_tools = match peer.list_all_tools().await {
-                Ok(t) => t,
-                Err(e) => {
-                    common::log_error!("Failed to list MCP tools: {}", e);
-                    send_msg!(acp_error_response(
-                        Value::Null,
-                        -32000,
-                        &format!("Failed to list MCP tools: {}", e),
-                    ));
-                    return;
-                }
-            };
-
-            common::log_info!(
-                "Orchestrator fetched {} tools from MCP server",
-                mcp_tools.len()
-            );
-
-            let mut tools = convert_mcp_tools(mcp_tools);
-            tools.extend(get_local_tool_definitions());
-
-            let system_prompt = get_system_prompt_with_tools(ORCHESTRATOR_PROMPT, &tools);
-
-            common::log_info!(
-                "Orchestrator ready for client {} session {} with provider {:?}, model {}, max_tokens {}, tools {}, history {}",
-                common::short_id(&client_id_owned),
-                common::short_id(&sid),
-                provider,
-                model,
-                max_tokens,
-                tools.len(),
-                history.len()
-            );
-
-            let mut conversation_history: Vec<Message> = Vec::new();
-            conversation_history.push(Message::system(&system_prompt));
-
-            //
-            // Seed with client-supplied history (resume).
-            //
-
-            for (role, text) in history {
-                match role.as_str() {
-                    "user" => conversation_history.push(Message::user(&text)),
-                    "assistant" => conversation_history.push(Message::assistant(&text)),
-                    _ => {}
-                }
             }
 
             while let Some((prompt_id, prompt)) = prompt_rx.recv().await {
@@ -416,62 +458,99 @@ impl OrchestratorManager {
                         send_buffer.clear();
                     }
 
-                    let mut response_text = full_response.clone();
-                    let mut tool_results: Vec<(String, String)> = Vec::new();
+                    //
+                    // Collect every tool call from this model response, announce
+                    // them, then run independent calls concurrently. Results are
+                    // re-ordered to match emission order before feeding the model.
+                    //
+                    let (tool_calls, _remaining_text) =
+                        parse_manual_tool_calls(&full_response);
 
-                    while let Some((tool_name, tool_args, remaining_text)) =
-                        parse_manual_tool_call(&response_text)
-                    {
+                    if !tool_calls.is_empty() {
                         if stop_flag_clone.load(Ordering::SeqCst)
                             || cancel_flag_clone.load(Ordering::SeqCst)
                         {
                             break;
                         }
 
-                        common::log_info!("Orchestrator executing tool: {}", tool_name);
+                        let tool_ids: Vec<String> = tool_calls
+                            .iter()
+                            .map(|_| uuid::Uuid::new_v4().to_string())
+                            .collect();
 
-                        let tool_input_value = serde_json::to_value(&tool_args).ok();
-
-                        send_msg!(session_update_tool_call(&sid, &tool_name, tool_input_value));
-
-                        let (result, is_error) = if let Some(local_result) =
-                            execute_local_tool(&tool_name, &tool_args).await
+                        for ((tool_name, tool_args), tool_id) in
+                            tool_calls.iter().zip(tool_ids.iter())
                         {
-                            let err = result_is_error(&local_result);
-                            (local_result, err)
-                        } else {
-                            execute_mcp_tool(&peer, &tool_name, &tool_args).await
+                            common::log_info!(
+                                "Orchestrator queuing tool {} ({})",
+                                tool_name,
+                                common::short_id(tool_id)
+                            );
+                            let tool_input_value = serde_json::to_value(tool_args).ok();
+                            send_msg!(session_update_tool_call(
+                                &sid,
+                                tool_id,
+                                tool_name,
+                                tool_input_value
+                            ));
+                        }
+
+                        let peer_for_batch = peer.clone();
+                        let batch = execute_tool_calls_concurrent(
+                            tool_calls,
+                            tool_ids,
+                            &cancel_flag_clone,
+                            &stop_flag_clone,
+                            |tool_name, tool_args| {
+                                let peer = peer_for_batch.clone();
+                                async move {
+                                    if let Some(local_result) =
+                                        execute_local_tool(&tool_name, &tool_args).await
+                                    {
+                                        let err = result_is_error(&local_result);
+                                        (local_result, err)
+                                    } else {
+                                        execute_mcp_tool(&peer, &tool_name, &tool_args).await
+                                    }
+                                }
+                            },
+                        )
+                        .await;
+
+                        let Some(tool_results) = batch else {
+                            //
+                            // Cancelled or stopped mid-batch — do not feed
+                            // partial tool results back into the model.
+                            //
+                            break;
                         };
 
-                        common::log_info!(
-                            "Tool {} result: {}",
-                            tool_name,
-                            common::truncate_str(&result, 100)
-                        );
+                        for (tool_id, tool_name, result, is_error) in &tool_results {
+                            common::log_info!(
+                                "Tool {} result: {}",
+                                tool_name,
+                                common::truncate_str(result, 100)
+                            );
 
-                        if tool_name == "report_plan" {
-                            if let Ok(result_json) = serde_json::from_str::<Value>(&result) {
-                                if let Some(plan_obj) = result_json.get("plan") {
-                                    if let Ok(plan) =
-                                        serde_json::from_value::<OrchestratorPlan>(plan_obj.clone())
-                                    {
-                                        let plan_json =
-                                            serde_json::to_value(&plan).unwrap_or(Value::Null);
-                                        send_msg!(session_update_plan(&sid, &plan_json));
+                            if tool_name == "report_plan" {
+                                if let Ok(result_json) = serde_json::from_str::<Value>(result) {
+                                    if let Some(plan_obj) = result_json.get("plan") {
+                                        if let Ok(plan) = serde_json::from_value::<OrchestratorPlan>(
+                                            plan_obj.clone(),
+                                        ) {
+                                            let plan_json =
+                                                serde_json::to_value(&plan).unwrap_or(Value::Null);
+                                            send_msg!(session_update_plan(&sid, &plan_json));
+                                        }
                                     }
                                 }
                             }
+
+                            send_msg!(session_update_tool_result(
+                                &sid, tool_id, result, *is_error
+                            ));
                         }
 
-                        send_msg!(session_update_tool_result(
-                            &sid, &tool_name, &result, is_error
-                        ));
-
-                        tool_results.push((tool_name, result));
-                        response_text = remaining_text;
-                    }
-
-                    if !tool_results.is_empty() {
                         if let Some(usage) = &stream_usage {
                             send_msg!(session_update_usage(
                                 &sid,
@@ -485,7 +564,9 @@ impl OrchestratorManager {
 
                         let combined_results: String = tool_results
                             .iter()
-                            .map(|(name, result)| format!("Tool '{}' result:\n{}", name, result))
+                            .map(|(_id, name, result, _err)| {
+                                format!("Tool '{}' result:\n{}", name, result)
+                            })
                             .collect::<Vec<_>>()
                             .join("\n\n");
                         conversation_history.push(Message::user(combined_results));
@@ -526,8 +607,6 @@ impl OrchestratorManager {
                     ));
                 }
             }
-
-            drop(mcp_service);
         });
 
         let session = OrchestratorSession {
@@ -542,6 +621,8 @@ impl OrchestratorManager {
             let mut sessions = self.sessions.write().await;
             sessions.insert(client_id.to_string(), session);
         }
+
+        Ok(())
     }
 
     pub async fn send_prompt(
@@ -557,14 +638,20 @@ impl OrchestratorManager {
             Some(session) if session.session_id == session_id => {
                 *session.current_prompt_id.write().await = prompt_id.clone();
                 if let Err(e) = session.prompt_tx.send((prompt_id.clone(), message)).await {
+                    //
+                    // The session is registered but its task has exited, so
+                    // the channel is closed. Treat it as a lost session
+                    // (ERR_ORCHESTRATOR_SESSION_NOT_FOUND) so the client recreates rather
+                    // than surfacing an opaque "channel closed".
+                    //
                     common::log_warn!("Failed to send prompt to Orchestrator session: {}", e);
                     let _ = send_to_client(
                         publish_channel,
                         client_id,
                         acp_error_response(
                             prompt_id_to_json_rpc_id(&prompt_id),
-                            -32000,
-                            &format!("Failed to send prompt: {}", e),
+                            ERR_ORCHESTRATOR_SESSION_NOT_FOUND,
+                            "Orchestrator session is no longer active.",
                         ),
                     )
                     .await;
@@ -576,7 +663,7 @@ impl OrchestratorManager {
                     client_id,
                     acp_error_response(
                         prompt_id_to_json_rpc_id(&prompt_id),
-                        -32000,
+                        ERR_ORCHESTRATOR_SESSION_NOT_FOUND,
                         "No active Orchestrator session for this client.",
                     ),
                 )
@@ -614,6 +701,8 @@ impl OrchestratorManager {
         for (_, session) in sessions.drain() {
             session.stop();
         }
+        drop(sessions);
+        self.invalidate_shared_mcp().await;
     }
 
     pub async fn cancel_prompt(
@@ -654,6 +743,48 @@ fn prompt_id_to_json_rpc_id(prompt_id: &str) -> Value {
     } else {
         Value::String(prompt_id.to_string())
     }
+}
+
+//
+// Cold-path MCP connect for the shared client. Each attempt waits for
+// the streamable-http handshake (server-side RabbitMQ client register).
+// One retry covers transient startup races. Warm session/new reuses the
+// cached SharedMcp and never calls this.
+//
+
+async fn connect_orchestrator_mcp(
+    mcp_url: &str,
+) -> Result<rmcp::service::RunningService<rmcp::RoleClient, ()>, String> {
+    const ATTEMPTS: u32 = 2;
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    let mut last_err = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let transport = StreamableHttpClientTransport::from_uri(mcp_url);
+        match tokio::time::timeout(CONNECT_TIMEOUT, ().serve(transport)).await {
+            Ok(Ok(service)) => return Ok(service),
+            Ok(Err(e)) => {
+                common::log_error!(
+                    "Failed to initialize MCP client (attempt {attempt}/{ATTEMPTS}): {e}"
+                );
+                last_err = format!(
+                    "Could not connect to the MCP server at {mcp_url}. Make sure the MCP server is enabled and running (Settings > MCP Server). ({e})"
+                );
+            }
+            Err(_) => {
+                common::log_error!(
+                    "Timed out connecting to MCP server at {mcp_url} (attempt {attempt}/{ATTEMPTS})"
+                );
+                last_err = format!(
+                    "Timed out connecting to the MCP server at {mcp_url}. Make sure the MCP server is enabled and running (Settings > MCP Server)."
+                );
+            }
+        }
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
+    }
+    Err(last_err)
 }
 
 fn get_local_tool_definitions() -> Vec<Tool> {
@@ -857,4 +988,217 @@ fn convert_mcp_tools(mcp_tools: Vec<rmcp::model::Tool>) -> Vec<Tool> {
             }
         })
         .collect()
+}
+
+//
+// Run every tool call in `calls` concurrently. Results are returned in the
+// same order as `calls` / `tool_ids` (not completion order). Returns `None`
+// if cancel/stop is observed before the full batch finishes — in-flight
+// tasks are aborted so the session does not sit waiting on every tool.
+//
+async fn execute_tool_calls_concurrent<F, Fut>(
+    calls: Vec<(String, Value)>,
+    tool_ids: Vec<String>,
+    cancel: &AtomicBool,
+    stop: &AtomicBool,
+    mut execute_one: F,
+) -> Option<Vec<(String, String, String, bool)>>
+where
+    F: FnMut(String, Value) -> Fut,
+    Fut: std::future::Future<Output = (String, bool)> + Send + 'static,
+{
+    debug_assert_eq!(calls.len(), tool_ids.len());
+
+    if cancel.load(Ordering::SeqCst) || stop.load(Ordering::SeqCst) {
+        return None;
+    }
+
+    let n = calls.len();
+    if n == 0 {
+        return Some(Vec::new());
+    }
+
+    let names: Vec<String> = calls.iter().map(|(n, _)| n.clone()).collect();
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for (i, ((name, args), tool_id)) in calls.into_iter().zip(tool_ids.iter()).enumerate() {
+        if cancel.load(Ordering::SeqCst) || stop.load(Ordering::SeqCst) {
+            join_set.abort_all();
+            while join_set.join_next().await.is_some() {}
+            return None;
+        }
+        let tool_id = tool_id.clone();
+        let fut = execute_one(name, args);
+        join_set.spawn(async move {
+            let (result, is_error) = fut.await;
+            (i, tool_id, result, is_error)
+        });
+    }
+
+    let mut slots: Vec<Option<(String, String, bool)>> = (0..n).map(|_| None).collect();
+
+    let cancel_watch = async {
+        loop {
+            if cancel.load(Ordering::SeqCst) || stop.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    tokio::pin!(cancel_watch);
+
+    loop {
+        tokio::select! {
+            _ = &mut cancel_watch => {
+                join_set.abort_all();
+                while join_set.join_next().await.is_some() {}
+                return None;
+            }
+            joined = join_set.join_next() => {
+                match joined {
+                    Some(Ok((i, tool_id, result, is_error))) => {
+                        slots[i] = Some((tool_id, result, is_error));
+                    }
+                    Some(Err(_)) => {
+                        join_set.abort_all();
+                        while join_set.join_next().await.is_some() {}
+                        return None;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(n);
+    for (name, slot) in names.into_iter().zip(slots.into_iter()) {
+        let (tool_id, result, is_error) = slot?;
+        ordered.push((tool_id, name, result, is_error));
+    }
+    Some(ordered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn concurrent_tools_overlap_in_time() {
+        let cancel = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let calls = vec![
+            ("wait_a".to_string(), json!({})),
+            ("wait_b".to_string(), json!({})),
+        ];
+        let ids = vec!["id-a".to_string(), "id-b".to_string()];
+
+        let start = Instant::now();
+        let results = execute_tool_calls_concurrent(calls, ids, &cancel, &stop, |name, _| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            (format!("ok-{name}"), false)
+        })
+        .await
+        .expect("batch should complete");
+
+        let elapsed = start.elapsed();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "id-a");
+        assert_eq!(results[0].1, "wait_a");
+        assert_eq!(results[0].2, "ok-wait_a");
+        assert_eq!(results[1].0, "id-b");
+        assert_eq!(results[1].1, "wait_b");
+        assert_eq!(results[1].2, "ok-wait_b");
+        //
+        // Sequential would be ~400ms; concurrent should finish near 200ms.
+        // Allow headroom for scheduler noise but stay clearly under sum.
+        //
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "expected concurrent overlap, elapsed={elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_tools_preserve_input_order() {
+        let cancel = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let calls = vec![
+            ("slow".to_string(), json!({})),
+            ("fast".to_string(), json!({})),
+        ];
+        let ids = vec!["id-slow".to_string(), "id-fast".to_string()];
+
+        let results = execute_tool_calls_concurrent(calls, ids, &cancel, &stop, |name, _| async move {
+            if name == "slow" {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            (format!("result-{name}"), false)
+        })
+        .await
+        .expect("batch should complete");
+
+        assert_eq!(results[0].1, "slow");
+        assert_eq!(results[1].1, "fast");
+        assert_eq!(results[0].0, "id-slow");
+        assert_eq!(results[1].0, "id-fast");
+    }
+
+    #[tokio::test]
+    async fn concurrent_tools_cancel_aborts_batch() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = AtomicBool::new(false);
+        let cancel_flag = Arc::clone(&cancel);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_flag.store(true, Ordering::SeqCst);
+        });
+
+        let calls = vec![
+            ("long_a".to_string(), json!({})),
+            ("long_b".to_string(), json!({})),
+        ];
+        let ids = vec!["id-a".to_string(), "id-b".to_string()];
+
+        let start = Instant::now();
+        let results =
+            execute_tool_calls_concurrent(calls, ids, &cancel, &stop, |_name, _| async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                ("done".to_string(), false)
+            })
+            .await;
+
+        assert!(results.is_none(), "cancel should abort the batch");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "cancel should not wait for full tool duration"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_name_tools_keep_distinct_ids() {
+        let cancel = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let calls = vec![
+            ("node_list".to_string(), json!({"a": 1})),
+            ("node_list".to_string(), json!({"a": 2})),
+        ];
+        let ids = vec!["uuid-1".to_string(), "uuid-2".to_string()];
+
+        let results =
+            execute_tool_calls_concurrent(calls, ids, &cancel, &stop, |name, args| async move {
+                let tag = args.get("a").and_then(|v| v.as_i64()).unwrap_or(0);
+                (format!("{name}-{tag}"), false)
+            })
+            .await
+            .expect("batch should complete");
+
+        assert_eq!(results[0].0, "uuid-1");
+        assert_eq!(results[1].0, "uuid-2");
+        assert_eq!(results[0].2, "node_list-1");
+        assert_eq!(results[1].2, "node_list-2");
+    }
 }

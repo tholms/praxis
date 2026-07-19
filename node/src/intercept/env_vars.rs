@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use crate::utils::CommandOutputBounded;
 #[allow(unused_imports)]
 
 /// Path where we store the exported root CA certificate
@@ -203,13 +204,10 @@ pub fn remove_intercept_env_vars() -> Result<()> {
         home_dirs.len()
     );
 
+    let mut failures = Vec::new();
     for home_dir in &home_dirs {
         if let Err(e) = remove_intercept_env_vars_for_home(home_dir) {
-            common::log_warn!(
-                "Failed to clean up env vars for {}: {}",
-                home_dir.display(),
-                e
-            );
+            failures.push(format!("{}: {}", home_dir.display(), e));
         }
     }
 
@@ -217,7 +215,7 @@ pub fn remove_intercept_env_vars() -> Result<()> {
     // Unset systemd user environment.
     //
     if let Err(e) = unset_systemd_user_env() {
-        common::log_warn!("Failed to unset systemd user environment: {}", e);
+        failures.push(format!("systemd user env: {}", e));
     }
 
     //
@@ -226,12 +224,19 @@ pub fn remove_intercept_env_vars() -> Result<()> {
     let cert_path = cert_export_path();
     if cert_path.exists() {
         if let Err(e) = std::fs::remove_file(&cert_path) {
-            common::log_warn!("Failed to remove exported CA cert: {}", e);
+            failures.push(format!("remove CA cert: {}", e));
         }
     }
 
-    common::log_info!("Removed intercept environment variables");
-    Ok(())
+    if failures.is_empty() {
+        common::log_info!("Removed intercept environment variables");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "intercept env cleanup incomplete (host state may be unknown): {}",
+            failures.join("; ")
+        )
+    }
 }
 
 /// Remove intercept env vars for a specific home directory
@@ -450,9 +455,27 @@ fn remove_from_shell_profile(profile_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+///
+// Whether a systemd user manager is reachable. `systemctl --user` needs a
+// user D-Bus session; when the node runs as a system service / root neither
+// of these is set and the call can only fail. In that context the real
+// mechanism is the per-home proxy_env.sh shell profiles, so skipping the
+// user-manager calls is correct, not a cleanup failure.
+///
+#[cfg(target_os = "linux")]
+fn user_bus_available() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        || std::env::var_os("XDG_RUNTIME_DIR").is_some()
+}
+
 /// Set systemd user environment variables
 #[cfg(target_os = "linux")]
 fn set_systemd_user_env(cert_path: &str, proxy_addr: Option<&str>) -> Result<()> {
+    if !user_bus_available() {
+        common::log_debug!("No systemd user bus; skipping user set-environment");
+        return Ok(());
+    }
+
     let mut args = vec![
         "--user".to_string(),
         "set-environment".to_string(),
@@ -469,7 +492,7 @@ fn set_systemd_user_env(cert_path: &str, proxy_addr: Option<&str>) -> Result<()>
         args.push("no_proxy=localhost,127.0.0.1".to_string());
     }
 
-    let output = std::process::Command::new("systemctl").args(&args).output();
+    let output = std::process::Command::new("systemctl").args(&args).output_bounded();
 
     match output {
         Ok(o) if o.status.success() => {
@@ -487,6 +510,11 @@ fn set_systemd_user_env(cert_path: &str, proxy_addr: Option<&str>) -> Result<()>
 /// Unset systemd user environment variables
 #[cfg(target_os = "linux")]
 fn unset_systemd_user_env() -> Result<()> {
+    if !user_bus_available() {
+        common::log_debug!("No systemd user bus; skipping user unset-environment");
+        return Ok(());
+    }
+
     let args = [
         "--user",
         "unset-environment",
@@ -499,15 +527,16 @@ fn unset_systemd_user_env() -> Result<()> {
         "no_proxy",
     ];
 
-    let output = std::process::Command::new("systemctl").args(&args).output();
+    let output = std::process::Command::new("systemctl")
+        .args(&args)
+        .output_bounded();
 
-    match output {
-        Ok(o) if o.status.success() => {
+    match crate::utils::classify_systemd_unset_result(output) {
+        Ok(()) => {
             common::log_info!("Unset systemd user environment variables");
             Ok(())
         }
-        Ok(_) => Ok(()),  // Ignore errors - vars might not have been set
-        Err(_) => Ok(()), // Ignore if systemctl not available
+        Err(msg) => Err(anyhow::anyhow!("{}", msg)),
     }
 }
 

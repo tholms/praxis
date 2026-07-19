@@ -1,8 +1,6 @@
 //
-// Log tab render: filter bar + table on the left, detail pane on the
-// right. Table rows are already grouped and filtered by
-// InterceptState::rebuild_display, so the renderer just walks
-// display_rows and formats them.
+// Traffic tab render: filter bar + table on the left, detail pane on the
+// right.
 //
 
 use chrono::{DateTime, Local, Utc};
@@ -16,17 +14,18 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use crate::app::App;
 use crate::app::intercept::{DisplayRow, InterceptState};
 use crate::ui::chrome;
-use crate::ui::common::focused_titled_panel;
-use crate::ui::intercept::body_lines;
+use crate::ui::common::{focused_titled_panel, short_id};
+use crate::ui::intercept::{body_lines, search_bar};
+use crate::ui::hits::{HintRegistrar, MouseAction};
 use crate::ui::theme::{
     ACCENT, BG_SELECTED, DIM, MUTED, PROTO_H2, PROTO_WS, STATUS_2XX, STATUS_3XX, STATUS_4XX,
-    STATUS_5XX, TEXT, TEXT_BRIGHT,
+    STATUS_5XX, TEXT, TEXT_BRIGHT, WARN,
 };
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(1), // filter bar
-        Constraint::Min(1),    // split list/detail
+        Constraint::Length(1),
+        Constraint::Min(1),
     ])
     .split(area);
 
@@ -39,30 +38,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     ])
     .split(chunks[1]);
 
-    render_table(f, split[0], &app.intercept);
-    render_detail(f, split[1], &app.intercept);
+    render_table(f, split[0], app);
+    render_detail(f, split[1], app);
 }
 
 fn render_filter_bar(f: &mut Frame, area: Rect, app: &App) {
     let state = &app.intercept;
-    let search_span = if state.search_focused {
-        if state.search_input.is_empty() {
-            Span::styled("\u{2588}", Style::default().fg(ACCENT))
-        } else {
-            Span::styled(
-                format!("{}\u{2588}", state.search_input),
-                Style::default().fg(ACCENT),
-            )
-        }
-    } else if state.search_input.is_empty() {
-        Span::styled(
-            "(/ to search)",
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Span::styled(state.search_input.clone(), Style::default().fg(ACCENT))
-    };
-
     let node_label = match state.node_filter.as_deref() {
         None => "all".to_string(),
         Some(id) => {
@@ -73,59 +54,73 @@ fn render_filter_bar(f: &mut Frame, area: Rect, app: &App) {
                 .find(|n| n.node_id == id)
                 .map(|n| n.machine_name.clone())
                 .filter(|n| !n.is_empty());
-            name.unwrap_or_else(|| id[..8.min(id.len())].to_string())
+            name.unwrap_or_else(|| short_id(id).to_string())
         }
     };
     let agent_label = match state.agent_filter.as_deref() {
         None => "all".to_string(),
         Some(a) => a.to_string(),
     };
-
-    let spans = vec![
-        Span::styled("/", Style::default().fg(TEXT_BRIGHT)),
-        Span::styled(" ", Style::default()),
-        search_span,
-        Span::raw("    "),
-        chrome::pill_two_tone("node", &node_label, MUTED)
-            .into_iter()
-            .next()
-            .unwrap(),
-    ];
+    let showing = state.display_rows.len();
+    let total = state.total_in_service.max(state.buffer.len());
+    let body_label = state.body_mode.label();
 
     //
-    // Re-build with full pill_two_tone now (helper returns Vec, but we
-    // want to inline it).
+    // Toggle pills first (clickable), then a plain showing count —
+    // not a pill so it does not look actionable.
     //
-    let mut full = vec![
-        Span::styled("/", Style::default().fg(TEXT_BRIGHT)),
-        Span::raw(" "),
+    let pills: [(&str, &str, MouseAction); 3] = [
+        ("node", &node_label, MouseAction::InterceptCycleNodeFilter),
+        ("agent", &agent_label, MouseAction::InterceptCycleAgentFilter),
+        ("body", body_label, MouseAction::InterceptCycleBodyMode),
     ];
-    full.push(match spans.get(2) {
-        Some(s) => s.clone(),
-        None => Span::raw(""),
-    });
-    full.push(Span::raw("    "));
-    full.extend(chrome::pill_two_tone("node", &node_label, ACCENT));
-    full.push(Span::raw("  "));
-    full.extend(chrome::pill_two_tone("agent", &agent_label, ACCENT));
 
-    f.render_widget(Paragraph::new(Line::from(full)), area);
+    let search_prefix = search_bar::search_prefix_width(app);
+    let mut reg = HintRegistrar::new(app, area);
+    reg.gap(search_prefix);
+
+    let mut groups: Vec<Vec<Span<'static>>> = Vec::with_capacity(4);
+    for (label, value, action) in pills {
+        reg.gap(4);
+        let pill = search_bar::pill_spans(label, value);
+        let pill_w: u16 = pill.iter().map(|s| s.content.chars().count() as u16).sum();
+        reg.chip(&" ".repeat(pill_w as usize), action);
+        groups.push(pill);
+    }
+
+    //
+    // Showing: dim meta text, not a two-tone button.
+    //
+    groups.push(vec![
+        Span::styled("showing ", Style::default().fg(DIM)),
+        Span::styled(
+            format!("{}/{}", showing, total),
+            Style::default().fg(MUTED),
+        ),
+    ]);
+
+    search_bar::render(f, area, app, &groups);
 }
 
-fn render_table(f: &mut Frame, area: Rect, state: &InterceptState) {
+fn render_table(f: &mut Frame, area: Rect, app: &App) {
+    let state = &app.intercept;
     let header = Row::new(vec![
+        Cell::from(""),
         Cell::from("Time"),
+        Cell::from("Agent"),
         Cell::from("Method"),
-        Cell::from("Status"),
+        Cell::from("Info"),
         Cell::from("URL"),
     ])
     .style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD));
 
     let widths = [
-        Constraint::Length(12),
-        Constraint::Length(8),
+        Constraint::Length(2),
+        Constraint::Length(11),
         Constraint::Length(10),
-        Constraint::Min(20),
+        Constraint::Length(7),
+        Constraint::Length(8),
+        Constraint::Min(16),
     ];
 
     let rows: Vec<Row> = state
@@ -153,26 +148,43 @@ fn render_table(f: &mut Frame, area: Rect, state: &InterceptState) {
 }
 
 fn build_row(state: &InterceptState, row: &DisplayRow) -> Row<'static> {
+    let primary = row.primary_index();
+    let entry = state.buffer.get(primary);
+    let flag = entry
+        .map(|e| state.traffic_has_matches(e))
+        .unwrap_or(false);
+    let flag_cell = if flag {
+        Cell::from(Span::styled("\u{2691}", Style::default().fg(WARN)))
+    } else {
+        Cell::from(Span::raw(""))
+    };
+
     match row {
         DisplayRow::Http(idx) => {
             let Some(entry) = state.buffer.get(*idx) else {
-                return Row::new(vec![Cell::from(""); 4]);
+                return Row::new(vec![Cell::from(""); 6]);
             };
-            let ts = format_timestamp(&entry.timestamp);
-            let method = entry.method.as_deref().unwrap_or("-");
-            let status = format_http_status(entry.response_status);
-            let url = truncate(&entry.url, 90);
-
             Row::new(vec![
-                Cell::from(Span::styled(ts, Style::default().fg(MUTED))),
+                flag_cell,
                 Cell::from(Span::styled(
-                    method.to_string(),
+                    format_timestamp(&entry.timestamp),
+                    Style::default().fg(MUTED),
+                )),
+                Cell::from(Span::styled(
+                    entry.agent_short_name.clone(),
+                    Style::default().fg(ACCENT),
+                )),
+                Cell::from(Span::styled(
+                    entry.method.as_deref().unwrap_or("-").to_string(),
                     Style::default()
-                        .fg(method_color(method))
+                        .fg(method_color(entry.method.as_deref().unwrap_or("")))
                         .add_modifier(Modifier::BOLD),
                 )),
-                Cell::from(status),
-                Cell::from(Span::styled(url, Style::default().fg(TEXT))),
+                Cell::from(format_http_status(entry.response_status)),
+                Cell::from(Span::styled(
+                    truncate(&entry.url, 70),
+                    Style::default().fg(TEXT),
+                )),
             ])
         }
         DisplayRow::Group { url, indices } => {
@@ -183,21 +195,17 @@ fn build_row(state: &InterceptState, row: &DisplayRow) -> Row<'static> {
             let ts = first
                 .map(|e| format_timestamp(&e.timestamp))
                 .unwrap_or_default();
+            let agent = first
+                .map(|e| e.agent_short_name.clone())
+                .unwrap_or_default();
             let mut sent = 0u32;
             let mut recv = 0u32;
-            let mut bytes = 0u64;
             let mut proto = "WS";
             for i in indices {
                 if let Some(e) = state.buffer.get(*i) {
                     match e.direction {
                         common::TrafficDirection::Send => sent += 1,
                         common::TrafficDirection::Receive => recv += 1,
-                    }
-                    if let Some(ref b) = e.request_body {
-                        bytes += b.len() as u64;
-                    }
-                    if let Some(ref b) = e.response_body {
-                        bytes += b.len() as u64;
                     }
                     if e.method
                         .as_deref()
@@ -209,28 +217,39 @@ fn build_row(state: &InterceptState, row: &DisplayRow) -> Row<'static> {
                 }
             }
             let color = if proto == "H2" { PROTO_H2 } else { PROTO_WS };
-            let method_cell = Span::styled(
-                proto.to_string(),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            );
-            let status_cell = Span::styled(
-                format!("\u{2191}{} \u{2193}{} {}", sent, recv, format_bytes(bytes)),
-                Style::default().fg(MUTED),
-            );
-            let url_cell = Span::styled(truncate(url, 90), Style::default().fg(TEXT));
-
             Row::new(vec![
+                flag_cell,
                 Cell::from(Span::styled(ts, Style::default().fg(MUTED))),
-                Cell::from(method_cell),
-                Cell::from(status_cell),
-                Cell::from(url_cell),
+                Cell::from(Span::styled(agent, Style::default().fg(ACCENT))),
+                Cell::from(Span::styled(
+                    proto.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    format!("\u{2191}{} \u{2193}{}", sent, recv),
+                    Style::default().fg(MUTED),
+                )),
+                Cell::from(Span::styled(
+                    truncate(url, 70),
+                    Style::default().fg(TEXT),
+                )),
             ])
         }
     }
 }
 
-fn render_detail(f: &mut Frame, area: Rect, state: &InterceptState) {
-    let block = focused_titled_panel(" Detail ", state.detail_focus);
+fn render_detail(f: &mut Frame, area: Rect, app: &App) {
+    let state = &app.intercept;
+    let title = if state.display_rows.is_empty() {
+        " Detail ".to_string()
+    } else {
+        format!(
+            " Detail {} / {} ",
+            state.selected + 1,
+            state.display_rows.len()
+        )
+    };
+    let block = focused_titled_panel(&title, state.detail_focus);
 
     let Some(selected) = state.selected_row() else {
         let empty = Paragraph::new(Line::from(Span::styled(
@@ -248,7 +267,9 @@ fn render_detail(f: &mut Frame, area: Rect, state: &InterceptState) {
             .get(*idx)
             .map(|e| http_detail_lines(state, e))
             .unwrap_or_default(),
-        DisplayRow::Group { url, indices } => group_detail_lines(state, url, indices),
+        DisplayRow::Group { url, indices } => {
+            group_detail_lines(state, url, indices, state.group_frame_selected)
+        }
     };
 
     let inner_h = block.inner(area).height as usize;
@@ -284,11 +305,32 @@ fn http_detail_lines(
     out.push(kv_line("node", &short_id(&entry.node_id)));
     out.push(kv_line("agent", &entry.agent_short_name));
     out.push(kv_line("host", &entry.host));
+    out.push(kv_line(
+        "method",
+        &format!("{:?}", entry.intercept_method).to_lowercase(),
+    ));
+    out.push(kv_line("dir", &format!("{:?}", entry.direction).to_lowercase()));
     if let Some(s) = entry.response_status {
         out.push(Line::from(vec![
             Span::styled("status: ", Style::default().fg(MUTED)),
             format_http_status(Some(s)),
         ]));
+    }
+
+    let match_labels = state.traffic_match_labels(entry);
+    if !match_labels.is_empty() {
+        out.push(Line::raw(""));
+        out.push(section_heading("MATCHED RULES"));
+        for name in match_labels {
+            out.push(Line::from(vec![
+                Span::styled("  \u{2691} ", Style::default().fg(WARN)),
+                Span::styled(name, Style::default().fg(ACCENT)),
+            ]));
+        }
+        out.push(Line::from(Span::styled(
+            "  (m) view in Matches tab",
+            Style::default().fg(DIM),
+        )));
     }
     out.push(Line::raw(""));
 
@@ -302,8 +344,9 @@ fn http_detail_lines(
 
     if let Some(body) = state.request_body_for(entry) {
         out.push(section_heading(&format!(
-            "REQUEST BODY ({} bytes)",
-            body.len()
+            "REQUEST BODY ({} bytes, {})",
+            body.len(),
+            state.body_mode.label()
         )));
         out.extend(body_lines(body, state.body_mode));
         out.push(Line::raw(""));
@@ -326,8 +369,9 @@ fn http_detail_lines(
 
     if let Some(body) = state.response_body_for(entry) {
         out.push(section_heading(&format!(
-            "RESPONSE BODY ({} bytes)",
-            body.len()
+            "RESPONSE BODY ({} bytes, {})",
+            body.len(),
+            state.body_mode.label()
         )));
         out.extend(body_lines(body, state.body_mode));
     } else if entry.id.is_some() && state.body_needs_fetch(entry) {
@@ -341,7 +385,12 @@ fn http_detail_lines(
     out
 }
 
-fn group_detail_lines(state: &InterceptState, url: &str, indices: &[usize]) -> Vec<Line<'static>> {
+fn group_detail_lines(
+    state: &InterceptState,
+    url: &str,
+    indices: &[usize],
+    frame_selected: usize,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     out.push(Line::from(vec![
         chrome::pill("GRP", PROTO_WS),
@@ -349,25 +398,35 @@ fn group_detail_lines(state: &InterceptState, url: &str, indices: &[usize]) -> V
         Span::styled(url.to_string(), Style::default().fg(TEXT_BRIGHT)),
     ]));
     out.push(Line::raw(""));
-    out.push(section_heading(&format!("{} FRAMES", indices.len())));
+    out.push(section_heading(&format!("{} FRAMES (\u{2191}\u{2193} select)", indices.len())));
 
-    for i in indices {
+    for (fi, i) in indices.iter().enumerate() {
         let Some(e) = state.buffer.get(*i) else {
             continue;
         };
+        let selected = fi == frame_selected;
         let arrow = if matches!(e.direction, common::TrafficDirection::Send) {
             Span::styled("\u{2191}", Style::default().fg(STATUS_3XX))
         } else {
             Span::styled("\u{2193}", Style::default().fg(STATUS_2XX))
         };
-        let method = e.method.clone().unwrap_or_default();
+        let method = e
+            .method
+            .as_deref()
+            .unwrap_or_default()
+            .split_once('#')
+            .map(|(method, _)| method)
+            .unwrap_or_else(|| e.method.as_deref().unwrap_or_default())
+            .to_string();
         let size = e
             .response_body
             .as_ref()
             .map(|b| b.len())
             .or_else(|| e.request_body.as_ref().map(|b| b.len()))
             .unwrap_or(0);
+        let prefix = if selected { "> " } else { "  " };
         out.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(if selected { ACCENT } else { DIM })),
             Span::styled(format_timestamp(&e.timestamp), Style::default().fg(MUTED)),
             Span::raw("  "),
             arrow,
@@ -376,6 +435,21 @@ fn group_detail_lines(state: &InterceptState, url: &str, indices: &[usize]) -> V
             Span::raw("  "),
             Span::styled(format!("{} B", size), Style::default().fg(DIM)),
         ]));
+
+        if selected {
+            if let Some(body) = state
+                .response_body_for(e)
+                .or_else(|| state.request_body_for(e))
+            {
+                out.extend(body_lines(body, state.body_mode));
+            } else if e.id.is_some() && state.body_needs_fetch(e) {
+                out.push(Line::from(Span::styled(
+                    "    (fetching payload…)",
+                    Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+                )));
+            }
+            out.push(Line::raw(""));
+        }
     }
     out
 }
@@ -448,46 +522,4 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('\u{2026}');
     out
-}
-
-fn format_bytes(n: u64) -> String {
-    if n < 1024 {
-        format!("{} B", n)
-    } else if n < 1024 * 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
-    }
-}
-
-fn short_id(id: &str) -> String {
-    id[..8.min(id.len())].to_string()
-}
-
-pub fn hints(app: &App) -> Line<'static> {
-    let key = Style::default().fg(TEXT_BRIGHT);
-    let label = Style::default().fg(MUTED);
-    Line::from(vec![
-        Span::styled("/", key),
-        Span::styled(" search", label),
-        Span::raw("    "),
-        Span::styled("n", key),
-        Span::styled(" node", label),
-        Span::raw("    "),
-        Span::styled("a", key),
-        Span::styled(" agent", label),
-        Span::raw("    "),
-        Span::styled("p", key),
-        Span::styled(
-            if app.intercept.paused {
-                " resume"
-            } else {
-                " pause"
-            },
-            label,
-        ),
-        Span::raw("    "),
-        Span::styled("c", key),
-        Span::styled(" clear", label),
-    ])
 }

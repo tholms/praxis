@@ -38,7 +38,11 @@ base URL.
 
 ### Feature Assignment
 
-Once you've added models, assign them to features:
+Once you've added models, assign them to features under **Feature Selection**:
+
+**Orchestrator** - Powers the free-form Orchestrator chat. Needs a capable model that follows tool-calling instructions reliably.
+
+**Documentation Helper** - Powers the [Help Assistant](../usage/help-assistant.md) (`Ctrl+H`). Falls back to the Orchestrator model when unset.
 
 **Semantic Operations** - Used when executing operations through agents. This is the "brain" that orchestrates what the agent should do. Pick something capable.
 
@@ -53,7 +57,7 @@ For parser features (Semantic Parser, Traffic Parser), we recommend providers wi
 - **Cerebras** and **Groq** have very fast time-to-first-token and overall throughput
 - This matters when you're running recon across multiple agents or parsing lots of traffic
 
-For Semantic Operations, capability matters more than raw speed. Use a model that's good at reasoning and tool use.
+For Orchestrator and Semantic Operations, capability matters more than raw speed. Use a model that's good at reasoning and tool use.
 
 ## Environment Variables
 

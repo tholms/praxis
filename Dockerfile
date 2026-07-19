@@ -8,12 +8,12 @@
 # Binaries are downloaded from the GitHub release matching PRAXIS_VERSION.
 # Override at build time, e.g.:
 #
-#   docker build --build-arg PRAXIS_VERSION=0.9.29 -t praxis .
+#   docker build --build-arg PRAXIS_VERSION=1.0.0 -t praxis .
 #
 
 FROM debian:bookworm-slim
 
-ARG PRAXIS_VERSION=0.9.29
+ARG PRAXIS_VERSION=1.0.0
 ARG PRAXIS_RELEASE_BASE=https://github.com/originsec/praxis/releases/download
 
 ENV container=docker
@@ -99,7 +99,8 @@ RUN set -eux; \
 COPY pkg/systemd/praxis-service.service /etc/systemd/system/praxis-service.service
 COPY pkg/systemd/praxis.env.example     /etc/praxis/env
 COPY pkg/praxisctl/praxisctl            /usr/local/bin/praxisctl
-RUN chmod +x /usr/local/bin/praxisctl /usr/local/bin/praxis_service && \
+RUN sed -i 's/\r$//' /usr/local/bin/praxisctl && \
+    chmod +x /usr/local/bin/praxisctl /usr/local/bin/praxis_service && \
     sed -i 's|@localhost:5672|@rabbitmq:5672|' /etc/praxis/env
 
 #

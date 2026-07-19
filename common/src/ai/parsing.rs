@@ -51,9 +51,36 @@ fn find_matching_brace(text: &str, start: usize) -> Option<usize> {
 ///
 /// Returns: (tool_name, tool_args, remaining_text_without_tool_call)
 ///
-/// Looks for JSON blocks in format: {"tool": "tool_name", "args": {...}}
-/// Supports both code-fenced and plain JSON formats
+/// Looks for a JSON block in the documented `{"tool": "tool_name", "args":
+/// {...}}` format (see `tool_calling.prompt`), in either code-fenced or
+/// plain form. A call missing the `args` object is not recognized here —
+/// see `parse_manual_tool_call_lenient` for callers that need to tolerate
+/// that.
 pub fn parse_manual_tool_call(text: &str) -> Option<(String, Value, String)> {
+    parse_manual_tool_call_with(text, extract_tool_call_parts)
+}
+
+//
+// Some models occasionally flatten a tool call's arguments onto the
+// top-level object (e.g. `{"tool": "search_docs", "query": "..."}`) despite
+// every consumer being prompted with the strict `args`-wrapped contract.
+// Tolerance for that drift is scoped to callers that have actually observed
+// it, rather than loosened globally — a stray JSON object carrying a "tool"
+// key should not be misread as a call by consumers that never asked for the
+// lenient form.
+//
+
+/// Like `parse_manual_tool_call`, but also accepts a tool call whose
+/// arguments are flattened onto the top-level object instead of nested
+/// under `"args"`.
+pub fn parse_manual_tool_call_lenient(text: &str) -> Option<(String, Value, String)> {
+    parse_manual_tool_call_with(text, extract_tool_call_parts_lenient)
+}
+
+fn parse_manual_tool_call_with(
+    text: &str,
+    extract: impl Fn(&Value) -> Option<(String, Value)>,
+) -> Option<(String, Value, String)> {
     //
     // Try to find a tool call pattern using brace-counting for robustness
     // This handles nested braces inside JSON string values correctly.
@@ -82,10 +109,7 @@ pub fn parse_manual_tool_call(text: &str) -> Option<(String, Value, String)> {
             // Try to parse as tool call.
             //
             if let Ok(parsed) = serde_json::from_str::<Value>(json_str) {
-                if let (Some(tool_name), Some(args)) = (
-                    parsed.get("tool").and_then(|v| v.as_str()),
-                    parsed.get("args"),
-                ) {
+                if let Some((tool_name, args)) = extract(&parsed) {
                     //
                     // Find the closing fence.
                     //
@@ -98,7 +122,7 @@ pub fn parse_manual_tool_call(text: &str) -> Option<(String, Value, String)> {
                     let after = &text[remaining_text_start..];
                     let remaining_text = format!("{}{}", before, after).trim().to_string();
 
-                    return Some((tool_name.to_string(), args.clone(), remaining_text));
+                    return Some((tool_name, args, remaining_text));
                 }
             }
         }
@@ -124,21 +148,80 @@ pub fn parse_manual_tool_call(text: &str) -> Option<(String, Value, String)> {
             // Try to parse as tool call.
             //
             if let Ok(parsed) = serde_json::from_str::<Value>(json_str) {
-                if let (Some(tool_name), Some(args)) = (
-                    parsed.get("tool").and_then(|v| v.as_str()),
-                    parsed.get("args"),
-                ) {
+                if let Some((tool_name, args)) = extract(&parsed) {
                     let before = &text[..json_start];
                     let after = &text[json_end + 1..];
                     let remaining_text = format!("{}{}", before, after).trim().to_string();
 
-                    return Some((tool_name.to_string(), args.clone(), remaining_text));
+                    return Some((tool_name, args, remaining_text));
                 }
             }
         }
     }
 
     None
+}
+
+///
+/// Collect every tool-call JSON object in `text`, left-to-right.
+///
+/// Returns `(calls, remaining_text)` where `calls` is ordered by appearance
+/// and `remaining_text` is the original text with all tool-call blocks
+/// removed. An empty `calls` vec means no tool calls were found.
+///
+pub fn parse_manual_tool_calls(text: &str) -> (Vec<(String, Value)>, String) {
+    let mut calls = Vec::new();
+    let mut remaining = text.to_string();
+    while let Some((name, args, rest)) = parse_manual_tool_call(&remaining) {
+        calls.push((name, args));
+        remaining = rest;
+    }
+    (calls, remaining)
+}
+
+fn extract_tool_call_parts(parsed: &Value) -> Option<(String, Value)> {
+    let tool_name = parsed.get("tool")?.as_str()?.to_string();
+    let args = parsed.get("args")?.clone();
+    Some((tool_name, args))
+}
+
+fn extract_tool_call_parts_lenient(parsed: &Value) -> Option<(String, Value)> {
+    let tool_name = parsed.get("tool")?.as_str()?.to_string();
+
+    if let Some(args) = parsed.get("args") {
+        return Some((tool_name, args.clone()));
+    }
+
+    let mut args = parsed.as_object()?.clone();
+    args.remove("tool");
+    Some((tool_name, Value::Object(args)))
+}
+
+//
+// Detect a manual tool-call JSON block that was cut short (e.g. by a
+// provider's output-token limit) before its closing brace, and strip it so
+// truncated scaffolding is never shown to the operator. Only the plain
+// (non-code-fenced) `{"tool": ...}` form is checked: a fenced block cut off
+// mid-JSON has no closing fence either, so the same brace-counting failure
+// applies without needing a separate scan.
+//
+
+/// Strip a trailing, unterminated tool-call JSON fragment from `text`.
+/// Returns the text with the fragment (and any trailing whitespace before
+/// it) removed, and whether a fragment was found.
+pub fn strip_incomplete_tool_call(text: &str) -> (String, bool) {
+    let Ok(tool_re) = Regex::new(r#"\{\s*"tool"\s*:"#) else {
+        return (text.to_string(), false);
+    };
+
+    for tool_match in tool_re.find_iter(text) {
+        let json_start = tool_match.start();
+        if find_matching_brace(text, json_start).is_none() {
+            return (text[..json_start].trim_end().to_string(), true);
+        }
+    }
+
+    (text.to_string(), false)
 }
 
 /// Parse completion signal from AI response text
@@ -296,6 +379,56 @@ This will help me understand."#;
     }
 
     #[test]
+    fn test_parse_tool_call_with_direct_arguments_lenient() {
+        let text = r#"I'll check the Interception documentation for that.
+{"tool": "search_docs", "query": "node not showing in intercept window"}"#;
+
+        let result = parse_manual_tool_call_lenient(text);
+        assert!(result.is_some());
+
+        let (tool_name, args, remaining) = result.unwrap();
+        assert_eq!(tool_name, "search_docs");
+        assert_eq!(args["query"], "node not showing in intercept window");
+        assert_eq!(
+            remaining,
+            "I'll check the Interception documentation for that."
+        );
+    }
+
+    #[test]
+    fn test_strict_parser_rejects_direct_arguments() {
+        //
+        // Consumers other than the documentation helper are prompted with,
+        // and rely on, the strict {"tool", "args"} contract. A flattened
+        // call must not be picked up by the default parser.
+        //
+        let text = r#"{"tool": "search_docs", "query": "node not showing in intercept window"}"#;
+
+        assert!(parse_manual_tool_call(text).is_none());
+    }
+
+    #[test]
+    fn test_strip_incomplete_tool_call_removes_dangling_fragment() {
+        let text = "I'll check the node setup documentation for that.\n\
+                     {\"tool\": \"read_doc\", \"path\": \"usa";
+
+        let (cleaned, stripped) = strip_incomplete_tool_call(text);
+
+        assert!(stripped);
+        assert_eq!(cleaned, "I'll check the node setup documentation for that.");
+    }
+
+    #[test]
+    fn test_strip_incomplete_tool_call_leaves_complete_calls_untouched() {
+        let text = r#"{"tool": "search_docs", "args": {"query": "recon"}}"#;
+
+        let (cleaned, stripped) = strip_incomplete_tool_call(text);
+
+        assert!(!stripped);
+        assert_eq!(cleaned, text);
+    }
+
+    #[test]
     fn test_no_tool_call() {
         let text = "This is just a regular response with no tool calls.";
         let result = parse_manual_tool_call(text);
@@ -399,5 +532,70 @@ The operation is now finished."#;
         let text = "This is just a regular response with no completion signal.";
         let result = parse_completion_signal(text);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_multiple_plain_json_tool_calls() {
+        let text = r#"I'll inspect the fleet first.
+{"tool": "node_list", "args": {}}
+{"tool": "agent_list", "args": {"node_id": "abc"}}
+{"tool": "node_list", "args": {"refresh": true}}
+"#;
+
+        let (calls, remaining) = parse_manual_tool_calls(text);
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0, "node_list");
+        assert_eq!(calls[0].1, serde_json::json!({}));
+        assert_eq!(calls[1].0, "agent_list");
+        assert_eq!(calls[1].1["node_id"], "abc");
+        assert_eq!(calls[2].0, "node_list");
+        assert_eq!(calls[2].1["refresh"], true);
+        assert!(remaining.contains("I'll inspect the fleet first"));
+        assert!(!remaining.contains("\"tool\""));
+    }
+
+    #[test]
+    fn test_parse_multiple_code_fenced_tool_calls() {
+        let text = r#"Gathering context.
+
+```json
+{"tool": "node_list", "args": {}}
+```
+
+```json
+{"tool": "op_available", "args": {}}
+```
+"#;
+
+        let (calls, remaining) = parse_manual_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "node_list");
+        assert_eq!(calls[1].0, "op_available");
+        assert!(remaining.contains("Gathering context"));
+        assert!(!remaining.contains("node_list"));
+    }
+
+    #[test]
+    fn test_parse_multiple_mixed_prose_and_tools() {
+        let text = r#"Checking nodes then agents.
+{"tool": "node_list", "args": {}}
+Next I'll list agents on the first node.
+{"tool": "agent_list", "args": {"node_id": "n1"}}
+Done requesting."#;
+
+        let (calls, remaining) = parse_manual_tool_calls(text);
+        assert!(calls.len() >= 2);
+        assert_eq!(calls[0].0, "node_list");
+        assert_eq!(calls[1].0, "agent_list");
+        assert_eq!(calls[1].1["node_id"], "n1");
+        assert!(remaining.contains("Checking nodes then agents"));
+        assert!(remaining.contains("Done requesting"));
+    }
+
+    #[test]
+    fn test_parse_manual_tool_calls_empty() {
+        let (calls, remaining) = parse_manual_tool_calls("No tools here.");
+        assert!(calls.is_empty());
+        assert_eq!(remaining, "No tools here.");
     }
 }

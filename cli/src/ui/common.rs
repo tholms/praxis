@@ -69,21 +69,6 @@ pub fn focused_panel(focused: bool) -> Block<'static> {
 }
 
 //
-// Hit-test whether the mouse is on the vertical border at the right
-// edge of `left` (i.e. the seam between `left` and its right-hand
-// neighbour). ±1 column tolerance so pixel-perfect clicks aren't
-// needed. Used by the resizable split panes.
-//
-
-pub fn hit_vertical_border(left: Rect, mouse_col: u16, mouse_row: u16) -> bool {
-    let border_x = left.x.saturating_add(left.width);
-    mouse_col + 1 >= border_x
-        && mouse_col <= border_x + 1
-        && mouse_row >= left.y
-        && mouse_row < left.y + left.height
-}
-
-//
 // Map a mouse column to a split percentage for a horizontal two-pane
 // drag. `outer_x` and `outer_width` describe the parent area the
 // split sits inside. Clamped to [20, 80] so neither pane collapses.
@@ -93,6 +78,56 @@ pub fn drag_split_percent(outer_x: u16, outer_width: u16, mouse_col: u16) -> u16
     let w = outer_width.max(1) as i32;
     let rel = (mouse_col as i32 - outer_x as i32).clamp(0, w);
     ((rel * 100) / w).clamp(20, 80) as u16
+}
+
+//
+// Map a mouse row to a top-pane height for a vertical two-pane drag.
+// Clamped to [min_h, max_h].
+//
+pub fn drag_top_height(
+    outer_y: u16,
+    mouse_row: u16,
+    min_h: u16,
+    max_h: u16,
+) -> u16 {
+    let rel = mouse_row.saturating_sub(outer_y).saturating_add(1);
+    rel.clamp(min_h, max_h.max(min_h))
+}
+
+/// 3-row tolerance strip on the bottom edge of `top` for vertical splits.
+pub fn split_border_rect_horizontal(top: Rect) -> Rect {
+    let border_y = top.y.saturating_add(top.height);
+    Rect::new(
+        top.x,
+        border_y.saturating_sub(1),
+        top.width,
+        3,
+    )
+}
+
+pub fn point_in(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+/// First data row in a `titled_panel` / `focused_titled_panel` table (title + header).
+pub fn table_data_start_titled(table_area: Rect) -> u16 {
+    table_area.y.saturating_add(2)
+}
+
+/// First data row in a title-less `focused_panel` table whose header uses `bottom_margin(1)`.
+pub fn table_data_start_margin_header(table_area: Rect) -> u16 {
+    table_area.y.saturating_add(3)
+}
+
+pub fn table_row_at(table_area: Rect, data_start: u16, mouse_row: u16) -> Option<usize> {
+    if mouse_row >= data_start && mouse_row < table_area.y.saturating_add(table_area.height) {
+        Some((mouse_row - data_start) as usize)
+    } else {
+        None
+    }
 }
 
 pub fn spinner_char() -> char {

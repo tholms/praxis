@@ -68,6 +68,12 @@ Thinking mode is enabled automatically when the configured Orchestrator model su
 
 The Orchestrator can break complex tasks into steps and show progress via the `report_plan` tool. When the AI calls this tool, you'll see a plan panel with step descriptions and their current status (not started, in progress, done).
 
+## Concurrent Tool Calls
+
+When the model emits multiple independent tool-call JSON blocks in a single response, the Orchestrator runs them **concurrently** and returns all results together in one follow-up message before the next model turn. Dependent steps still run across turns (call prerequisites first, wait for results, then continue).
+
+This is useful for fan-out work such as listing nodes and available operations at the same time, or queueing `op_run` against several nodes in one step.
+
 ## Token Usage
 
 Token usage is displayed after each LLM call, showing prompt tokens, completion tokens, and totals. This helps monitor costs when using commercial API providers.
@@ -106,11 +112,17 @@ The Orchestrator is best for exploration, debugging, and complex ad-hoc tasks. S
 
 Go to **Settings** > **MCP Server** and enable it. The Orchestrator requires the MCP server to function.
 
-### "Failed to connect to MCP server"
+### "Could not connect to the MCP server"
+
+The Orchestrator connects to the MCP server when the session is created, so a
+connection problem is reported up front with the reason (rather than surfacing
+later as an opaque error on your first prompt). If you see this:
 
 - Verify the MCP server is running (check the Settings page for status)
 - Check that the configured port is not in use by another process
 - Look at service logs for MCP server startup errors
+- If you just enabled the MCP server, give it a moment to bind, then start the
+  session again
 
 ### Tools not executing
 
@@ -120,6 +132,17 @@ Go to **Settings** > **MCP Server** and enable it. The Orchestrator requires the
 
 ### Session disconnects
 
-The MCP client connection is tied to the Orchestrator session. If the MCP server restarts, you'll need to start a new Orchestrator session.
+If the **service** restarts, its in-memory Orchestrator sessions are lost. The
+next prompt you send is detected as targeting a lost session, and the TUI
+automatically starts a fresh session (re-seeding it with the prior transcript)
+and resends your prompt — no action needed. If recovery can't re-establish the
+session, use `/clear` to start a clean one.
 
-In the TUI, use `praxis --continue` (or `--resume`) to bring back the prior conversation under a fresh service session — the saved transcript is replayed locally and re-seeded as history for the next prompt.
+`/clear` uses standard ACP: `session/close` then `session/new`. The service
+keeps a **shared** MCP connection for the orchestrator, so after the first
+session of the process, close+new is near-instant (conversation only; no MCP
+reconnect).
+
+To bring back a prior conversation deliberately, start the TUI with
+`praxis --continue` (or `--resume`): the saved transcript is replayed locally
+and re-seeded as history for the next prompt.

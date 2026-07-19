@@ -99,7 +99,21 @@ pub struct LogQueryState {
     pub schema_expanded: Option<usize>,
     pub schema_selected: usize,
     pub schema_scroll: u16,
+
+    //
+    // Resizable panes: editor height (rows) and results list percentage
+    // when a row is expanded into list|detail.
+    //
+    pub editor_height: u16,
+    pub editor_dragging: bool,
+    pub results_split_percent: u16,
+    pub results_dragging: bool,
 }
+
+/// Default / clamp range for the log-query editor pane height.
+pub const EDITOR_HEIGHT_DEFAULT: u16 = 9;
+pub const EDITOR_HEIGHT_MIN: u16 = 4;
+pub const EDITOR_HEIGHT_MAX: u16 = 20;
 
 impl Default for LogQueryState {
     fn default() -> Self {
@@ -128,6 +142,10 @@ impl Default for LogQueryState {
             schema_expanded: None,
             schema_selected: 0,
             schema_scroll: 0,
+            editor_height: EDITOR_HEIGHT_DEFAULT,
+            editor_dragging: false,
+            results_split_percent: 60,
+            results_dragging: false,
         }
     }
 }
@@ -442,6 +460,13 @@ impl crate::app::App {
         }
 
         match (key.code, key.modifiers) {
+            (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL) => {
+                //
+                // Open the current query in $VISUAL / $EDITOR. On a clean
+                // exit the saved buffer replaces the in-app editor text.
+                //
+                self.edit_log_query_in_editor();
+            }
             (KeyCode::Tab, _) => {
                 let suggestions =
                     autocomplete::suggestions_for(&self.log_query.editor.full_prefix());
@@ -585,59 +610,6 @@ impl crate::app::App {
         }
     }
 
-    pub(crate) async fn handle_log_query_mouse(
-        &mut self,
-        mouse: crossterm::event::MouseEvent,
-        content_area: ratatui::layout::Rect,
-    ) {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        use ratatui::layout::{Constraint, Layout};
-
-        //
-        // Schema popup click: any click outside dismisses it.
-        //
-        if self.log_query.schema_open {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                self.log_query.schema_open = false;
-            }
-            return;
-        }
-
-        let show_error = self.log_query.last_error.is_some();
-        let chunks = Layout::vertical([
-            Constraint::Length(9),
-            Constraint::Length(if show_error { 1 } else { 0 }),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(content_area);
-        let editor_area = chunks[0];
-        let results_area = chunks[2];
-
-        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            if mouse.row >= editor_area.y && mouse.row < editor_area.y + editor_area.height {
-                self.log_query.focus = LogQueryFocus::Editor;
-                return;
-            }
-            if mouse.row >= results_area.y && mouse.row < results_area.y + results_area.height {
-                self.log_query.focus = LogQueryFocus::Results;
-                //
-                // Click on a specific row in the results table: inner has
-                // border(1) + header(1) = data starts at +2.
-                //
-                let data_start = results_area.y + 2;
-                if mouse.row >= data_start && !self.log_query.rows.is_empty() {
-                    let clicked = (mouse.row - data_start) as usize;
-                    let n = self.log_query.visible_row_count();
-                    if clicked < n {
-                        self.log_query.selected_row = clicked;
-                    }
-                }
-                return;
-            }
-        }
-    }
-
     pub async fn run_log_query(&mut self) {
         let query = self.log_query.editor.as_text();
         let trimmed = query.trim();
@@ -657,5 +629,108 @@ impl crate::app::App {
                 let _ = tx.send(AppEvent::LogQueryResult(result));
             }
         });
+    }
+
+    //
+    // Open the current query text in $VISUAL / $EDITOR. On a clean exit,
+    // replace the in-app editor buffer with whatever was saved. Same
+    // terminal-suspend pattern as recon config and agent-script edits.
+    //
+    fn edit_log_query_in_editor(&mut self) {
+        use std::io::Write;
+
+        let initial_text = self.log_query.editor.as_text();
+
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "notepad".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+
+        let tmp = match tempfile::Builder::new()
+            .prefix("praxis_log_query_")
+            .suffix(".kql")
+            .tempfile()
+        {
+            Ok(f) => f,
+            Err(e) => {
+                self.log_query.last_error =
+                    Some((format!("Failed to create temp file: {}", e), Instant::now()));
+                return;
+            }
+        };
+
+        if let Err(e) = tmp.as_file().write_all(initial_text.as_bytes()) {
+            self.log_query.last_error =
+                Some((format!("Failed to write temp file: {}", e), Instant::now()));
+            return;
+        }
+
+        let path = tmp.path().to_path_buf();
+
+        self.terminal_paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        crossterm::terminal::disable_raw_mode().ok();
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen,
+        )
+        .ok();
+
+        let status = std::process::Command::new(&editor).arg(&path).status();
+
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        )
+        .ok();
+        crossterm::terminal::enable_raw_mode().ok();
+        self.terminal_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.terminal_resume.notify_one();
+
+        while crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            let _ = crossterm::event::read();
+        }
+        self.needs_full_redraw = true;
+
+        match status {
+            Ok(s) if s.success() => match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    //
+                    // Editors commonly append a trailing newline; strip one
+                    // so a single-line query does not pick up a blank row.
+                    //
+                    let content = content
+                        .strip_suffix("\r\n")
+                        .or_else(|| content.strip_suffix('\n'))
+                        .unwrap_or(&content);
+                    self.log_query.editor = EditorBuffer::from_text(content);
+                    self.log_query.autocomplete_open = false;
+                    self.log_query.focus = LogQueryFocus::Editor;
+                }
+                Err(e) => {
+                    self.log_query.last_error =
+                        Some((format!("Failed to read editor file: {}", e), Instant::now()));
+                }
+            },
+            Ok(s) => {
+                self.log_query.last_error = Some((
+                    format!("Editor exited with status {}", s),
+                    Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.log_query.last_error =
+                    Some((format!("Failed to launch editor: {}", e), Instant::now()));
+            }
+        }
     }
 }

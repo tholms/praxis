@@ -1,4 +1,5 @@
-use crate::app::{ConversationEntry, OrchestratorSessionState, OrchestratorState};
+use crate::app::{App, ConversationEntry, OrchestratorSessionState, OrchestratorState};
+use crate::ui::hits::MouseAction;
 use crate::markdown;
 use crate::ui::chrome;
 use crate::ui::common::spinner_char;
@@ -32,7 +33,8 @@ const PLAN_ACTIVE: Color = STATUS_RUNNING;
 
 const SYSTEM_BAR: Color = SECONDARY;
 
-pub fn render(f: &mut Frame, area: Rect, state: &OrchestratorState) {
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let state = &app.orchestrator;
     let session = state.active_session();
     let show_tabs = state.sessions.len() > 1;
 
@@ -53,30 +55,28 @@ pub fn render(f: &mut Frame, area: Rect, state: &OrchestratorState) {
 
     //
     // Input box grows by one row per extra line of content (Shift+Enter
-    // inserts \n) — but only once a session is live. While we're still
-    // waiting on SessionCreated the welcome logo sits in chunks[1] and
-    // the input keeps a stable 4-row footprint.
+    // inserts \n). Cap so a huge paste cannot starve the transcript.
     //
-    let input_lines = if no_sessions {
-        1
-    } else {
-        input_content_rows(state)
-    };
+    let input_lines = input_content_rows(state).min(12);
     let input_height = (input_lines + 2).max(3);
 
+    //
+    // tabs | conversation | scroll-hint | input | model meta | blank
+    // The trailing blank separates openrouter/tokens from the global
+    // status bar so those two rows don't butt together.
+    //
     let chunks = Layout::vertical([
         Constraint::Length(tab_height),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(input_height),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(1), // model / tokens meta
+        Constraint::Length(1), // blank above status bar
     ])
     .split(area);
 
     if show_tabs {
-        render_tab_bar(f, chunks[0], state);
+        render_tab_bar(f, chunks[0], app, state);
     }
 
     if show_welcome {
@@ -84,19 +84,31 @@ pub fn render(f: &mut Frame, area: Rect, state: &OrchestratorState) {
     } else {
         //
         // Split the main area horizontally when a plan exists so the
-        // plan sits in a right-hand pane.
+        // plan sits in a right-hand pane. Percentage is user-draggable.
         //
         let (conv_area, plan_area) = if has_plan {
-            let plan_width = (chunks[1].width / 3).clamp(28, 42);
-            let split = Layout::horizontal([Constraint::Min(1), Constraint::Length(plan_width)])
-                .split(chunks[1]);
-            (split[0], Some(split[1]))
+            let panes =
+                crate::ui::list_detail::layout(chunks[1], state.plan_split_percent);
+            app.hits_register(
+                panes.border,
+                crate::ui::hits::MouseAction::OrchestratorPlanSplitDragStart,
+            );
+            (panes.list, Some(panes.detail))
         } else {
             (chunks[1], None)
         };
 
         if let Some(session) = session {
             render_conversation(f, conv_area, session);
+
+            //
+            // Spacer row above the input: show a down-chevron when the
+            // transcript is scrolled up so the user knows live content
+            // is below the viewport.
+            //
+            if session.scroll_offset > 0 {
+                chrome::scroll_down_indicator(f, chunks[2]);
+            }
         }
 
         if let Some(plan_area) = plan_area {
@@ -107,11 +119,35 @@ pub fn render(f: &mut Frame, area: Rect, state: &OrchestratorState) {
     }
 
     render_input(f, chunks[3], state);
-    render_meta(f, chunks[5], state);
-    render_status_hints(f, chunks[6], state);
+    render_meta(f, chunks[4], app, state);
+
+    register_input_hit(app, chunks[3], state);
 }
 
-fn render_tab_bar(f: &mut Frame, area: Rect, state: &OrchestratorState) {
+fn render_tab_bar(f: &mut Frame, area: Rect, app: &App, state: &OrchestratorState) {
+    let mut x = 0u16;
+    for (i, session) in state.sessions.iter().enumerate() {
+        if i > 0 {
+            x += chrome::tab_sep_width();
+        }
+        let mut w = 0u16;
+        if state.active_session_index == Some(i) {
+            w += 2;
+            let label = if session.is_streaming {
+                format!("{} {}", spinner_char(), session.label)
+            } else {
+                session.label.clone()
+            };
+            w += label.chars().count() as u16;
+        } else {
+            w += session.label.chars().count() as u16;
+        }
+        app.hits_register(
+            Rect::new(area.x.saturating_add(x), area.y, w, 1),
+            MouseAction::OrchestratorTab(i),
+        );
+        x += w;
+    }
     let mut spans: Vec<Span> = Vec::new();
 
     for (i, session) in state.sessions.iter().enumerate() {
@@ -243,6 +279,7 @@ fn render_conversation(f: &mut Frame, area: Rect, session: &OrchestratorSessionS
                 name,
                 input,
                 outcome,
+                ..
             } => {
                 lines.extend(build_tool_entry(
                     name,
@@ -715,7 +752,21 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 // keybind shortcuts on the right.
 //
 
-fn render_meta(f: &mut Frame, area: Rect, state: &OrchestratorState) {
+fn register_input_hit(app: &App, area: Rect, state: &OrchestratorState) {
+    let is_streaming = state
+        .active_session()
+        .map(|s| s.is_streaming)
+        .unwrap_or(false);
+    if !is_streaming {
+        let text_start = area.x.saturating_add(4);
+        app.hits_register(
+            area,
+            MouseAction::OrchestratorInputCursor { text_start },
+        );
+    }
+}
+
+fn render_meta(f: &mut Frame, area: Rect, app: &App, state: &OrchestratorState) {
     let session = state.active_session();
 
     let model_text = match session {
@@ -758,6 +809,15 @@ fn render_meta(f: &mut Frame, area: Rect, state: &OrchestratorState) {
 
     let chunks =
         Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).split(area);
+    app.hits_register(chunks[0], MouseAction::OrchestratorModelSelect);
+    app.hits_register(
+        Rect::new(chunks[1].x, chunks[1].y, 12, 1),
+        MouseAction::OrchestratorToolsCycle,
+    );
+    app.hits_register(
+        Rect::new(chunks[1].x.saturating_add(12), chunks[1].y, 8, 1),
+        MouseAction::OrchestratorSaveSession,
+    );
     f.render_widget(Paragraph::new(Line::from(left_spans)), chunks[0]);
     f.render_widget(Paragraph::new(right), chunks[1]);
 }
@@ -768,7 +828,7 @@ fn render_meta(f: &mut Frame, area: Rect, state: &OrchestratorState) {
 // with Shift+Enter.
 //
 
-pub(super) fn input_content_rows(state: &OrchestratorState) -> u16 {
+pub fn input_content_rows(state: &OrchestratorState) -> u16 {
     state.input.split('\n').count().max(1) as u16
 }
 
@@ -848,8 +908,6 @@ fn render_input(f: &mut Frame, area: Rect, state: &OrchestratorState) {
 
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
-
-fn render_status_hints(_f: &mut Frame, _area: Rect, _state: &OrchestratorState) {}
 
 fn _silence_unused() {
     let _ = BG_PANEL;
