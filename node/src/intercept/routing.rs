@@ -1,5 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use anyhow::Context;
 use std::net::IpAddr;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::utils::CommandOutputBounded;
 
 #[allow(dead_code)]

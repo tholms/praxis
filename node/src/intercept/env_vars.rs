@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use crate::utils::CommandOutputBounded;
-#[allow(unused_imports)]
 
 /// Path where we store the exported root CA certificate
 pub fn cert_export_path() -> PathBuf {

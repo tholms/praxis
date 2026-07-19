@@ -42,6 +42,7 @@ use routing::{Ipv6Manager, RouteManager, VpnBypassManager};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -186,6 +187,15 @@ impl NodeInterceptManager {
         targets: &[InterceptTargetConfig],
         method: InterceptMethod,
     ) -> Result<InterceptMethod> {
+        //
+        // Intercept is Windows/Linux only (matches node intercept_supported).
+        //
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            let _ = (targets, method);
+            anyhow::bail!("Traffic interception is only supported on Windows and Linux");
+        }
+
         //
         // Lifecycle is authoritative over is_enabled (CleanupRequired may
         // coexist with a stale is_enabled after post-bind cleanup failure).
@@ -1122,7 +1132,14 @@ impl NodeInterceptManager {
 
     /// Whether Drop/sync VPN teardown is safe (no owned packet-engine task).
     pub fn packet_engine_task_owned(&self) -> bool {
-        self.packet_engine_task.is_some()
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            self.packet_engine_task.is_some()
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            false
+        }
     }
 
     pub(super) fn check_enable_cancelled(&self) -> Result<()> {
@@ -1391,19 +1408,22 @@ impl Drop for NodeInterceptManager {
         // resources for process exit / next recovery — do not detach then
         // destroy the device the task may still hold.
         //
-        let engine_owned = self.packet_engine_task.is_some();
-        if engine_owned {
-            if let Some(token) = self.shutdown_token.take() {
-                token.cancel();
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            let engine_owned = self.packet_engine_task.is_some();
+            if engine_owned {
+                if let Some(token) = self.shutdown_token.take() {
+                    token.cancel();
+                }
+                if let Some(task) = self.packet_engine_task.take() {
+                    task.abort();
+                }
+                common::log_error!(
+                    "Drop: skipped VPN sync cleanup; packet engine was still owned (is_enabled={})",
+                    self.is_enabled
+                );
+                return;
             }
-            if let Some(task) = self.packet_engine_task.take() {
-                task.abort();
-            }
-            common::log_error!(
-                "Drop: skipped VPN sync cleanup; packet engine was still owned (is_enabled={})",
-                self.is_enabled
-            );
-            return;
         }
 
         if self.has_vpn_resources() {
