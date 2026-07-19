@@ -77,15 +77,18 @@ sessions left alive from previous runs or other clients.
 #### Recon Overlay
 
 The recon overlay opens as a full-screen modal from the Nodes detail
-pane. It shows config files, tools, and sessions in a tabbed terminal
-interface.
+pane. It is a hierarchical browser (expand/collapse groups, filter bar,
+detail pane) with three tabs: **Config**, **Tools**, and **Sessions**.
+See [Reconnaissance](./recon.md#tui) for the full tree layout and key
+table.
 
 | Key | Action |
 |-----|--------|
 | `Tab` / `1` `2` `3` | Switch tab (Config / Tools / Sessions) |
-| `↑` / `↓` | Navigate left pane list |
+| `↑` / `↓` | Move among visible tree rows |
 | `←` / `→` | Collapse / expand or focus detail |
-| `PgUp` / `PgDn` | Scroll right pane content |
+| `Space` / `Enter` | Toggle expand on branches; open leaf detail |
+| `PgUp` / `PgDn` | Scroll detail pane |
 | `/` | Focus filter bar |
 | `r` | Static recon refresh |
 | `Ctrl+U` | Semantic recon (Discover) |
@@ -98,22 +101,9 @@ data. If none is cached, it sends an ACP `_praxis/recon` request to the
 node and polls `request_recon` every second for up to 60 seconds. Cached
 recon data appears instantly on re-open.
 
-The **Config** tab shows discovered configuration files in the left pane
-and the selected file's contents in the right pane. Pre-fetched contents
-are shown inline; files discovered by static recon but not yet fetched
-display a placeholder. Press `Ctrl+E` to open the selected file in
+Press `Ctrl+E` on a Config leaf to open the selected file in
 `$VISUAL`/`$EDITOR`; on a clean exit with changes, the new contents are
-written back to the node and the right pane refreshes (a transient
-"Saved" / "No changes" / error status shows in the recon header).
-
-The **Tools** tab has three categories: MCP Servers, Skills, and Internal
-tools. The left pane shows the category list; the right pane shows
-server details and tool lists for MCP, or flat tool lists for Skills and
-Internal.
-
-The **Sessions** tab shows discovered session files on the left and parsed
-conversation transcripts on the right. Session content is parsed as
-JSONL, JSON array, or raw text depending on the agent's format.
+written back to the node and the detail pane refreshes.
 
 ### Intercept (`Ctrl+T`)
 
@@ -283,9 +273,15 @@ In the trigger form, `↑/↓` or `Tab`/`Shift+Tab` move between fields, `←/�
 ### Settings (`Ctrl+S`)
 
 Configuration management:
-- **LLM** — model definitions, provider selection, API keys, and feature assignment (orchestrator, semantic ops, semantic parser, traffic parser)
+- **LLM** — model definitions, provider selection, API keys, and feature assignment (orchestrator, documentation helper, semantic ops, semantic parser, traffic parser)
 - **Service** — MCP server toggle, MCP port, Claude Bridge settings (CCRv1/CCRv2 enable and port configuration), logging, log query row limits, prompt timeout
 - **About** — connection info
+
+### Help Assistant (`Ctrl+H`)
+
+Press `Ctrl+H` from **any** window to open the floating [Help Assistant](./help-assistant.md)
+overlay — a documentation-aware chat that answers questions about Praxis
+without leaving the TUI. Press `Ctrl+H` again or `Esc` to dismiss.
 
 ### Mouse Support
 
@@ -308,6 +304,7 @@ Mouse interactions work alongside keyboard controls in all windows and popups.
 | `Ctrl+T` | Intercept window |
 | `Ctrl+G` | Log Query window |
 | `Ctrl+S` | Settings window |
+| `Ctrl+H` | Help Assistant overlay (any window) |
 | `Ctrl+Y` | Toggle terminal mode (Nodes) |
 | `Ctrl+Q` | Quit |
 

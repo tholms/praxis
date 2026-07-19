@@ -77,6 +77,17 @@ Access via **Settings** (`Ctrl+S`) > **LLM Providers** in the praxis TUI.
 | `llm.orchestrator.model` | `claude-sonnet-4-20250514` | Model for Orchestrator |
 | `llm.orchestrator.api_key` | (encrypted) | API key for provider |
 
+Feature assignment stores the **model definition name** (not provider/model
+pairs) under:
+
+| Key | Description |
+|-----|-------------|
+| `llm_feature_orchestrator` | Model definition for the Orchestrator |
+| `llm_feature_doc_helper` | Model definition for the Help Assistant; falls back to `llm_feature_orchestrator` when unset |
+| `llm_feature_semantic_ops` | Model definition for semantic operations |
+| `llm_feature_semantic_parser` | Model definition for semantic recon parsing |
+| `llm_feature_traffic_parser` | Model definition for intercept traffic summarisation |
+
 ### Prompt Timeout
 
 | Key | Default | Description |

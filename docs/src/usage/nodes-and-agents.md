@@ -70,12 +70,15 @@ Use the reset button (↻) in the node card header, the CLI command `node reset 
 
 Agents are the AI assistants detected on each node. When a node fingerprints successfully, you'll see agents like:
 
+- **Antigravity (Agy) CLI** - Google's terminal AI-agent interface (macOS, Linux, Windows)
 - **Claude Code** - Anthropic's CLI assistant
 - **Claude Desktop** - Anthropic's desktop app (Windows only)
 - **Codex CLI** - OpenAI's CLI assistant
 - **Cursor Agent** - Cursor's background agent CLI (Linux only)
 - **Gemini CLI** - Google's CLI assistant
 - **M365 Copilot** - Microsoft 365 Copilot (Windows only)
+
+See [Agent Connectors](../connectors/overview.md) for the full connector list and platform notes.
 
 ### Agent Selection
 
