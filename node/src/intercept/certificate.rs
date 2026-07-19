@@ -8,6 +8,7 @@ use rcgen::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::utils::CommandOutputBounded;
 
 /// Linux distribution family for certificate installation

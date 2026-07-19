@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::utils::CommandOutputBounded;
 
 #[cfg(target_os = "windows")]

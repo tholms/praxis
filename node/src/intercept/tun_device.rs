@@ -221,4 +221,5 @@ mod stub {
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+#[allow(unused_imports, dead_code)]
 pub use stub::StubTunDevice;

@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::utils::CommandOutputBounded;
 
 //
