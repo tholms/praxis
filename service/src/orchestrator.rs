@@ -32,11 +32,30 @@ const ORCHESTRATOR_PROMPT: &str = include_str!("prompts/orchestrator.prompt");
 
 //
 // One orchestrator session per client. The service holds no persistent
-// state — when the client disconnects or the session is closed, the
-// in-memory conversation is dropped. Clients are responsible for any
-// history persistence they want and may seed a new session with prior
-// messages via the `history` argument to create_session.
+// conversation state — when the client disconnects or the session is
+// closed, the in-memory conversation is dropped. Clients are responsible
+// for any history persistence they want and may seed a new session with
+// prior messages via the `history` argument to create_session.
 //
+// MCP is process-wide and shared across sessions: session/close tears
+// down conversation only; session/new reuses the warm MCP client so
+// close+new (e.g. /clear) stays milliseconds after the first connect.
+//
+
+//
+// Long-lived MCP client + tool list. Owned by OrchestratorManager, not by
+// individual sessions. Dropped on service shutdown or invalidate.
+//
+
+struct SharedMcp {
+    //
+    // Keeps the streamable-http client (and its RabbitMQ-backed server
+    // session) alive. Sessions only hold a Peer clone.
+    //
+    _service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    peer: rmcp::service::Peer<rmcp::RoleClient>,
+    tools: Vec<Tool>,
+}
 
 struct OrchestratorSession {
     session_id: String,
@@ -58,17 +77,94 @@ impl OrchestratorSession {
 }
 
 //
-// Manages orchestrator sessions, one per client_id.
+// Manages orchestrator sessions, one per client_id, plus a shared MCP
+// connection used by every session.
 //
 
 pub struct OrchestratorManager {
     sessions: RwLock<HashMap<String, OrchestratorSession>>,
+    shared_mcp: RwLock<Option<SharedMcp>>,
 }
 
 impl OrchestratorManager {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            shared_mcp: RwLock::new(None),
+        }
+    }
+
+    //
+    // Connect to the MCP server once and cache peer + tools. Subsequent
+    // session/new calls hit this cache (warm path for /clear).
+    //
+
+    async fn ensure_shared_mcp(&self, mcp_port: u16) -> Result<(rmcp::service::Peer<rmcp::RoleClient>, Vec<Tool>), String> {
+        {
+            let guard = self.shared_mcp.read().await;
+            if let Some(shared) = guard.as_ref() {
+                return Ok((shared.peer.clone(), shared.tools.clone()));
+            }
+        }
+
+        let mut guard = self.shared_mcp.write().await;
+        //
+        // Double-check after acquiring the write lock so concurrent
+        // session/new only pay for one cold connect.
+        //
+        if let Some(shared) = guard.as_ref() {
+            return Ok((shared.peer.clone(), shared.tools.clone()));
+        }
+
+        let mcp_url = format!("http://127.0.0.1:{}/mcp", mcp_port);
+        common::log_info!("Orchestrator connecting to MCP server at {}", mcp_url);
+
+        let service = connect_orchestrator_mcp(&mcp_url).await?;
+        let peer = service.peer().clone();
+
+        let mcp_tools =
+            match tokio::time::timeout(std::time::Duration::from_secs(20), peer.list_all_tools())
+                .await
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    common::log_error!("Failed to list MCP tools: {}", e);
+                    return Err(format!(
+                        "Connected to the MCP server but failed to load its tools: {e}"
+                    ));
+                }
+                Err(_) => {
+                    common::log_error!("Timed out listing MCP tools");
+                    return Err(
+                        "Connected to the MCP server but timed out loading its tools.".to_string(),
+                    );
+                }
+            };
+
+        common::log_info!(
+            "Orchestrator fetched {} tools from MCP server (shared)",
+            mcp_tools.len()
+        );
+
+        let tools = convert_mcp_tools(mcp_tools);
+        *guard = Some(SharedMcp {
+            _service: service,
+            peer: peer.clone(),
+            tools: tools.clone(),
+        });
+
+        Ok((peer, tools))
+    }
+
+    //
+    // Drop the shared MCP so the next ensure reconnects. Used on shutdown
+    // and when the transport is known dead.
+    //
+
+    async fn invalidate_shared_mcp(&self) {
+        let mut guard = self.shared_mcp.write().await;
+        if guard.take().is_some() {
+            common::log_info!("Orchestrator shared MCP connection invalidated");
         }
     }
 
@@ -147,69 +243,15 @@ impl OrchestratorManager {
         let session_id_owned = session_id.to_string();
 
         //
-        // Connect to the MCP server and load its tools up front, before the
-        // session is registered. Doing this synchronously means a failure
-        // (server not listening, backend unreachable) is reported straight
-        // back on session/new with a real message, instead of being
-        // discovered later by the detached task — which used to leave a
-        // registered-but-dead session that failed every prompt with the
-        // opaque "channel closed". Bounded by a timeout so a hung server
-        // can't stall session creation indefinitely.
+        // Shared MCP: first session/new pays for connect + list tools;
+        // subsequent creates (close+new /clear) reuse the warm client.
+        // Failure is still reported on session/new before we register a
+        // session, so the client never gets a dead session id.
         //
 
-        let mcp_url = format!("http://127.0.0.1:{}/mcp", mcp_port);
-        common::log_info!("Orchestrator connecting to MCP server at {}", mcp_url);
+        let (peer, mcp_tools) = self.ensure_shared_mcp(mcp_port).await?;
 
-        let transport = StreamableHttpClientTransport::from_uri(mcp_url.as_str());
-
-        let mcp_service = match tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            ().serve(transport),
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                common::log_error!("Failed to initialize MCP client: {}", e);
-                return Err(format!(
-                    "Could not connect to the MCP server at {mcp_url}. Make sure the MCP server is enabled and running (Settings > MCP Server). ({e})"
-                ));
-            }
-            Err(_) => {
-                common::log_error!("Timed out connecting to MCP server at {}", mcp_url);
-                return Err(format!(
-                    "Timed out connecting to the MCP server at {mcp_url}. Make sure the MCP server is enabled and running (Settings > MCP Server)."
-                ));
-            }
-        };
-
-        let peer = mcp_service.peer().clone();
-
-        let mcp_tools =
-            match tokio::time::timeout(std::time::Duration::from_secs(8), peer.list_all_tools())
-                .await
-            {
-                Ok(Ok(t)) => t,
-                Ok(Err(e)) => {
-                    common::log_error!("Failed to list MCP tools: {}", e);
-                    return Err(format!(
-                        "Connected to the MCP server but failed to load its tools: {e}"
-                    ));
-                }
-                Err(_) => {
-                    common::log_error!("Timed out listing MCP tools");
-                    return Err(
-                        "Connected to the MCP server but timed out loading its tools.".to_string(),
-                    );
-                }
-            };
-
-        common::log_info!(
-            "Orchestrator fetched {} tools from MCP server",
-            mcp_tools.len()
-        );
-
-        let mut tools = convert_mcp_tools(mcp_tools);
+        let mut tools = mcp_tools;
         tools.extend(get_local_tool_definitions());
 
         let system_prompt = get_system_prompt_with_tools(ORCHESTRATOR_PROMPT, &tools);
@@ -240,9 +282,10 @@ impl OrchestratorManager {
         }
 
         //
-        // MCP setup succeeded — now replace any prior session for this client
-        // (one session per client). Done after setup so a failed create never
-        // tears down a still-working session.
+        // MCP ensure succeeded — now replace any prior session for this
+        // client (one session per client). Done after ensure so a failed
+        // create never tears down a still-working session. Shared MCP is
+        // not tied to the previous session.
         //
 
         {
@@ -265,8 +308,8 @@ impl OrchestratorManager {
         //
         // The session task is detached: dropping a JoinHandle does not abort
         // the task; it exits via the stop flag / prompt channel closing. It
-        // owns the connected MCP service (keeping the connection alive) and
-        // the seeded conversation history.
+        // owns the conversation history and uses the shared MCP peer for
+        // tools (MCP lifetime is independent of this task).
         //
         tokio::spawn(async move {
             macro_rules! send_msg {
@@ -564,8 +607,6 @@ impl OrchestratorManager {
                     ));
                 }
             }
-
-            drop(mcp_service);
         });
 
         let session = OrchestratorSession {
@@ -660,6 +701,8 @@ impl OrchestratorManager {
         for (_, session) in sessions.drain() {
             session.stop();
         }
+        drop(sessions);
+        self.invalidate_shared_mcp().await;
     }
 
     pub async fn cancel_prompt(
@@ -700,6 +743,48 @@ fn prompt_id_to_json_rpc_id(prompt_id: &str) -> Value {
     } else {
         Value::String(prompt_id.to_string())
     }
+}
+
+//
+// Cold-path MCP connect for the shared client. Each attempt waits for
+// the streamable-http handshake (server-side RabbitMQ client register).
+// One retry covers transient startup races. Warm session/new reuses the
+// cached SharedMcp and never calls this.
+//
+
+async fn connect_orchestrator_mcp(
+    mcp_url: &str,
+) -> Result<rmcp::service::RunningService<rmcp::RoleClient, ()>, String> {
+    const ATTEMPTS: u32 = 2;
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    let mut last_err = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let transport = StreamableHttpClientTransport::from_uri(mcp_url);
+        match tokio::time::timeout(CONNECT_TIMEOUT, ().serve(transport)).await {
+            Ok(Ok(service)) => return Ok(service),
+            Ok(Err(e)) => {
+                common::log_error!(
+                    "Failed to initialize MCP client (attempt {attempt}/{ATTEMPTS}): {e}"
+                );
+                last_err = format!(
+                    "Could not connect to the MCP server at {mcp_url}. Make sure the MCP server is enabled and running (Settings > MCP Server). ({e})"
+                );
+            }
+            Err(_) => {
+                common::log_error!(
+                    "Timed out connecting to MCP server at {mcp_url} (attempt {attempt}/{ATTEMPTS})"
+                );
+                last_err = format!(
+                    "Timed out connecting to the MCP server at {mcp_url}. Make sure the MCP server is enabled and running (Settings > MCP Server)."
+                );
+            }
+        }
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
+    }
+    Err(last_err)
 }
 
 fn get_local_tool_definitions() -> Vec<Tool> {

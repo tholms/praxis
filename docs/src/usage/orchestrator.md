@@ -138,6 +138,11 @@ automatically starts a fresh session (re-seeding it with the prior transcript)
 and resends your prompt — no action needed. If recovery can't re-establish the
 session, use `/clear` to start a clean one.
 
+`/clear` uses standard ACP: `session/close` then `session/new`. The service
+keeps a **shared** MCP connection for the orchestrator, so after the first
+session of the process, close+new is near-instant (conversation only; no MCP
+reconnect).
+
 To bring back a prior conversation deliberately, start the TUI with
 `praxis --continue` (or `--resume`): the saved transcript is replayed locally
 and re-seeded as history for the next prompt.

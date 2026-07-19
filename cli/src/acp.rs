@@ -140,6 +140,10 @@ pub struct AcpBridgeHandle {
 }
 
 impl AcpBridgeHandle {
+    //
+    // Fire-and-forget: session/new can take several seconds (MCP connect).
+    // Completion arrives as SessionCreated / Error on the event channel.
+    //
     pub async fn create_session(
         &self,
         cwd: &str,
@@ -158,17 +162,30 @@ impl AcpBridgeHandle {
         Ok(())
     }
 
+    //
+    // Wait for the close to finish on the service so a subsequent
+    // create_session cannot race the teardown (bridge commands are
+    // spawned concurrently and would otherwise overlap).
+    //
     pub async fn close_session(&self, session_id: &str) -> anyhow::Result<()> {
-        let (tx, _rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(BridgeCommand::CloseSession {
                 session_id: session_id.to_string(),
                 reply: tx,
             })
             .map_err(|_| anyhow::anyhow!("ACP bridge closed"))?;
-        Ok(())
+        match rx.await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!("close session failed: {e}")),
+            Err(_) => Err(anyhow::anyhow!("ACP bridge closed")),
+        }
     }
 
+    //
+    // Fire-and-forget: the full model turn can take a long time.
+    // PromptComplete / Error / SessionLost arrive on the event channel.
+    //
     pub async fn send_prompt(&self, session_id: &str, text: &str) -> anyhow::Result<()> {
         let (tx, _rx) = oneshot::channel();
         self.cmd_tx

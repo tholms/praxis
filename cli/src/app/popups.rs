@@ -468,19 +468,32 @@ impl App {
     }
 
     pub(crate) async fn select_model(&mut self, model_name: &str) {
-        self.close_active_orchestrator_session().await;
-
+        //
+        // Standard ACP: close current session if any, then session/new
+        // with the selected model. Shared MCP keeps this fast.
+        //
+        if let Some(sid) = self
+            .orchestrator
+            .active_session()
+            .map(|s| s.session_id.clone())
+            .filter(|s| !s.is_empty())
+        {
+            let _ = self.acp.close_session(&sid).await;
+        }
+        self.orchestrator.pending_history = None;
+        self.orchestrator.pending_seed_messages = None;
+        self.orchestrator.pending_prompt = None;
+        if self.orchestrator.create_in_flight {
+            return;
+        }
+        self.orchestrator.create_in_flight = true;
         if let Err(e) = self
             .acp
             .create_session(".", Some(model_name), Vec::new())
             .await
         {
-            if let Some(session) = self.orchestrator.active_session_mut() {
-                session.messages.push(ConversationEntry::Error(format!(
-                    "Failed to create session: {}",
-                    e
-                )));
-            }
+            self.orchestrator.create_in_flight = false;
+            self.push_orchestrator_error(format!("Failed to create session: {e}"));
         }
     }
 
