@@ -43,7 +43,7 @@ the highlight. In split views, highlighting stays within the pane where the
 drag started. Draggable controls such as pane dividers and chain-canvas elements
 retain their normal behavior.
 
-The terminal UI provides five main windows, switched with keyboard shortcuts:
+The terminal UI provides six main windows, switched with keyboard shortcuts:
 
 ### Orchestrator (`Ctrl+O`)
 
@@ -175,7 +175,7 @@ Noninteractive commands:
 
 ```bash
 praxis_cli intercept status
-praxis_cli intercept enable <node-prefix> [--method tproxy|vpn|proxy|hosts]
+praxis_cli intercept enable <node-prefix> [--method proxy|vpn|hosts|tproxy]
 praxis_cli intercept disable <node-prefix>
 ```
 
@@ -406,9 +406,10 @@ return the node's error if the operation fails. Independent node commands are
 correlated separately, so concurrent callers cannot consume one another's
 responses.
 
-Every command that needs an agent takes `--agent` explicitly; ACP
-sessions are per-agent, so the same node can host concurrent sessions
-under different agents.
+Only `session create` takes `--agent` explicitly, to pick which agent to
+start the session with; `session prompt` and `session close` operate on
+whichever session is currently persisted for that node and take no
+`--agent`.
 
 Non-interactive mode persists a single session id per node in
 `~/.praxis/cli.json` — `session create` stores it, `session prompt` and
@@ -419,7 +420,6 @@ sessions and does not share state with the non-interactive subcommands.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-r, --rabbitmq` | RabbitMQ URL | `amqp://praxis:praxis@localhost:5672` |
 | `-t, --timeout` | Connection/command timeout in seconds | `600` |
 | `-C, --command` | Run a single command and exit | - |
 | `--acp` | Run as an ACP bridge (stdin/stdout proxy) | - |
@@ -428,7 +428,14 @@ sessions and does not share state with the non-interactive subcommands.
 | `--continue` | Resume the most recent saved orchestrator session | - |
 | `--resume` | List saved orchestrator sessions and pick one to resume | - |
 
-The RabbitMQ URL can also be set via the `PRAXIS_RABBITMQ_URL` environment variable.
+The RabbitMQ URL can also be set by writing `PRAXIS_RABBITMQ_URL=<url>` to `~/.config/praxis/config`, or via the subcommands below.
+
+### Configuration
+
+```bash
+praxis_cli set-rabbitmqurl <url>   # Persist a RabbitMQ URL to ~/.config/praxis/config
+praxis_cli config                  # Show the effective RabbitMQ URL and config file path
+```
 
 ## ACP Bridge Mode
 
@@ -457,6 +464,7 @@ The bridge connects with an `acp_` prefixed client ID, so sessions created throu
 The CLI stores persistent state in `~/.praxis/cli.json`. This file contains:
 
 - **client_id**: A unique identifier for this CLI instance, used for RabbitMQ queue routing
+- **sessions**: A map of node ID → session ID, used by `session prompt` and `session close` to resume the session `session create` started for that node
 
 The client ID is generated on first run and reused for subsequent executions.
 

@@ -25,17 +25,16 @@ Output: Structured tool list
 
 ### Traffic Analysis
 
-When traffic parsing is enabled, the parser analyzes LLM traffic:
+Traffic summarization does not go through this crate. When traffic parsing is enabled, the service calls the AI client directly (`service/src/semantic_helpers/traffic_summarizer.rs`) using its own `llm_feature_traffic_parser` configuration, and returns a free-text summary - there's no schema, structured JSON output, or retry logic involved:
 
 ```
 Input: Intercepted request/response
-Schema: { "prompt_summary": string, "tool_calls": [...] }
-Output: Structured analysis
+Output: Free-text summary (no schema, no retries)
 ```
 
-### Session Analysis
+### Session Analysis (Not Yet Implemented)
 
-Parsing session transcripts for capability discovery:
+Parsing session transcripts for capability discovery is a planned use of the parser - no code path currently wires this up:
 
 ```
 Input: Session history file
@@ -57,6 +56,7 @@ let config = ParserConfig {
     model: "claude-haiku-4-5-20241022".to_string(),
     max_retries: 3,
     max_tokens: Some(4096),
+    base_url: None,
 };
 
 // Create parser
@@ -79,13 +79,18 @@ The parser supports multiple LLM providers:
 |----------|----|----|
 | Anthropic | `anthropic` | Claude models |
 | OpenAI | `openai` | GPT models |
-| Google | `google` | Gemini models |
+| Google | `gemini` | Gemini models |
 | Groq | `groq` | Fast inference |
 | Cerebras | `cerebras` | Fast inference |
 | Mistral | `mistral` | Mistral models |
 | xAI | `xai` | Grok models |
 | NVIDIA | `nvidia` | NIM models |
+| MiniMax | `minimax` | MiniMax models |
+| Moonshot AI | `moonshot` | Moonshot models |
+| Fireworks AI | `fireworksai` | Fireworks-hosted models |
+| OpenRouter | `openrouter` | Multi-provider routing |
 | Ollama | `ollama` | Local models |
+| Custom | `custom` | Any OpenAI-compatible endpoint |
 
 ## Model Selection
 
@@ -124,7 +129,7 @@ The parser includes built-in retry logic:
 
 1. Send request to LLM
 2. Parse response as JSON
-3. If invalid, retry with feedback
+3. If invalid, retry with the identical prompt (the previous error is logged but not fed back into the next attempt - retries are blind repeats, not feedback-guided)
 4. Return result or error after max retries
 
 Default: 3 retries.
@@ -143,6 +148,25 @@ match parser.parse(text, prompt, schema).await {
 }
 ```
 
+### Non-Throwing Alternative
+
+`try_parse` offers the same parsing behavior without returning a `Result`. It always returns a `ParseResult` struct instead of an error:
+
+```rust
+pub struct ParseResult {
+    pub success: bool,
+    pub json: Option<String>,
+    pub error: Option<String>,
+}
+
+let result = parser.try_parse(text, prompt, schema).await;
+if result.success {
+    process_result(&result.json.unwrap());
+} else {
+    log::warn!("Parsing failed: {}", result.error.unwrap_or_default());
+}
+```
+
 ## Configuration in Praxis
 
 The semantic parser LLM is configured in Settings:
@@ -151,7 +175,7 @@ The semantic parser LLM is configured in Settings:
 2. Configure **Semantic Parser** provider and model
 3. Save
 
-The service uses this configuration for all parsing operations.
+This configures only the Semantic Parser feature slot. Praxis has 5 independently configurable LLM feature slots (Semantic Parser, Traffic Parser, Semantic Ops, Orchestrator, Doc Helper), each set separately in Settings - the Semantic Parser slot governs only its own request handler, not the other LLM-backed features.
 
 ## Performance Considerations
 
@@ -224,4 +248,4 @@ The semantic parser can be used outside of Praxis:
 semantic_parser = { path = "../semantic_parser" }
 ```
 
-It's designed to be a general-purpose LLM parsing library.
+It's designed to be a general-purpose LLM parsing library. Note that `semantic_parser` has a mandatory path dependency on Praxis's internal `common` (`praxis_common`) crate, so copying just the `semantic_parser` directory into an unrelated project won't build on its own - `common` needs to come with it.

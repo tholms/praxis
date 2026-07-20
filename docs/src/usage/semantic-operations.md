@@ -10,6 +10,7 @@ An operation is a task specification:
 - **Prompt** - What you want the agent to do
 - **Mode** - How to execute (one-shot or agent)
 - **Timeout** - How long to wait
+- **Max Iterations** - Cap on orchestrator/target-agent turns in agent mode (default 5)
 - **YOLO Mode** - Auto-approve actions
 
 Think of operations as reusable prompts with execution settings.
@@ -85,8 +86,10 @@ These define the JSON format the orchestrator uses to call tools and signal comp
 ```
 
 ```json
-{"complete": true, "summary": "...", "result": "..."}
+{"complete": true, "summary": "...", "result": true}
 ```
+
+`result` is a boolean success flag, not a text field — put findings, extracted data, or other output in `summary` instead.
 
 ## Creating Operations
 
@@ -99,6 +102,7 @@ Operations are stored in the library:
    - Operation prompt
    - Mode (one-shot or agent)
    - Timeout value
+   - Max iterations (agent mode)
    - YOLO mode setting
 4. Save
 
@@ -221,7 +225,7 @@ Chains support several element types:
 
 **Memory** - Stores or retrieves data by key (mode is store or retrieve). Store passes data through unchanged; retrieve loads a previously stored key.
 
-**Loop** - Controls iteration. Configure `max_iterations`. Port `r` (0) is the retry path back into earlier elements; port `x` (1) is the exit when iterations are exhausted.
+**Loop** - Controls iteration. Configure `max_iterations`. Port `r` (0) is the retry path back into earlier elements; port `x` (1) is intended as the exit when iterations are exhausted, but as of this writing the executor routes exhaustion to an internal sentinel value instead of port 1, so a `from_port: 1` connection never actually fires — treat this as a known issue rather than relied-upon behavior.
 
 **Tool** - Invokes a registered toolkit tool (picker lists known tools; params are JSON).
 
@@ -241,11 +245,15 @@ This enables branching workflows with error handling paths.
 
 ### Per-Block Configuration
 
-Operation, Transform, and GenericPrompt elements support per-block configuration overrides:
-- **Max Runtime** - Timeout in seconds for this specific element
+Operation, Transform, and GenericPrompt elements can carry per-block configuration overrides. Of these, only two currently take effect at execution time:
 - **YOLO Mode** - Enable auto-approve for this element's session
-- **Working Directory** - Override the working directory
 - **Require All Inputs** - When disabled, a merge-point element runs as soon as any upstream input arrives (instead of waiting for all branches). Useful in conditional chains where not all paths execute.
+
+Two more fields are exposed in the properties modal and stored with the block, but are not yet read by the executor:
+- **Max Runtime** - Intended as a timeout in seconds for this specific element
+- **Working Directory** - Intended to override the working directory
+
+Setting either of the last two currently has no effect on execution.
 
 ### Building a Chain
 
@@ -306,11 +314,11 @@ When running a chain:
 
 1. The executor builds a dependency graph from connections
 2. Finds operations with no dependencies (starting points)
-3. Executes ready operations (possibly in parallel)
-4. Marks completed, finds newly ready operations
-5. Repeats until all complete or one fails
+3. Works through ready elements one at a time from a queue, fully awaiting each before starting the next
+4. As each element completes, marks it done and enqueues any newly-ready elements
+5. Repeats until all complete, or the chain ends via Termination
 
-Operations without dependencies on each other can run simultaneously. The executor identifies these and runs them in parallel.
+Elements without dependencies on each other become ready at the same time, but execution is currently sequential — the executor does not run them concurrently, so ordering among independently-ready elements depends on queue order rather than true parallelism. Whether a failed element halts downstream progress depends on how its outgoing connections are configured — see Conditional Connections below.
 
 ```diagram
     ┌─────┐
@@ -320,7 +328,7 @@ Operations without dependencies on each other can run simultaneously. The execut
    ┌───┴───┐
    │       │
 ┌──▼──┐ ┌──▼──┐
-│Op A │ │Op B │  ← These run in parallel
+│Op A │ │Op B │  ← Both become ready together; run one at a time, not concurrently
 └──┬──┘ └──┬──┘
    │       │
    └───┬───┘
@@ -349,7 +357,7 @@ You can cancel a running chain from the Runs tab. Cancellation stops queuing new
 ### Chain Best Practices
 
 - Plan session groups carefully - shared sessions maintain context but accumulate state
-- Handle failures - if an operation fails, the chain stops
+- Handle failures - by default a connection fires regardless of success or failure (see Conditional Connections); use On Success/On Failure routing if you need the chain to stop or branch on failure
 - Test incrementally - run individual operations first, then combine
 - Keep chains focused - one chain, one goal
 

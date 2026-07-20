@@ -84,7 +84,7 @@ Once the session is created, send prompts directly from the chat view.
 
 ## Step 6: Run an Operation
 
-Operations are predefined tasks you can execute through agents. The library starts empty, so let's create a simple one first.
+Operations are predefined tasks you can execute through agents. The **Operations** window (`Ctrl+P`) has a third tab, **Triggers**, for automating when chains fire (see [Semantic Operations](../usage/semantic-operations.md#chain-triggers)); this walkthrough only uses Library and Executions. The library starts empty, so let's create a simple one first.
 
 ### Create Your First Operation
 
@@ -92,11 +92,13 @@ Operations are predefined tasks you can execute through agents. The library star
 2. Create a new operation
 3. Fill in:
    - **Name**: `hello-world`
+   - **Short Name**: `hello-world` — this (not Name) is what builds the `category::short_name` reference used to run the operation later, and saving is blocked until it's set
    - **Category**: `test`
    - **Description**: `A simple test operation`
    - **Prompt**: `Say hello and tell me what directory you're currently in.`
    - **Mode**: `one-shot`
    - **Timeout**: `60`
+   - **YOLO**: leave off (toggle on later to auto-approve tool calls for this operation)
 4. Save
 
 ### Run It
@@ -118,17 +120,23 @@ For more complex workflows, you can chain multiple operations together. See [Sem
 
 ## Step 7: Enable Interception (Optional)
 
-To see the traffic between the agent and its LLM backend, open the
-**Intercept** window (`Ctrl+T`):
+To see the traffic between the agent and its LLM backend:
 
-1. Select your node
-2. Choose a method:
-   - **Proxy** - configures system proxy settings
-   - **VPN** - uses a TUN adapter for packet-level routing
-   - **Hosts** - modifies the hosts file
-3. Enable interception
+1. In the **Nodes** window (`Ctrl+L`), select your node
+2. Press **`i`** and confirm — the TUI auto-picks the method by node
+   OS (**TPROXY** on Linux, **VPN** on Windows); macOS and other
+   platforms aren't supported
 
-Captured traffic streams into the **Log** tab. You can see:
+Praxis supports four interception methods in total — **Proxy** (system
+proxy settings), **VPN** (TUN adapter for packet-level routing),
+**Hosts** (hosts file), and **TPROXY** (kernel-level redirection, the
+default/recommended method on Linux) — but the TUI's auto-pick only
+ever chooses TPROXY or VPN. To set a method explicitly (e.g. Proxy or
+Hosts), use the non-interactive CLI instead:
+`praxis_cli intercept enable <node-prefix> --method <proxy|vpn|hosts|tproxy>`.
+
+Open the **Intercept** window (`Ctrl+T`) to watch captured traffic
+stream into the **Traffic** tab. You can see:
 - Full request/response bodies
 - Prompts and completions
 - Tool calls and results

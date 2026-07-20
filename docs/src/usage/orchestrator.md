@@ -27,7 +27,7 @@ The service holds **no orchestrator state**. Each client (TUI or web) keeps a si
   - `praxis --continue` resumes the most recent saved session.
   - `praxis --resume` lists saved sessions and prompts you to pick one.
 
-  When resuming, the saved transcript is shown immediately and the prior turns are sent as conversation history with `session/new` so the model has full context for the next prompt.
+  When resuming, the saved transcript is shown immediately and the prior turns are sent as conversation history with `session/new` so the model has recent context for the next prompt. History is trimmed to the most recent ~20 entries on every prompt (not just on resume), so very long conversations lose earlier turns rather than growing unbounded.
 
 ## What It Can Do
 
@@ -60,9 +60,7 @@ Plus two local tools:
 
 ## Thinking Mode
 
-When using a model that supports extended thinking (e.g. Claude Sonnet/Opus with thinking enabled), the Orchestrator surfaces the model's reasoning steps inline. Thinking blocks appear in a collapsed section before the final response, showing the chain of reasoning the model used to arrive at its answer.
-
-Thinking mode is enabled automatically when the configured Orchestrator model supports it and has thinking enabled in its API parameters. No separate configuration is needed in Praxis.
+If a model emits literal `<think>...</think>` tags in its plain-text output, the Orchestrator splits them out and renders them inline as a distinct segment before the rest of the response. This is plain-text parsing, not an API-level extended-thinking integration — there is no model-capability detection and no collapse/expand toggle; a thinking segment is always shown inline when present. Whether a model emits `<think>` tags at all depends entirely on the model/provider, not on any Praxis setting.
 
 ## Plan Tracking
 

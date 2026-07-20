@@ -53,7 +53,7 @@ The terminal session persists while you have the panel open. Closing the panel e
 
 ## Limitations
 
-- One terminal per node at a time
+- One terminal per client at a time (per node, per connecting client)
 - Runs as the node's user
 - Subject to the node's environment and permissions
 

@@ -20,10 +20,11 @@ A connector handles four main capabilities:
 |-----------|-------|----------|--------------|------|
 | [`agy`](./agy.md) | Antigravity CLI | macOS, Linux, Windows | CLI | Lua |
 | [`claude-bridge`](./claude-bridge.md) | Claude Code (inbound) | Any | CCRv1 (WS) / CCRv2 (HTTP+SSE) | Native |
-| [`claudecode`](./claude-code.md) | Claude Code CLI | Linux, Windows | CLI (PTY) | Lua |
+| [`claudecode`](./claude-code.md) | Claude Code CLI | Linux, Windows | CLI | Lua |
 | [`claudedesktop`](./claude-desktop.md) | Claude Desktop | Windows only | DevTools (Electron) | Lua |
 | [`codex`](./codex.md) | Codex CLI (OpenAI) | Linux, Windows | CLI | Lua |
 | [`cursor`](./cursor.md) | Cursor Agent CLI | Linux only | CLI | Lua |
+| [`droid`](./droid.md) | Droid CLI (Factory) | Linux, macOS, Windows | CLI | Lua |
 | [`gemini`](./gemini.md) | Gemini CLI | Linux, Windows | CLI | Lua |
 | [`m365copilot`](./m365-copilot.md) | Microsoft 365 Copilot | Windows only | DevTools | Lua |
 | [`pi`](./pi.md) | Pi Coding Agent (`@mariozechner/pi-coding-agent`) | Linux, Windows | CLI | Lua |
@@ -42,15 +43,14 @@ Connectors implement a set of Rust traits:
 trait Agent {
     fn name(&self) -> &str;
     fn short_name(&self) -> &str;
-    async fn do_fingerprint(&self) -> bool;  // cached for 60s when available
+    async fn do_fingerprint(&self) -> bool;  // re-checked on every fingerprint cycle
     fn version(&self) -> Option<String>;     // extracted during fingerprinting
-    fn create_session(&self, context: &SessionContext) -> Option<Arc<dyn AgentSession>>;
+    fn create_session_with_id(&self, context: &SessionContext, session_id: Uuid) -> Option<Arc<dyn AgentSession>>;
     // ...
 }
 
 // Required for sessions: session management
 trait AgentSession {
-    fn session_id(&self) -> &Uuid;
     fn transact(&self, prompt: &str) -> Result<String>;
     fn close(&self);
     // ...
@@ -142,7 +142,7 @@ For Lua connectors, add a `.lua` file to the `agents/` directory or upload it th
 
 When a node starts, it runs fingerprinting for all registered connectors. Any agent that fingerprints successfully gets added to the node's agent list and reported to the service. Agent version is also extracted and displayed in the praxis TUI.
 
-Fingerprint results are cached for 60 seconds when the agent is available. Agents that are not found are re-checked on every cycle so they are discovered as soon as they are installed.
+All registered connectors are re-fingerprinted together on each cycle (roughly every 30 seconds), so both newly-installed and newly-removed agents are picked up on the next pass.
 
 Most connectors (Claude Code, Claude Desktop, Codex, Cursor, Gemini, M365 Copilot, Pi) are Lua-based and loaded from embedded scripts or the service database. GUI-based agents like Claude Desktop (Electron) and M365 Copilot (WebView) use the `praxis.cdp_*` native API and `praxis.devtools` Lua library for Chrome DevTools Protocol interaction. The Praxis Agent and the Claude Bridge are native (Rust) connectors — the Praxis Agent is gated by service config (it appears only when enabled and a model definition is selected), and Claude Bridge is always present.
 

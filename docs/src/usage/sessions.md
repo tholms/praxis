@@ -55,9 +55,10 @@ returned `sessionId` are routed by the service proxy automatically.
 When you send a prompt:
 
 1. `session/prompt` is forwarded to the node that owns the session
-2. The node's per-session Lua VM handles the prompt — invoking the
-   connector's PTY (`claudecode`, `codex`, `m365-copilot`) or the
-   connector's embedded ACP subprocess (`cursor`, `gemini`)
+2. The node's per-session Lua VM handles the prompt — spawning a
+   one-shot non-interactive subprocess (`claudecode`, `codex`), driving
+   the connector via Chrome DevTools Protocol (`m365-copilot`), or
+   talking to the connector's embedded ACP subprocess (`cursor`, `gemini`)
 3. Streaming updates (`session/update` notifications) flow back as the
    agent generates text, calls tools, and builds plans
 4. The final `session/prompt` response carries a `stopReason`
@@ -91,6 +92,7 @@ sessions, and external ACP bridges — are prefixed by caller type so a
 client can filter the orchestrator session list to its own entries:
 
 - `CLI_` — created by the TUI's orchestrator
+- `WEB_` — created by the web frontend
 - `ACP_` — created by an external ACP client
 
 ## Session Messages

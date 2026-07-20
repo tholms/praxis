@@ -49,8 +49,8 @@ split; click the filter bar to type.
 
 On first open, the TUI checks the service cache. If no recon data is
 stored, it triggers an ACP `_praxis/recon` request on the node and polls
-every second until data arrives (60-second timeout). Cached data is
-displayed instantly on re-open.
+about every 1.5 seconds until data arrives (~90-second timeout). Cached
+data is displayed instantly on re-open.
 
 ### Tree layout
 

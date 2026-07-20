@@ -25,6 +25,8 @@ The node also reports:
 
 When the node runs as root, it can operate as different users based on the selected working directory. Selecting a working directory owned by another user will cause agent sessions to run as that user (with the appropriate `HOME` environment variable set).
 
+This is a Linux/macOS mechanism only (it switches the process's Unix user based on file ownership). It has no equivalent on Windows: an admin-elevated Windows node always runs agent sessions as its own Windows user, regardless of working directory ownership.
+
 **Note**: Full superuser support is still under development. Users may notice unexpected behaviour when running sessions as different users from a root node. If you encounter issues, try running the node as the target user directly instead.
 
 ### Privileged Status
@@ -70,13 +72,15 @@ Use the reset button (↻) in the node card header, the CLI command `node reset 
 
 Agents are the AI assistants detected on each node. When a node fingerprints successfully, you'll see agents like:
 
-- **Antigravity (Agy) CLI** - Google's terminal AI-agent interface (macOS, Linux, Windows)
+- **[Antigravity CLI](../connectors/agy.md)** - Google's terminal AI-agent interface (`agy`)
 - **Claude Code** - Anthropic's CLI assistant
 - **Claude Desktop** - Anthropic's desktop app (Windows only)
 - **Codex CLI** - OpenAI's CLI assistant
 - **Cursor Agent** - Cursor's background agent CLI (Linux only)
+- **[Droid CLI](../connectors/droid.md)** - Factory's CLI coding agent
 - **Gemini CLI** - Google's CLI assistant
 - **M365 Copilot** - Microsoft 365 Copilot (Windows only)
+- **[Pi Coding Agent](../connectors/pi.md)** - minimal terminal coding harness (`pi`)
 
 See [Agent Connectors](../connectors/overview.md) for the full connector list and platform notes.
 
@@ -128,14 +132,14 @@ The service periodically requests updates from nodes. You can also:
 
 Different agents support different features:
 
-| Feature | Claude Code | Claude Bridge | Claude Desktop | Codex | Cursor | Gemini | M365 Copilot |
-|---------|-------------|---------------|----------------|-------|--------|--------|--------------|
-| Static Recon | ✓ | - | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Semantic Recon | ✓ | - | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Sessions | ✓ | ✓ | ✓ | ✓ | ✓ (ACP) | ✓ (ACP) | ✓ |
-| Config Editing | ✓ | - | ✓ | ✓ | ✓ | ✓ | - |
-| MCP Discovery | ✓ | - | ✓ | ✓ | - | ✓ | - |
-| Traffic Intercept | ✓ | - | ✓ | - | ✓ | ✓ | ✓ |
+| Feature | Claude Code | Claude Bridge | Claude Desktop | Antigravity | Codex | Cursor | Droid | Gemini | M365 Copilot | Pi |
+|---------|-------------|---------------|----------------|-------------|-------|--------|-------|--------|--------------|----|
+| Static Recon | ✓ | - | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Semantic Recon | ✓ | - | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (ACP) | ✓ | ✓ (ACP) | ✓ | ✓ |
+| Config Editing | ✓ | - | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | - | ✓ |
+| MCP Discovery | ✓ | - | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | - | - |
+| Traffic Intercept | ✓ | - | ✓ | - | - | ✓ | ✓ | ✓ | ✓ | - |
 
 ## Troubleshooting
 

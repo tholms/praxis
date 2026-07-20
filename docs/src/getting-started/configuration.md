@@ -44,11 +44,15 @@ Once you've added models, assign them to features under **Feature Selection**:
 
 **Documentation Helper** - Powers the [Help Assistant](../usage/help-assistant.md) (`Ctrl+H`). Falls back to the Orchestrator model when unset.
 
-**Semantic Operations** - Used when executing operations through agents. This is the "brain" that orchestrates what the agent should do. Pick something capable.
+**Orchestrator** - Powers the conversational Orchestrator agent. This is the "brain" that orchestrates what the agent should do. Pick something capable. A companion **Max Tokens** setting caps how long its responses can run.
+
+**Semantic Operations** - Used when executing operations through agents. Pick something capable.
 
 **Semantic Parser** - Used during semantic recon to extract tool definitions from config files. Speed matters here since it runs multiple times; a fast model like Haiku or GPT-4o-mini works well.
 
 **Traffic Parser** - Summarizes intercepted traffic. Again, speed is valuable; you don't need the most powerful model.
+
+**Documentation Helper** - Powers the in-app Help Assistant (`Ctrl+H`), which answers questions about using Praxis from the bundled documentation. A fast, capable model works well.
 
 ### Speed vs. Capability
 
@@ -69,12 +73,14 @@ Most configuration is done through the praxis TUI, but some things are set via e
 |----------|---------|-------------|
 | `PRAXIS_DATABASE_URL` | SQLite in home dir | Database connection string |
 | `PRAXIS_RABBITMQ_URL` | `amqp://praxis:praxis@localhost:5672` | RabbitMQ URL |
+| `RUST_LOG` | `info` | Log level filter (tracing `EnvFilter` syntax) |
 
 ### Node
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PRAXIS_RABBITMQ_URL` | `amqp://praxis:praxis@localhost:5672` | RabbitMQ URL |
+| `RUST_LOG` | `info` | Log level filter (tracing `EnvFilter` syntax) |
 
 ### Database
 

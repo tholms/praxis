@@ -56,7 +56,7 @@ or sent to the model provider.
 ## Configuration
 
 The assistant uses the model assigned to the **Documentation Helper** feature
-under **Settings > LLM Providers > Feature Selection**. If no model is assigned,
+under **Settings > LLM > Feature Assignments**. If no model is assigned,
 it falls back to the model configured for the Orchestrator, so it works out of
 the box once any conversational model is configured.
 
@@ -65,6 +65,7 @@ Relevant service configuration keys:
 | Key | Description |
 | --- | --- |
 | `llm_feature_doc_helper` | Model definition assigned to the Help Assistant. Falls back to `llm_feature_orchestrator` when unset. |
+| `llm_doc_helper_max_tokens` | Max response tokens for the Help Assistant (default `4096`). Currently has no Settings UI field — raising it requires editing this key directly. |
 
 The documentation corpus is embedded into the service at build time, so the
 assistant's answers reflect the documentation shipped with your Praxis version

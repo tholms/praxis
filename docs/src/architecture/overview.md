@@ -161,15 +161,20 @@ praxis TUI ─▶ Service ─▶ LLM (planning)
 
 The service stores everything in a relational database:
 
-- **config** - key-value settings (LLM configs, etc.)
+- **service_config** - key-value settings (LLM configs, etc.)
 - **operation_definitions** - saved operation templates
-- **semantic_operations** - operation execution history
-- **chain_definitions** - workflow definitions
+- **operations** - operation execution history
+- **operation_chains** - workflow definitions
 - **chain_executions** - workflow execution history
-- **traffic_log** - intercepted HTTP traffic
+- **intercepted_traffic** - intercepted HTTP traffic
 - **intercept_rules** - traffic matching rules
 - **recon_results** - cached reconnaissance data
-- **application_logs** - centralized logging (controlled by `application_logs_enabled`)
+- **event_log** - centralized logging (controlled by `application_logs_enabled`)
+
+This list is illustrative, not exhaustive - roughly 10 more tables exist (e.g.
+`session_transactions`, `chain_triggers`, `chain_memories`, `chain_payloads`,
+`lua_agent_scripts`, `toolkit_actions`, `remote_nodes`,
+`agent_chat_sessions`/`agents`/`channels`/`messages`).
 
 ## Deployment Patterns
 

@@ -33,6 +33,7 @@
 - [Claude Desktop](./connectors/claude-desktop.md)
 - [Codex CLI](./connectors/codex.md)
 - [Cursor Agent](./connectors/cursor.md)
+- [Droid CLI](./connectors/droid.md)
 - [Gemini CLI](./connectors/gemini.md)
 - [M365 Copilot](./connectors/m365-copilot.md)
 - [Pi Coding Agent](./connectors/pi.md)
