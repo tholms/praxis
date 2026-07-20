@@ -45,6 +45,12 @@ Authentication is considered valid if any of the following are true:
    - `primaryApiKey` - Direct API key
    - `apiKeyHelper` - External key provider
 
+3. **Credential file** - `~/.claude/.credentials.json` contains a
+   `claudeAiOauth` credential. This is the normal OAuth location on Linux and
+   Windows.
+
+4. **OAuth environment token** - `CLAUDE_CODE_OAUTH_TOKEN` is set.
+
 Paths without valid authentication are filtered out during reconnaissance. This prevents the UI from showing user homes or projects that cannot actually be used with Claude Code.
 
 ## Reconnaissance
@@ -146,6 +152,7 @@ The connector supports both static and semantic recon. Static recon parses confi
 |------|------|---------|
 | Global settings | `~/.claude/settings.json` | Global settings |
 | Preferences | `~/.claude.json` | User preferences |
+| OAuth credentials | `~/.claude/.credentials.json` | Claude Code login credentials (Linux/Windows) |
 | Plugin installations | `~/.claude/plugins/installed_plugins.json` | Installed plugin paths and scopes |
 | Plugin cache | `~/.claude/plugins/cache/` | Commands, skills, and plugin MCP definitions |
 | Global instructions | `~/.claude/CLAUDE.md` | Global instruction file |

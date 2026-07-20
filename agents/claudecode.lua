@@ -22,7 +22,7 @@ local function pick_path()
   })
 end
 
-local function has_auth_in_claude_json(path)
+local function has_auth_in_claude_config(path)
   local content = praxis.read_file(path)
   if not content then
     return false
@@ -34,6 +34,9 @@ local function has_auth_in_claude_json(path)
   return parsed.oauthAccount ~= nil
       or parsed.primaryApiKey ~= nil
       or parsed.apiKeyHelper ~= nil
+      or (type(parsed.claudeAiOauth) == "table"
+          and (type(parsed.claudeAiOauth.accessToken) == "string"
+              or type(parsed.claudeAiOauth.refreshToken) == "string"))
 end
 
 local auth_check = helpers.auth_via_env_or_files({
@@ -42,9 +45,10 @@ local auth_check = helpers.auth_via_env_or_files({
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_FOUNDRY_API_KEY",
     "AWS_BEARER_TOKEN_BEDROCK",
+    "CLAUDE_CODE_OAUTH_TOKEN",
   },
-  auth_files = { ".claude.json" },
-  file_check = has_auth_in_claude_json,
+  auth_files = { ".claude.json", ".claude/.credentials.json" },
+  file_check = has_auth_in_claude_config,
 })
 
 --
