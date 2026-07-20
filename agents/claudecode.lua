@@ -88,6 +88,48 @@ local function discover_sessions_for_home(home)
   })
 end
 
+--
+-- Claude Code persists the session working directory as `cwd` in its JSONL
+-- transcripts. Use the most recent readable transcript in each project
+-- bucket to build the session picker list; a marker-file scan alone misses
+-- projects that have no checked-in Claude configuration.
+--
+
+local function discover_session_project_paths(home)
+  local base = praxis.path_join({ home, ".claude", "projects" })
+  if not praxis.path_is_dir(base) then
+    return {}
+  end
+
+  local paths = {}
+  for _, project in ipairs(praxis.read_dir(base) or {}) do
+    if project.is_dir then
+      local sessions = praxis.read_dir(project.path) or {}
+      table.sort(sessions, function(a, b)
+        return (a.modified_unix or 0) > (b.modified_unix or 0)
+      end)
+
+      for _, session in ipairs(sessions) do
+        if session.is_file and helpers.ends_with(session.name, ".jsonl") then
+          local content = praxis.read_file_prefix(session.path, 64 * 1024)
+          if content then
+            for line in content:gmatch("[^\r\n]+") do
+              local entry = helpers.parse_json(line)
+              local cwd = entry and entry.cwd
+              if type(cwd) == "string" and cwd ~= "" and praxis.path_is_dir(cwd) then
+                table.insert(paths, cwd)
+                break
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  return helpers.dedup(paths)
+end
+
 local session_fns = helpers.subprocess_session({
   home_dir = ".claude",
   error_label = "Claude Code command failed",
@@ -367,6 +409,7 @@ local recon_config = {
     "/claude.md",
     "/CLAUDE.md",
   },
+  project_discovery = discover_session_project_paths,
 
   project_configs = {
     { path = ".claude/settings.json", type = "project_settings", mcp = true },

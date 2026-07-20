@@ -80,6 +80,8 @@ Static reconnaissance discovers:
 - Project directories under `~/.claude/projects/`
 - Session files with conversation history
 - Recent project paths
+- Working directories recorded in session transcripts populate the session
+  working-directory picker, including projects without `.claude/` files.
 
 ### Semantic Recon
 
