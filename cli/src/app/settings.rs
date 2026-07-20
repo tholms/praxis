@@ -291,15 +291,18 @@ impl App {
         }
     }
 
-    pub(crate) async fn save_setting(&mut self, key: &str, value: &str) {
+    pub(crate) async fn save_setting(&mut self, key: &str, value: &str) -> bool {
         let mut values = HashMap::new();
         values.insert(key.to_string(), value.to_string());
-        if let Err(e) = self.client.set_config(values).await {
+        let saved = if let Err(e) = self.client.set_config(values).await {
             self.settings.status_message = Some(format!("Save failed: {}", e));
+            false
         } else {
             self.settings.status_message = Some("Saved".to_string());
-        }
+            true
+        };
         self.settings.status_message_at = Some(std::time::Instant::now());
+        saved
     }
 
     pub(crate) async fn save_praxis_agent_settings(&mut self) {
@@ -472,7 +475,10 @@ impl App {
                 }
                 1 => {
                     self.settings.orchestrator_model = name.clone();
-                    self.save_setting("llm_feature_orchestrator", &name).await;
+                    if self.save_setting("llm_feature_orchestrator", &name).await {
+                        self.orchestrator.configured_model = name.clone();
+                        self.select_model(&name).await;
+                    }
                 }
                 3 => {
                     self.settings.semantic_ops_model = name.clone();
