@@ -176,7 +176,10 @@ Each agent connector may have specific configuration. See individual connector d
 #### Claude Code
 
 - Config path: `~/.claude.json` or `~/.config/claude/config.json`
-- MCP servers: `~/.claude/mcp.json`
+- MCP servers: `~/.claude/mcp.json`, `.mcp.json`, and enabled plugin MCP
+  definitions
+- Plugins: `~/.claude/plugins/installed_plugins.json` with cached components in
+  `~/.claude/plugins/cache/`
 - Sessions: `~/.claude/projects/`
 
 #### Gemini CLI

@@ -45,6 +45,12 @@ Authentication is considered valid if any of the following are true:
    - `primaryApiKey` - Direct API key
    - `apiKeyHelper` - External key provider
 
+3. **Credential file** - `~/.claude/.credentials.json` contains a
+   `claudeAiOauth` credential. This is the normal OAuth location on Linux and
+   Windows.
+
+4. **OAuth environment token** - `CLAUDE_CODE_OAUTH_TOKEN` is set.
+
 Paths without valid authentication are filtered out during reconnaissance. This prevents the UI from showing user homes or projects that cannot actually be used with Claude Code.
 
 ## Reconnaissance
@@ -58,14 +64,24 @@ Static reconnaissance discovers:
 - Permission settings, model preferences, etc.
 
 **MCP Servers**
-- From `~/.claude/mcp.json`
-- Server names, commands, environment variables
-- Enabled state
+- From user and project MCP configuration (`~/.claude.json`,
+  `~/.claude/mcp.json`, and `.mcp.json`)
+- From `.mcp.json` files and inline `mcpServers` definitions in enabled Claude
+  Code plugins
+- Server names, commands, and endpoints
+
+**Plugins**
+- Active plugins are read from `~/.claude/plugins/installed_plugins.json` and
+  the scope-specific `enabledPlugins` setting.
+- Plugin commands and skills are discovered from the active plugin's cached
+  installation path and shown with Claude Code's `/plugin:component` name.
 
 **Sessions**
 - Project directories under `~/.claude/projects/`
 - Session files with conversation history
 - Recent project paths
+- Working directories recorded in session transcripts populate the session
+  working-directory picker, including projects without `.claude/` files.
 
 ### Semantic Recon
 
@@ -138,6 +154,9 @@ The connector supports both static and semantic recon. Static recon parses confi
 |------|------|---------|
 | Global settings | `~/.claude/settings.json` | Global settings |
 | Preferences | `~/.claude.json` | User preferences |
+| OAuth credentials | `~/.claude/.credentials.json` | Claude Code login credentials (Linux/Windows) |
+| Plugin installations | `~/.claude/plugins/installed_plugins.json` | Installed plugin paths and scopes |
+| Plugin cache | `~/.claude/plugins/cache/` | Commands, skills, and plugin MCP definitions |
 | Global instructions | `~/.claude/CLAUDE.md` | Global instruction file |
 | Projects | `~/.claude/projects/` | Session history by project |
 
