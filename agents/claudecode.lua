@@ -122,14 +122,162 @@ local session_fns = helpers.subprocess_session({
 })
 
 --
--- Discover Claude Code slash commands (.claude/commands/**/*.md) and skills
--- (.claude/skills/<name>/SKILL.md) for the home and each project.
+-- Claude Code installs marketplace plugins into a versioned cache and tracks
+-- their active installation scope in installed_plugins.json. Components in a
+-- plugin are only available when that plugin is enabled in its scope's
+-- settings file, so discovery reads both files rather than walking every
+-- cache entry (which would include stale versions).
 --
+
+local function plugin_is_enabled(settings_path, plugin_id)
+  local content = praxis.read_file(settings_path)
+  local settings = helpers.parse_json(content)
+  return settings ~= nil
+      and type(settings.enabledPlugins) == "table"
+      and settings.enabledPlugins[plugin_id] == true
+end
+
+local function installed_plugin_entries(home)
+  local path = praxis.path_join({ home, ".claude", "plugins", "installed_plugins.json" })
+  local parsed = helpers.parse_json(praxis.read_file(path))
+  if parsed == nil or type(parsed.plugins) ~= "table" then
+    return {}
+  end
+
+  local entries = {}
+  for plugin_id, installations in pairs(parsed.plugins) do
+    local items = {}
+    if type(installations) == "table" and type(installations.installPath) == "string" then
+      items = { installations }
+    elseif type(installations) == "table" then
+      items = installations
+    end
+
+    for _, installation in ipairs(items) do
+      if type(installation) == "table" and type(installation.installPath) == "string" then
+        local scope = installation.scope or "user"
+        local context_path = nil
+        local enabled = false
+
+        if scope == "user" then
+          enabled = plugin_is_enabled(
+            praxis.path_join({ home, ".claude", "settings.json" }), plugin_id)
+        elseif scope == "project" or scope == "local" then
+          context_path = installation.projectPath
+          if type(context_path) == "string" and context_path ~= "" then
+            local settings_name = scope == "local"
+                and "settings.local.json" or "settings.json"
+            enabled = plugin_is_enabled(
+              praxis.path_join({ context_path, ".claude", settings_name }), plugin_id)
+          end
+        elseif scope == "managed" then
+          enabled = true
+        end
+
+        if enabled and praxis.path_is_dir(installation.installPath) then
+          table.insert(entries, {
+            id = plugin_id,
+            root = installation.installPath,
+            context_path = context_path,
+          })
+        end
+      end
+    end
+  end
+
+  table.sort(entries, function(a, b)
+    return a.id == b.id and a.root < b.root or a.id < b.id
+  end)
+  return entries
+end
+
+local function plugin_manifest(plugin)
+  local path = praxis.path_join({ plugin.root, ".claude-plugin", "plugin.json" })
+  return helpers.parse_json(praxis.read_file(path)) or {}
+end
+
+local function plugin_namespace(plugin, manifest)
+  if type(manifest.name) == "string" and manifest.name ~= "" then
+    return manifest.name
+  end
+  return plugin.id:match("^([^@]+)") or plugin.id
+end
+
+local function as_path_list(value)
+  if type(value) == "string" then
+    return { value }
+  end
+  if type(value) == "table" then
+    local paths = {}
+    for _, path in ipairs(value) do
+      if type(path) == "string" then
+        table.insert(paths, path)
+      end
+    end
+    return paths
+  end
+  return {}
+end
+
+local function discover_plugin_skills(home)
+  local skills = {}
+
+  for _, plugin in ipairs(installed_plugin_entries(home)) do
+    local manifest = plugin_manifest(plugin)
+    local namespace = plugin_namespace(plugin, manifest)
+    local command_paths = manifest.commands == nil
+        and { "commands" } or as_path_list(manifest.commands)
+    local skill_paths = { "skills" }
+    for _, path in ipairs(as_path_list(manifest.skills)) do
+      table.insert(skill_paths, path)
+    end
+    local first = #skills + 1
+
+    for _, path in ipairs(command_paths) do
+      local command_path = praxis.path_join({ plugin.root, path })
+      if praxis.path_is_dir(command_path) then
+        for _, skill in ipairs(helpers.discover_command_skills(plugin.root, {
+          dir = path,
+          pattern = "%.md$",
+          name_prefix = "",
+          parse = "markdown",
+          context_path = plugin.context_path,
+        })) do
+          table.insert(skills, skill)
+        end
+      elseif command_path:match("%.md$") and praxis.path_exists(command_path) then
+        local content = praxis.read_file(command_path) or ""
+        local filename = helpers.norm(path):match("([^/]+)$") or path
+        table.insert(skills, {
+          name = helpers.strip_extension(filename),
+          description = helpers.parse_frontmatter_field(content, "description")
+              or helpers.first_meaningful_line(content) or "",
+          context_path = plugin.context_path,
+        })
+      end
+    end
+    for _, path in ipairs(skill_paths) do
+      for _, skill in ipairs(helpers.discover_skill_md_skills(plugin.root, {
+        dir = path,
+        context_path = plugin.context_path,
+      })) do
+        table.insert(skills, skill)
+      end
+    end
+
+    for i = first, #skills do
+      local name = tostring(skills[i].name or ""):gsub("^/", "")
+      skills[i].name = "/" .. namespace .. ":" .. name
+    end
+  end
+
+  return skills
+end
 
 local function discover_skills(home, project_paths)
   local skills = {}
-
   local home_claude = praxis.path_join({ home, ".claude" })
+
   for _, s in ipairs(helpers.discover_command_skills(home_claude, {
     dir = "commands",
     pattern = "%.md$",
@@ -139,6 +287,9 @@ local function discover_skills(home, project_paths)
     table.insert(skills, s)
   end
   for _, s in ipairs(helpers.discover_skill_md_skills(home_claude, { dir = "skills" })) do
+    table.insert(skills, s)
+  end
+  for _, s in ipairs(discover_plugin_skills(home)) do
     table.insert(skills, s)
   end
 
@@ -164,47 +315,36 @@ local function discover_skills(home, project_paths)
   return skills
 end
 
---
--- Discover Claude Code slash commands (.claude/commands/**/*.md) and skills
--- (.claude/skills/<name>/SKILL.md) for the home and each project.
---
+local function discover_plugin_mcp(result, _ctx)
+  for _, home in ipairs(praxis.user_homes() or {}) do
+    for _, plugin in ipairs(installed_plugin_entries(home)) do
+      local manifest = plugin_manifest(plugin)
+      local mcp_sources = {
+        praxis.path_join({ plugin.root, ".mcp.json" }),
+      }
 
-local function discover_skills(home, project_paths)
-  local skills = {}
+      if type(manifest.mcpServers) == "table" then
+        table.insert(mcp_sources, praxis.path_join({
+          plugin.root, ".claude-plugin", "plugin.json",
+        }))
+      end
 
-  local home_claude = praxis.path_join({ home, ".claude" })
-  for _, s in ipairs(helpers.discover_command_skills(home_claude, {
-    dir = "commands",
-    pattern = "%.md$",
-    name_prefix = "/",
-    parse = "markdown",
-  })) do
-    table.insert(skills, s)
-  end
-  for _, s in ipairs(helpers.discover_skill_md_skills(home_claude, { dir = "skills" })) do
-    table.insert(skills, s)
-  end
-
-  for _, proj in ipairs(project_paths or {}) do
-    local proj_claude = praxis.path_join({ proj, ".claude" })
-    for _, s in ipairs(helpers.discover_command_skills(proj_claude, {
-      dir = "commands",
-      pattern = "%.md$",
-      name_prefix = "/",
-      parse = "markdown",
-      context_path = proj,
-    })) do
-      table.insert(skills, s)
-    end
-    for _, s in ipairs(helpers.discover_skill_md_skills(proj_claude, {
-      dir = "skills",
-      context_path = proj,
-    })) do
-      table.insert(skills, s)
+      for _, source in ipairs(mcp_sources) do
+        local content = praxis.read_file(source)
+        if content ~= nil then
+          content = content:gsub("%${CLAUDE_PLUGIN_ROOT}", function()
+            return plugin.root
+          end)
+          table.insert(result.raw_configs_for_mcp, {
+            content = content,
+            context_path = plugin.context_path,
+            config_type = "plugin_mcp",
+            mcp_key = "plugin",
+          })
+        end
+      end
     end
   end
-
-  return skills
 end
 
 local recon_config = {
@@ -213,10 +353,16 @@ local recon_config = {
   home_configs = {
     { path = ".claude/settings.json", type = "global_settings", mcp = true },
     { path = ".claude.json", type = "preferences", mcp = "preferences" },
+    { path = ".claude/mcp.json", type = "global_mcp", mcp = "plugin" },
     { path = ".claude/CLAUDE.md", type = "global_instructions" },
   },
 
-  project_markers = { "/.claude/settings.json", "/claude.md", "/CLAUDE.md" },
+  project_markers = {
+    "/.claude/settings.json",
+    "/.claude/settings.local.json",
+    "/claude.md",
+    "/CLAUDE.md",
+  },
 
   project_configs = {
     { path = ".claude/settings.json", type = "project_settings", mcp = true },
@@ -229,11 +375,13 @@ local recon_config = {
     default = helpers.parse_mcp_from_json,
     preferences = parse_preferences_mcp,
     project_mcp = helpers.parse_mcp_from_json_flexible,
+    plugin = helpers.parse_mcp_from_json_flexible,
   },
 
   auth_check = auth_check,
   session_discovery = discover_sessions_for_home,
   skill_discovery = discover_skills,
+  post_collect = discover_plugin_mcp,
   session_fns = session_fns,
 }
 

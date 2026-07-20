@@ -309,6 +309,19 @@ pub fn create_agent_from_script(
 
 include!(concat!(env!("OUT_DIR"), "/embedded_lua.rs"));
 
+#[cfg(test)]
+mod tests {
+    use super::{EMBEDDED_LUA_SCRIPTS, runtime};
+
+    #[test]
+    fn embedded_connectors_load() {
+        for script in EMBEDDED_LUA_SCRIPTS {
+            let lua = runtime::create_vm(script).expect("embedded connector should load");
+            runtime::vm_parse_manifest(&lua).expect("embedded connector should have a manifest");
+        }
+    }
+}
+
 pub fn load_embedded_agents() -> Vec<(Arc<dyn Agent>, LuaRegisteredAgentInfo)> {
     let mut agents = Vec::new();
     for script in EMBEDDED_LUA_SCRIPTS {

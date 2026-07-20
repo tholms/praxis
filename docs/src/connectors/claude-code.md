@@ -58,9 +58,17 @@ Static reconnaissance discovers:
 - Permission settings, model preferences, etc.
 
 **MCP Servers**
-- From `~/.claude/mcp.json`
-- Server names, commands, environment variables
-- Enabled state
+- From user and project MCP configuration (`~/.claude.json`,
+  `~/.claude/mcp.json`, and `.mcp.json`)
+- From `.mcp.json` files and inline `mcpServers` definitions in enabled Claude
+  Code plugins
+- Server names, commands, and endpoints
+
+**Plugins**
+- Active plugins are read from `~/.claude/plugins/installed_plugins.json` and
+  the scope-specific `enabledPlugins` setting.
+- Plugin commands and skills are discovered from the active plugin's cached
+  installation path and shown with Claude Code's `/plugin:component` name.
 
 **Sessions**
 - Project directories under `~/.claude/projects/`
@@ -138,6 +146,8 @@ The connector supports both static and semantic recon. Static recon parses confi
 |------|------|---------|
 | Global settings | `~/.claude/settings.json` | Global settings |
 | Preferences | `~/.claude.json` | User preferences |
+| Plugin installations | `~/.claude/plugins/installed_plugins.json` | Installed plugin paths and scopes |
+| Plugin cache | `~/.claude/plugins/cache/` | Commands, skills, and plugin MCP definitions |
 | Global instructions | `~/.claude/CLAUDE.md` | Global instruction file |
 | Projects | `~/.claude/projects/` | Session history by project |
 
