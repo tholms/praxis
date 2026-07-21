@@ -1796,7 +1796,7 @@ impl App {
                 .map(|r| r.regex_pattern.clone()),
         };
         let Some(text) = text else { return };
-        if copy_to_clipboard(&text) {
+        if crate::clipboard::copy(&text) {
             self.intercept
                 .set_status_message("Copied to clipboard");
         } else {
@@ -2683,53 +2683,6 @@ fn extract_url_path(url: &str) -> String {
     rest.find('/')
         .map(|i| rest[i..].to_string())
         .unwrap_or_default()
-}
-
-fn copy_to_clipboard(text: &str) -> bool {
-    use std::process::{Command, Stdio};
-    use std::io::Write;
-
-    #[cfg(windows)]
-    {
-        let mut child = match Command::new("clip")
-            .stdin(Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        return child.wait().map(|s| s.success()).unwrap_or(false);
-    }
-
-    #[cfg(not(windows))]
-    {
-        let candidates: &[(&str, &[&str])] = &[
-            ("wl-copy", &[]),
-            ("xclip", &["-selection", "clipboard"]),
-            ("xsel", &["--clipboard", "--input"]),
-            ("pbcopy", &[]),
-        ];
-        for (bin, args) in candidates {
-            let mut cmd = Command::new(*bin);
-            for arg in *args {
-                cmd.arg(*arg);
-            }
-            let mut child = match cmd.stdin(Stdio::piped()).spawn() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            if child.wait().map(|s| s.success()).unwrap_or(false) {
-                return true;
-            }
-        }
-        false
-    }
 }
 
 #[cfg(test)]
