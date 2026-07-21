@@ -55,6 +55,7 @@ struct ClientState {
     pending_recon_get: Option<Option<ReconResult>>,
     pending_op_def_add: Option<Result<String, String>>,
     pending_op_def_delete: Option<Result<String, String>>,
+    pending_chain_create: Option<Result<ChainDefinitionInfo, String>>,
     operations: Vec<SemanticOpUpdate>,
     operation_definitions: Vec<OperationDefinitionInfo>,
     chain_definitions: Vec<ChainDefinitionInfo>,
@@ -163,6 +164,21 @@ impl ServiceMcpClient {
             }
             ClientDirectMessage::ChainGetResponse { chain } => {
                 state.current_chain = chain;
+            }
+            ClientDirectMessage::ChainCreated { chain } => {
+                if let Some(existing) = state
+                    .chain_definitions
+                    .iter_mut()
+                    .find(|existing| existing.id == chain.id)
+                {
+                    *existing = chain.clone();
+                } else {
+                    state.chain_definitions.push(chain.clone());
+                }
+                state.pending_chain_create = Some(Ok(chain));
+            }
+            ClientDirectMessage::ChainError { message } => {
+                state.pending_chain_create = Some(Err(message));
             }
             ClientDirectMessage::ChainExecutionUpdate(execution) => {
                 if let Some(idx) = state
@@ -687,6 +703,27 @@ impl McpClient for ServiceMcpClient {
         self.state.lock().await.chain_definitions.clone()
     }
 
+    async fn create_chain_definition(
+        &self,
+        definition: common::ChainDefinitionInput,
+    ) -> Result<ChainDefinitionInfo> {
+        self.state.lock().await.pending_chain_create = None;
+
+        let message = ClientSignalMessage::ChainCreate {
+            client_id: self.client_id.clone(),
+            definition,
+        };
+        self.publish_signal(message).await?;
+
+        self.poll_pending(
+            50,
+            |state| state.pending_chain_create.take(),
+            "chain definition to be created",
+        )
+        .await?
+        .map_err(anyhow::Error::msg)
+    }
+
     async fn request_chain(&self, chain_id: &str) -> Result<()> {
         let message = ClientSignalMessage::ChainGet {
             client_id: self.client_id.clone(),
@@ -1037,5 +1074,28 @@ impl McpServerManager {
 impl Default for McpServerManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::ServerHandler;
+
+    #[test]
+    fn advertises_chain_and_trigger_tools() {
+        let server = PraxisServer::<ServiceMcpClient>::new(|| async {
+            Err(anyhow!("client factory should not run while listing tools"))
+        });
+
+        for name in [
+            "chain_create",
+            "trigger_list",
+            "trigger_create",
+            "trigger_delete",
+            "trigger_toggle",
+        ] {
+            assert!(server.get_tool(name).is_some(), "missing MCP tool {name}");
+        }
     }
 }

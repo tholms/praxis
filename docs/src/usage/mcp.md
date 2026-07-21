@@ -93,6 +93,7 @@ All recon tools take a `node` prefix and an `agent` short-name.
 
 - `op_available` — List available operations and chains
 - `op_definition` — Show the full definition of an operation or chain
+- `chain_create` — Create a reusable linear chain from existing operations
 - `op_run` — Run an operation or chain
 - `op_info` — Show full info for an operation or chain execution
 - `op_cancel` — Cancel a running operation or chain execution
@@ -104,6 +105,45 @@ All recon tools take a `node` prefix and an `agent` short-name.
 - `trigger_create` — Create a trigger for a chain
 - `trigger_delete` — Delete a trigger by ID prefix
 - `trigger_toggle` — Enable or disable a trigger by ID prefix
+
+To automate an operation that is not in a chain yet, create the chain first:
+
+```json
+{
+  "name": "CI/CD on connect",
+  "description": "Run CI/CD discovery whenever a node registers",
+  "operations": ["custom::cicd"],
+  "category": "custom",
+  "timeout": 600
+}
+```
+
+`chain_create` resolves each operation by full name, short name, or display name
+and connects them in the given order between a manual start element and a
+termination element. The resulting chain can then be passed by name to
+`trigger_create`.
+
+`trigger_create` accepts `scheduled`, `intercept_match`, and `new_node` trigger
+configurations. For example, an Orchestrator can make an existing chain run
+whenever a node registers:
+
+```json
+{
+  "chain": "CI/CD",
+  "trigger": {
+    "type": "new_node"
+  },
+  "target": {
+    "agent_short_names": ["codex"],
+    "include_triggering_node": true
+  }
+}
+```
+
+New-node triggers run after a 10-second discovery delay. Target node IDs must be
+full IDs from `node_list`; leaving `node_ids` empty targets all registered nodes.
+For event triggers, `include_triggering_node` ensures that the node which caused
+the event is included even when an explicit node list would otherwise exclude it.
 
 ### Traffic
 

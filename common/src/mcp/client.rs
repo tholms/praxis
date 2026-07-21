@@ -3,9 +3,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{
-    ChainDefinitionFull, ChainDefinitionInfo, ChainExecutionUpdate, ChainTriggerInfo,
-    InterceptedTrafficEntry, OperationDefinitionInfo, ReconResult, SemanticOpUpdate,
-    SemanticOperationSpec, SystemState, TargetSpec, TrafficSearchFilters, TriggerConfig,
+    ChainDefinitionFull, ChainDefinitionInfo, ChainDefinitionInput, ChainExecutionUpdate,
+    ChainTriggerInfo, InterceptedTrafficEntry, OperationDefinitionInfo, ReconResult,
+    SemanticOpUpdate, SemanticOperationSpec, SystemState, TargetSpec, TrafficSearchFilters,
+    TriggerConfig,
 };
 
 //
@@ -83,6 +84,12 @@ pub trait McpClient: Send + Sync {
 
     /// Get cached chain definitions.
     async fn get_chain_definitions(&self) -> Vec<ChainDefinitionInfo>;
+
+    /// Create a chain definition and wait for the service response.
+    async fn create_chain_definition(
+        &self,
+        definition: ChainDefinitionInput,
+    ) -> Result<ChainDefinitionInfo>;
 
     /// Run a chain.
     async fn run_chain(

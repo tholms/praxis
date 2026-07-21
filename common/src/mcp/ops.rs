@@ -1,13 +1,16 @@
 use anyhow::{Result, anyhow};
 use serde_json::json;
+use std::collections::HashMap;
 use std::time::Duration;
+use uuid::Uuid;
 
 use crate::acp_ext::{EXT_PRAXIS_GREP_FILES, EXT_PRAXIS_READ_FILE};
 use crate::mcp::McpClient;
 use crate::{
-    AgentFileType, AgentTool, ChainDefinitionFull, ChainDefinitionInfo, ChainExecutionUpdate,
-    ChainTriggerInfo, ConfigItem, GrepFileEntry, McpServer, OperationDefinitionInfo,
-    SemanticOpUpdate, SemanticOperationSpec, SessionItem, SystemState, TargetSpec, TriggerConfig,
+    AgentFileType, AgentTool, ChainConnection, ChainDefinitionFull, ChainDefinitionInfo,
+    ChainDefinitionInput, ChainElement, ChainExecutionUpdate, ChainTriggerInfo, ChainTriggerType,
+    ConfigItem, GrepFileEntry, McpServer, OperationDefinitionInfo, SemanticOpUpdate,
+    SemanticOperationSpec, SessionItem, SystemState, TargetSpec, TriggerConfig,
 };
 
 //
@@ -182,6 +185,166 @@ pub async fn op_delete(client: &(impl McpClient + Sync), name: &str) -> Result<S
 
     client.delete_op_def(&full_name).await?;
     Ok(full_name)
+}
+
+//
+// Create a valid linear chain from existing operation definitions. The graph
+// always has a manual trigger and explicit termination so it can be run
+// manually or attached to an automated chain trigger.
+//
+
+pub async fn chain_create(
+    client: &(impl McpClient + Sync),
+    name: &str,
+    description: &str,
+    category: &str,
+    operation_names: &[String],
+    timeout: Option<u64>,
+) -> Result<ChainDefinitionInfo> {
+    let name = name.trim();
+    let category = category.trim();
+    if name.is_empty() {
+        return Err(anyhow!("Chain name cannot be empty"));
+    }
+    if category.is_empty() {
+        return Err(anyhow!("Chain category cannot be empty"));
+    }
+    if operation_names.is_empty() {
+        return Err(anyhow!("A chain must contain at least one operation"));
+    }
+
+    client.request_op_def_list().await?;
+    client.request_chain_list().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let chains = client.get_chain_definitions().await;
+    if chains
+        .iter()
+        .any(|chain| chain.name.eq_ignore_ascii_case(name))
+    {
+        return Err(anyhow!(
+            "A chain named '{}' already exists. Use op_available to inspect it.",
+            name
+        ));
+    }
+
+    let operation_definitions = client.get_operation_definitions().await;
+    let mut resolved_operations = Vec::with_capacity(operation_names.len());
+    for requested_name in operation_names {
+        let requested_name = requested_name.trim();
+        if requested_name.is_empty() {
+            return Err(anyhow!("Operation names cannot be empty"));
+        }
+
+        let exact = operation_definitions
+            .iter()
+            .find(|operation| operation.full_name.eq_ignore_ascii_case(requested_name));
+        let operation = match exact {
+            Some(operation) => operation.clone(),
+            None => {
+                let matches: Vec<_> = operation_definitions
+                    .iter()
+                    .filter(|operation| {
+                        operation.short_name.eq_ignore_ascii_case(requested_name)
+                            || operation.name.eq_ignore_ascii_case(requested_name)
+                    })
+                    .collect();
+                match matches.as_slice() {
+                    [operation] => (*operation).clone(),
+                    [] => {
+                        return Err(anyhow!(
+                            "No operation definition found matching '{}'. Use op_available to list definitions.",
+                            requested_name
+                        ));
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Operation name '{}' is ambiguous. Use its full category::short_name.",
+                            requested_name
+                        ));
+                    }
+                }
+            }
+        };
+
+        if operation.disabled {
+            return Err(anyhow!(
+                "Operation '{}' is disabled and cannot be added to a new chain",
+                operation.full_name
+            ));
+        }
+        resolved_operations.push(operation.full_name.clone());
+    }
+
+    let definition = build_linear_chain_definition(
+        name,
+        description.trim(),
+        category,
+        &resolved_operations,
+        timeout,
+    );
+    client.create_chain_definition(definition).await
+}
+
+fn build_linear_chain_definition(
+    name: &str,
+    description: &str,
+    category: &str,
+    operation_names: &[String],
+    timeout: Option<u64>,
+) -> ChainDefinitionInput {
+    let trigger_id = Uuid::new_v4().to_string();
+    let operation_ids: Vec<_> = operation_names
+        .iter()
+        .map(|_| Uuid::new_v4().to_string())
+        .collect();
+    let termination_id = Uuid::new_v4().to_string();
+
+    let mut elements = Vec::with_capacity(operation_names.len() + 2);
+    elements.push(ChainElement::Trigger {
+        id: trigger_id.clone(),
+        trigger_type: ChainTriggerType::Manual,
+    });
+    for (operation_name, id) in operation_names.iter().zip(&operation_ids) {
+        elements.push(ChainElement::Operation {
+            id: id.clone(),
+            operation_name: operation_name.clone(),
+            model_ref: None,
+            session_group: None,
+            block_config: None,
+        });
+    }
+    elements.push(ChainElement::Termination {
+        id: termination_id.clone(),
+        block_config: None,
+    });
+
+    let mut element_ids = Vec::with_capacity(elements.len());
+    element_ids.push(trigger_id);
+    element_ids.extend(operation_ids);
+    element_ids.push(termination_id);
+    let connections = element_ids
+        .windows(2)
+        .map(|pair| ChainConnection {
+            id: Uuid::new_v4().to_string(),
+            from_element: pair[0].clone(),
+            to_element: pair[1].clone(),
+            from_port: 0,
+            to_port: 0,
+            condition: None,
+        })
+        .collect();
+
+    ChainDefinitionInput {
+        name: name.to_string(),
+        description: description.to_string(),
+        category: category.to_string(),
+        elements,
+        connections,
+        disabled: false,
+        timeout,
+        positions: HashMap::new(),
+    }
 }
 
 //
@@ -829,4 +992,56 @@ pub async fn trigger_toggle(
     let id = trigger.id.clone();
     client.toggle_chain_trigger(id.clone(), enabled).await?;
     Ok((id, enabled))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_valid_linear_operation_chain() {
+        let operations = vec![
+            "custom::cicd".to_string(),
+            "recon::system_info".to_string(),
+        ];
+        let chain = build_linear_chain_definition(
+            "CI/CD on connect",
+            "Run CI/CD discovery on new nodes",
+            "custom",
+            &operations,
+            Some(600),
+        );
+
+        assert_eq!(chain.elements.len(), 4);
+        assert_eq!(chain.connections.len(), 3);
+        assert!(matches!(chain.elements[0], ChainElement::Trigger { .. }));
+        assert!(matches!(
+            &chain.elements[1],
+            ChainElement::Operation { operation_name, .. } if operation_name == "custom::cicd"
+        ));
+        assert!(matches!(
+            &chain.elements[2],
+            ChainElement::Operation { operation_name, .. } if operation_name == "recon::system_info"
+        ));
+        assert!(matches!(chain.elements[3], ChainElement::Termination { .. }));
+
+        for (connection, elements) in chain.connections.iter().zip(chain.elements.windows(2)) {
+            assert_eq!(connection.from_element, element_id(&elements[0]));
+            assert_eq!(connection.to_element, element_id(&elements[1]));
+        }
+    }
+
+    fn element_id(element: &ChainElement) -> &str {
+        match element {
+            ChainElement::Trigger { id, .. }
+            | ChainElement::Operation { id, .. }
+            | ChainElement::Transform { id, .. }
+            | ChainElement::GenericPrompt { id, .. }
+            | ChainElement::Memory { id, .. }
+            | ChainElement::Loop { id, .. }
+            | ChainElement::Tool { id, .. }
+            | ChainElement::Payload { id, .. }
+            | ChainElement::Termination { id, .. } => id,
+        }
+    }
 }
