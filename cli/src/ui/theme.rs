@@ -12,6 +12,7 @@ pub const BG_PANEL: Color = Color::Rgb(24, 26, 30);
 pub const BG_ELEMENT: Color = Color::Rgb(32, 35, 40);
 pub const BG_MENU: Color = Color::Rgb(28, 31, 36);
 pub const BG_SELECTED: Color = Color::Rgb(45, 60, 45);
+pub const BG_TEXT_SELECTION: Color = Color::Rgb(55, 85, 100);
 
 //
 // Borders / dividers. The "subtle" tone is for resting separators,

@@ -37,6 +37,12 @@ Running `praxis_cli` with no arguments launches the interactive terminal UI:
 $ praxis_cli
 ```
 
+Drag across text anywhere in the TUI to highlight it. Press `Ctrl+C` to
+copy the highlighted text; click elsewhere or press any other key to clear
+the highlight. In split views, highlighting stays within the pane where the
+drag started. Draggable controls such as pane dividers and chain-canvas elements
+retain their normal behavior.
+
 The terminal UI provides five main windows, switched with keyboard shortcuts:
 
 ### Orchestrator (`Ctrl+O`)
