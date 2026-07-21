@@ -145,6 +145,13 @@ full IDs from `node_list`; leaving `node_ids` empty targets all registered nodes
 For event triggers, `include_triggering_node` ensures that the node which caused
 the event is included even when an explicit node list would otherwise exclude it.
 
+`agent_short_names` matching is exact and case-sensitive against each node's
+discovered agents — a name that doesn't match anything silently resolves to
+zero targets, and the trigger fires as a no-op. `trigger_create`'s response
+includes a `warning` field when a requested short name doesn't currently
+match any connected agent; confirm the real short name with `node_list`/
+`agent_list` rather than guessing.
+
 ### Traffic
 
 - `traffic_search` — Search intercepted traffic

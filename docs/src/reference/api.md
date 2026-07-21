@@ -336,14 +336,14 @@ queue.
 ### Connector selection
 
 `session/new` requires a `_meta.praxis.connector` field naming the local
-agent connector to use (e.g. `"claude-code"`, `"codex"`). Discover the
+agent connector to use (e.g. `"claudecode"`, `"codex"`). Discover the
 connector catalog via `InitializeResponse._meta.connectors`:
 
 ```json
 {
   "extensions": { "_praxis/recon": { "version": 1 } },
   "connectors": [
-    { "shortName": "claude-code", "name": "Claude Code" },
+    { "shortName": "claudecode", "name": "Claude Code" },
     { "shortName": "codex",       "name": "OpenAI Codex" }
   ],
   "nodeId": "..."

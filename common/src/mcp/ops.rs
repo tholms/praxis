@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -943,7 +943,7 @@ pub async fn trigger_create(
     chain_name: &str,
     trigger_config: TriggerConfig,
     target_spec: TargetSpec,
-) -> Result<String> {
+) -> Result<(String, Option<String>)> {
     //
     // Resolve chain by name or ID prefix.
     //
@@ -958,11 +958,55 @@ pub async fn trigger_create(
         })
         .ok_or_else(|| anyhow!("No chain found matching '{}'", chain_name))?;
     let chain_id = chain.id.clone();
+    let requested_agents = target_spec.agent_short_names.clone();
 
     client
         .create_chain_trigger(chain_id.clone(), trigger_config, target_spec)
         .await?;
-    Ok(chain_id)
+
+    let warning = unmatched_agent_short_names_warning(client, &requested_agents).await;
+    Ok((chain_id, warning))
+}
+
+//
+// Trigger target specs match agent short names by exact, case-sensitive
+// string equality (see resolve_targets), and distinct connectors can
+// register visually similar short names for genuinely different things
+// (e.g. the CLI-discovered "claudecode" vs the "claude-code" Claude Code
+// Bridge connector). Getting it wrong doesn't error -- it silently resolves
+// zero targets forever, so warn eagerly when a requested name doesn't match
+// any currently discovered agent. This is advisory only, not a hard
+// failure: new_node triggers legitimately target agent kinds that haven't
+// connected yet.
+//
+async fn unmatched_agent_short_names_warning(
+    client: &(impl McpClient + Sync),
+    requested: &[String],
+) -> Option<String> {
+    if requested.is_empty() {
+        return None;
+    }
+    let state = client.get_state().await?;
+    let known: BTreeSet<&str> = state
+        .nodes
+        .iter()
+        .flat_map(|n| n.discovered_agents.iter())
+        .map(|a| a.short_name.as_str())
+        .collect();
+    let unknown: Vec<&String> = requested
+        .iter()
+        .filter(|name| !known.contains(name.as_str()))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "agent_short_names {:?} do not match any agent short name currently seen on a \
+         connected node (currently known: {:?}). If this trigger targets an agent kind \
+         that hasn't connected yet this may be expected -- otherwise call \
+         node_list/agent_list to confirm the real short name before trusting it.",
+        unknown, known
+    ))
 }
 
 pub async fn trigger_delete(
