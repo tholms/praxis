@@ -223,7 +223,7 @@ Standard ACP methods supported:
   ```json
   {
     "extensions": { "_praxis/recon": { "version": 1 } },
-    "connectors": [ { "shortName": "claude-code", "name": "Claude Code" }, ... ],
+    "connectors": [ { "shortName": "claudecode", "name": "Claude Code" }, ... ],
     "nodeId": "..."
   }
   ```

@@ -352,7 +352,7 @@ pub struct TriggerTargetParams {
     pub os_filter: Option<String>,
 
     #[schemars(
-        description = "Agent short names to target (for example 'claude-code' or 'codex'). Empty targets all available agents."
+        description = "Agent short names to target, e.g. 'codex' or 'claudecode'. Matching against discovered agents is exact and case-sensitive -- call node_list/agent_list first to confirm the real short name rather than guessing one. Empty targets all available agents."
     )]
     #[serde(default)]
     pub agent_short_names: Vec<String>,

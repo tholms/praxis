@@ -56,7 +56,7 @@ When you send a prompt:
 
 1. `session/prompt` is forwarded to the node that owns the session
 2. The node's per-session Lua VM handles the prompt — invoking the
-   connector's PTY (`claude-code`, `codex`, `m365-copilot`) or the
+   connector's PTY (`claudecode`, `codex`, `m365-copilot`) or the
    connector's embedded ACP subprocess (`cursor`, `gemini`)
 3. Streaming updates (`session/update` notifications) flow back as the
    agent generates text, calls tools, and builds plans
