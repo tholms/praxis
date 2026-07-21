@@ -75,6 +75,11 @@ pub const STATUS_3XX: Color = Color::Rgb(220, 190, 90);
 pub const STATUS_4XX: Color = Color::Rgb(225, 145, 85);
 pub const STATUS_5XX: Color = Color::Rgb(225, 95, 95);
 
+//
+// Matches tab: regex-hit highlight in the detail pane.
+//
+pub const MATCH_HIGHLIGHT: Color = Color::Rgb(0x78, 0xc8, 0x78);
+
 pub const PROTO_WS: Color = Color::Rgb(120, 195, 220);
 pub const PROTO_H2: Color = Color::Rgb(190, 130, 215);
 

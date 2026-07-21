@@ -175,10 +175,19 @@ praxis_cli intercept disable <node-prefix>
 
 #### Matches tab
 
+The detail pane highlights every place the rule's regex actually hit in
+the selected match — URL, host, method, headers, and request/response
+bodies (rendered per the current body mode). Every occurrence is boxed;
+the current one is a bright green block with white text, the rest are a
+dimmer green box. `n` / `p` jump between occurrences, auto-scrolling the
+pane, and spill over to the next / previous match row once the current
+one is exhausted.
+
 | Key | Action |
 |-----|--------|
 | `Enter` / `→` | Focus match detail pane |
 | `f` | Cycle rule filter |
+| `n` / `p` | Jump to next / previous highlighted regex-match occurrence |
 | `Esc` / `←` | Unfocus detail / clear filters |
 | `r` | Refresh |
 | `/` | Filter matches |

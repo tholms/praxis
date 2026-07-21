@@ -3474,6 +3474,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures-util",
+ "indexmap 2.14.0",
  "lapin",
  "praxis_common",
  "ratatui",

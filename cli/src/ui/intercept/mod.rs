@@ -307,6 +307,7 @@ fn render_action_hints(f: &mut Frame, area: Rect, app: &App) {
         InterceptTab::Matches => vec![
             HintItem::new(action::ENTER, "detail"),
             HintItem::new("f", "rule filter"),
+            HintItem::new("n/p", "jump hits"),
             HintItem::new(action::REFRESH, "refresh"),
             HintItem::new("y", "copy"),
             HintItem::new("b", "body"),
