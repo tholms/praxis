@@ -12,7 +12,7 @@ use regex::Regex;
 use common::TrafficMatchWithDetails;
 
 use super::{InterceptState, SummaryStatus};
-use crate::ui::theme::{ACCENT, BG, DIM, MUTED, SECONDARY, STATUS_RUNNING, TEXT, TEXT_BRIGHT};
+use crate::ui::theme::{ACCENT, DIM, MATCH_HIGHLIGHT, MUTED, STATUS_RUNNING, TEXT, TEXT_BRIGHT};
 
 pub struct MatchDetail {
     pub lines: Vec<Line<'static>>,
@@ -254,11 +254,11 @@ fn overlay_highlights(lines: Vec<Line<'static>>, regex: &Regex, highlight_index:
                     let style = if global_idx == highlight_index {
                         current_line = Some(line_idx);
                         Style::default()
-                            .bg(SECONDARY)
-                            .fg(BG)
+                            .bg(MATCH_HIGHLIGHT)
+                            .fg(TEXT_BRIGHT)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(SECONDARY)
+                        Style::default().fg(MATCH_HIGHLIGHT)
                     };
                     spans.push(Span::styled(text, style));
                 }
@@ -348,13 +348,13 @@ mod tests {
 
     fn bright_style() -> Style {
         Style::default()
-            .bg(SECONDARY)
-            .fg(BG)
+            .bg(MATCH_HIGHLIGHT)
+            .fg(TEXT_BRIGHT)
             .add_modifier(Modifier::BOLD)
     }
 
     fn faded_style() -> Style {
-        Style::default().fg(SECONDARY)
+        Style::default().fg(MATCH_HIGHLIGHT)
     }
 
     fn styled_spans(lines: &[Line<'static>]) -> Vec<(String, Style)> {
