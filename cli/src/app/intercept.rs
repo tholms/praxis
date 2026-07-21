@@ -19,6 +19,7 @@ use regex::Regex;
 use super::*;
 
 pub mod body;
+pub mod match_detail;
 pub mod rules_form;
 
 pub use body::BodyMode;
@@ -244,6 +245,11 @@ pub struct InterceptState {
     pub match_detail_scroll: u16,
     pub matches_loaded: bool,
     pub match_total: usize,
+    /// Index (0-based, on-screen reading order) of the current regex-match
+    /// occurrence highlighted in the match detail pane. Reset to 0 whenever
+    /// `match_selected` changes so a newly-selected match starts at its
+    /// first occurrence.
+    pub match_highlight_index: usize,
 
     //
     // Current intercept status per node (from live broadcast).
@@ -321,6 +327,7 @@ impl Default for InterceptState {
             match_detail_scroll: 0,
             matches_loaded: false,
             match_total: 0,
+            match_highlight_index: 0,
             intercept_statuses: HashMap::new(),
             pending_toggles: HashSet::new(),
             traffic_match_rules: HashMap::new(),
@@ -559,8 +566,10 @@ impl InterceptState {
         let total = self.filtered_matches_len();
         if total == 0 {
             self.match_selected = 0;
+            self.match_highlight_index = 0;
         } else if self.match_selected >= total {
             self.match_selected = total - 1;
+            self.match_highlight_index = 0;
         }
     }
 
@@ -1372,6 +1381,7 @@ impl InterceptState {
         let new = (cur + delta).clamp(0, (total - 1) as i32);
         self.match_selected = new as usize;
         self.match_detail_scroll = 0;
+        self.match_highlight_index = 0;
     }
 
     //
@@ -1646,6 +1656,63 @@ impl App {
         };
         let Some(id) = id else { return };
         self.fetch_body_for_traffic_id(id).await;
+    }
+
+    //
+    // n/p in the Matches tab: jump between regex-match occurrences
+    // highlighted in the detail pane. Advancing past the last (or before
+    // the first) occurrence of the current match moves to the next/prev
+    // match row instead, landing on its first/last occurrence — so
+    // holding n/p walks every highlighted hit across the whole list.
+    //
+    pub async fn advance_match_highlight(&mut self, forward: bool) {
+        self.intercept.match_detail_focus = true;
+
+        let occurrence_count = match self
+            .intercept
+            .filtered_match_at(self.intercept.match_selected)
+        {
+            Some(m) => {
+                match_detail::build(&self.intercept, m, self.intercept.match_highlight_index)
+                    .occurrence_count
+            }
+            None => return,
+        };
+
+        if forward {
+            if self.intercept.match_highlight_index + 1 < occurrence_count {
+                self.intercept.match_highlight_index += 1;
+            } else {
+                self.intercept.move_match_selection(1);
+                self.fetch_body_for_match_selected().await;
+            }
+        } else if self.intercept.match_highlight_index > 0 {
+            self.intercept.match_highlight_index -= 1;
+        } else {
+            self.intercept.move_match_selection(-1);
+            self.fetch_body_for_match_selected().await;
+            if let Some(m2) = self
+                .intercept
+                .filtered_match_at(self.intercept.match_selected)
+            {
+                let count = match_detail::build(&self.intercept, m2, 0).occurrence_count;
+                self.intercept.match_highlight_index = count.saturating_sub(1);
+            }
+        }
+
+        if let Some(m3) = self
+            .intercept
+            .filtered_match_at(self.intercept.match_selected)
+        {
+            let detail = match_detail::build(
+                &self.intercept,
+                m3,
+                self.intercept.match_highlight_index,
+            );
+            if let Some(line) = detail.current_line {
+                self.intercept.match_detail_scroll = line.saturating_sub(2) as u16;
+            }
+        }
     }
 
     async fn fetch_body_for_traffic_id(&mut self, id: i64) {
@@ -2231,6 +2298,12 @@ impl App {
             }
             (KeyCode::Char('n'), m) if m.contains(KeyModifiers::CONTROL) => {
                 self.create_rule_from_match();
+            }
+            (KeyCode::Char('n'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                self.advance_match_highlight(true).await;
+            }
+            (KeyCode::Char('p'), _) => {
+                self.advance_match_highlight(false).await;
             }
             (KeyCode::Char('r'), m) if !m.contains(KeyModifiers::CONTROL) => {
                 self.refresh_intercept_matches().await;
