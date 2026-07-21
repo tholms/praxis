@@ -282,7 +282,7 @@ In the trigger form, `↑/↓` or `Tab`/`Shift+Tab` move between fields, `←/�
 ### Settings (`Ctrl+S`)
 
 Configuration management:
-- **LLM** — model definitions, provider selection, API keys, and feature assignment (orchestrator, documentation helper, semantic ops, semantic parser, traffic parser)
+- **LLM** — model definitions, provider selection, API keys, feature assignment (orchestrator, documentation helper, semantic ops, semantic parser, traffic parser), and the Traffic Parser body limit
 - **Service** — MCP server toggle, MCP port, Claude Bridge settings (CCRv1/CCRv2 enable and port configuration), logging, log query row limits, prompt timeout
 - **About** — connection info
 

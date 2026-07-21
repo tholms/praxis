@@ -87,6 +87,7 @@ pairs) under:
 | `llm_feature_semantic_ops` | Model definition for semantic operations |
 | `llm_feature_semantic_parser` | Model definition for semantic recon parsing |
 | `llm_feature_traffic_parser` | Model definition for intercept traffic summarisation |
+| `llm_traffic_parser_body_limit_kb` | Maximum text body sent to the Traffic Parser in KiB (default: `60`; larger bodies retain their beginning and end) |
 
 ### Prompt Timeout
 
