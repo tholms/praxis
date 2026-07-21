@@ -177,10 +177,11 @@ praxis_cli intercept disable <node-prefix>
 
 The detail pane highlights every place the rule's regex actually hit in
 the selected match — URL, host, method, headers, and request/response
-bodies (rendered per the current body mode). The current occurrence is
-shown bright; the rest are dimmed. `n` / `p` jump between occurrences,
-auto-scrolling the pane, and spill over to the next / previous match row
-once the current one is exhausted.
+bodies (rendered per the current body mode). Every occurrence is boxed;
+the current one is a bright green block with white text, the rest are a
+dimmer green box. `n` / `p` jump between occurrences, auto-scrolling the
+pane, and spill over to the next / previous match row once the current
+one is exhausted.
 
 | Key | Action |
 |-----|--------|

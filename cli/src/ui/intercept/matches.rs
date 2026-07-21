@@ -194,14 +194,21 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     };
     let block = focused_titled_panel(&title, app.intercept.match_detail_focus);
 
-    let inner_h = block.inner(area).height as usize;
-    let max_scroll = detail.lines.len().saturating_sub(inner_h) as u16;
+    let inner = block.inner(area);
+    //
+    // line_count runs ratatui's own word-wrap so this matches the actual
+    // render (a plain `.lines.len()` undercounts once any line wraps —
+    // see match_detail::rendered_row_offset for why that matters here).
+    // Queried before `.block(..)` is attached, so it doesn't double with
+    // `inner.height` (which already excludes the block's border rows).
+    //
+    let para = Paragraph::new(detail.lines).wrap(Wrap { trim: false });
+    let total_rows = para.line_count(inner.width) as u16;
+    let max_scroll = total_rows.saturating_sub(inner.height);
     app.intercept.match_detail_max_scroll.set(max_scroll);
+    app.intercept.match_detail_width.set(inner.width);
     let effective = app.intercept.match_detail_scroll.min(max_scroll);
-    let para = Paragraph::new(detail.lines)
-        .wrap(Wrap { trim: false })
-        .scroll((effective, 0))
-        .block(block);
+    let para = para.scroll((effective, 0)).block(block);
     f.render_widget(para, area);
 }
 

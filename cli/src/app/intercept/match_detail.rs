@@ -7,12 +7,15 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
 use regex::Regex;
 
 use common::TrafficMatchWithDetails;
 
 use super::{InterceptState, SummaryStatus};
-use crate::ui::theme::{ACCENT, DIM, MATCH_HIGHLIGHT, MUTED, STATUS_RUNNING, TEXT, TEXT_BRIGHT};
+use crate::ui::theme::{
+    ACCENT, BG_SELECTED, DIM, MATCH_HIGHLIGHT, MUTED, STATUS_RUNNING, TEXT, TEXT_BRIGHT,
+};
 
 pub struct MatchDetail {
     pub lines: Vec<Line<'static>>,
@@ -40,6 +43,31 @@ pub fn build(state: &InterceptState, m: &TrafficMatchWithDetails, highlight_inde
     };
 
     overlay_highlights(lines, &regex, highlight_index)
+}
+
+//
+// `Paragraph::scroll` operates in rendered (post-wrap) row units once
+// `Wrap` is set, not logical-`Line` units — a single long line (e.g. a
+// JSON string value packed with escaped `\n`s) can word-wrap into dozens
+// of rows. Ratatui's wrapper treats each logical line as a hard boundary
+// (it never merges trailing/leading content across lines, always
+// emitting at least one row per line — see ratatui-widgets' reflow.rs),
+// so rendered-row counts are prefix-additive: the row where logical line
+// `target_line` begins equals the rendered row *count* of everything
+// before it. Building a throwaway Paragraph from just that prefix and
+// asking its `line_count` (the `unstable-rendered-line-info` feature,
+// already enabled in Cargo.toml) gives that count using ratatui's own
+// wrapping algorithm — no need to reimplement word-wrap ourselves.
+//
+// The `Wrap` here must match the real detail-pane Paragraph's wrap
+// setting exactly (see `render_detail` in ui/intercept/matches.rs) or
+// the row math diverges from what's actually on screen.
+//
+pub fn rendered_row_offset(lines: &[Line<'static>], target_line: usize, width: u16) -> u16 {
+    let prefix: Vec<Line<'static>> = lines[..target_line.min(lines.len())].to_vec();
+    Paragraph::new(prefix)
+        .wrap(Wrap { trim: false })
+        .line_count(width) as u16
 }
 
 fn content_lines(state: &InterceptState, m: &TrafficMatchWithDetails) -> Vec<Line<'static>> {
@@ -258,7 +286,7 @@ fn overlay_highlights(lines: Vec<Line<'static>>, regex: &Regex, highlight_index:
                             .fg(TEXT_BRIGHT)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(MATCH_HIGHLIGHT)
+                        Style::default().bg(BG_SELECTED).fg(MATCH_HIGHLIGHT)
                     };
                     spans.push(Span::styled(text, style));
                 }
@@ -354,7 +382,7 @@ mod tests {
     }
 
     fn faded_style() -> Style {
-        Style::default().fg(MATCH_HIGHLIGHT)
+        Style::default().bg(BG_SELECTED).fg(MATCH_HIGHLIGHT)
     }
 
     fn styled_spans(lines: &[Line<'static>]) -> Vec<(String, Style)> {
@@ -447,6 +475,35 @@ mod tests {
             .filter(|(_, s)| *s == bright_style())
             .collect();
         assert_eq!(bright[0].0, "sk-secret");
+    }
+
+    #[test]
+    fn rendered_row_offset_accounts_for_wrapped_lines() {
+        //
+        // Line 1 is a single 100-char unbreakable token — at a narrow
+        // width it must word-wrap into multiple rendered rows. If
+        // rendered_row_offset() still counted logical lines 1:1 (the bug
+        // this exists to fix), the offset for line 2 would just be 2.
+        //
+        let lines: Vec<Line<'static>> = vec![
+            Line::raw("short"),
+            Line::raw("a".repeat(100)),
+            Line::raw("also short"),
+        ];
+        let width = 10u16;
+
+        let offset_0 = rendered_row_offset(&lines, 0, width);
+        let offset_1 = rendered_row_offset(&lines, 1, width);
+        let offset_2 = rendered_row_offset(&lines, 2, width);
+
+        assert_eq!(offset_0, 0, "nothing precedes the first line");
+        assert_eq!(offset_1, 1, "one short line renders as exactly one row");
+        assert!(
+            offset_2 - offset_1 > 1,
+            "the 100-char line must occupy more than one rendered row at width {width}, \
+             got {} rows (offset_1={offset_1}, offset_2={offset_2})",
+            offset_2 - offset_1
+        );
     }
 
     #[test]

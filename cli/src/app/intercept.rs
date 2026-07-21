@@ -187,6 +187,11 @@ pub struct InterceptState {
     //
     pub detail_max_scroll: Cell<u16>,
     pub match_detail_max_scroll: Cell<u16>,
+    /// Last-rendered inner width of the match detail pane. `scroll` is in
+    /// rendered (post-wrap) row units, which are width-dependent, so
+    /// `advance_match_highlight` needs this to compute a target row —
+    /// see `match_detail::rendered_row_offset`.
+    pub match_detail_width: Cell<u16>,
     pub body_mode: BodyMode,
     pub paused: bool,
     pub search_focused: bool,
@@ -293,6 +298,7 @@ impl Default for InterceptState {
             detail_scroll: 0,
             detail_max_scroll: Cell::new(0),
             match_detail_max_scroll: Cell::new(0),
+            match_detail_width: Cell::new(0),
             body_mode: BodyMode::Pretty,
             paused: false,
             search_focused: false,
@@ -1710,7 +1716,9 @@ impl App {
                 self.intercept.match_highlight_index,
             );
             if let Some(line) = detail.current_line {
-                self.intercept.match_detail_scroll = line.saturating_sub(2) as u16;
+                let width = self.intercept.match_detail_width.get();
+                let row = match_detail::rendered_row_offset(&detail.lines, line, width);
+                self.intercept.match_detail_scroll = row.saturating_sub(2);
             }
         }
     }
