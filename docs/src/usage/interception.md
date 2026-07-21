@@ -466,6 +466,13 @@ When traffic matches a rule:
 
 Rules can include a summarization prompt for semantic analysis. When a rule matches and has a summarization prompt configured, the Traffic Parser LLM processes the matched traffic - extracting prompts, summarizing responses, detecting tool calls, and highlighting key information.
 
+Text bodies up to the configured **Traffic Body Limit** are passed to the
+Traffic Parser in full (60 KiB by default). For larger bodies, the analyzer
+receives the beginning and end with an explicit middle-truncation marker so
+recent messages and tool results at the end of an LLM request remain visible.
+Binary bodies are represented by their byte size. Change the limit under
+**Settings > LLM**.
+
 Use rules to:
 - Flag specific API calls
 - Track sensitive operations
