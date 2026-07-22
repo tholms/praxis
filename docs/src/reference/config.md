@@ -77,9 +77,10 @@ name.
 | `llm_model_definitions` | JSON array | Named model definitions. Each entry has `name`, `provider`, `model`, `apiKey`, and an optional `baseUrl` override. |
 | `llm_feature_semantic_parser` | string | Name of the model definition used for semantic parsing |
 | `llm_feature_traffic_parser` | string | Name of the model definition used for traffic analysis |
+| `llm_traffic_parser_body_limit_kb` | integer | Maximum text body sent to the Traffic Parser, in KiB (default: `60`; larger bodies retain their beginning and end) |
 | `llm_feature_semantic_ops` | string | Name of the model definition used for semantic operations |
 | `llm_feature_orchestrator` | string | Name of the model definition used for the Orchestrator |
-| `llm_feature_doc_helper` | string | Name of the model definition used for the documentation helper agent |
+| `llm_feature_doc_helper` | string | Name of the model definition used for the documentation helper agent; falls back to `llm_feature_orchestrator` when unset |
 
 Example `llm_model_definitions` value:
 
@@ -103,18 +104,6 @@ Example `llm_model_definitions` value:
 Each `llm_feature_*` key stores the `name` of one entry above (e.g.
 `llm_feature_orchestrator` = `"sonnet"`). A feature with no assigned model
 definition, or one whose `name` no longer resolves, is disabled.
-
-Feature assignment stores the **model definition name** (not provider/model
-pairs) under:
-
-| Key | Description |
-|-----|-------------|
-| `llm_feature_orchestrator` | Model definition for the Orchestrator |
-| `llm_feature_doc_helper` | Model definition for the Help Assistant; falls back to `llm_feature_orchestrator` when unset |
-| `llm_feature_semantic_ops` | Model definition for semantic operations |
-| `llm_feature_semantic_parser` | Model definition for semantic recon parsing |
-| `llm_feature_traffic_parser` | Model definition for intercept traffic summarisation |
-| `llm_traffic_parser_body_limit_kb` | Maximum text body sent to the Traffic Parser in KiB (default: `60`; larger bodies retain their beginning and end) |
 
 ### Prompt Timeout
 
@@ -143,10 +132,10 @@ Access via **Settings** (`Ctrl+S`) > **MCP Server** in the praxis TUI.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mcp_server_enabled` | `true` | Enable the built-in MCP SSE server |
-| `mcp_server_port` | `8585` | Port for the MCP SSE server |
+| `mcp_server_enabled` | `true` | Enable the built-in MCP server |
+| `mcp_server_port` | `8585` | Port for the MCP server |
 
-The MCP server exposes all Praxis tools via the Model Context Protocol over SSE transport. It is used by the built-in Orchestrator and can also be used by external AI agents. See [MCP Server](../usage/mcp.md) for full details.
+The MCP server exposes all Praxis tools via the Model Context Protocol over streamable-HTTP transport. It is used by the built-in Orchestrator and can also be used by external AI agents. See [MCP Server](../usage/mcp.md) for full details.
 
 ### Praxis Agent Settings
 
@@ -434,7 +423,7 @@ For production and multi-instance deployments, use PostgreSQL. See [Database Con
 
 | Service | Port | Protocol |
 |---------|------|----------|
-| MCP SSE Server | 8585 | HTTP |
+| MCP Server | 8585 | HTTP |
 | Claude Bridge CCRv1 | 8586 | WS |
 | Claude Bridge CCRv2 | 8587 | HTTP |
 | RabbitMQ | 5672 | AMQP |

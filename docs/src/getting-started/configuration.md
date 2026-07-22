@@ -40,11 +40,7 @@ base URL.
 
 Once you've added models, assign them to features under **Feature Selection**:
 
-**Orchestrator** - Powers the free-form Orchestrator chat. Needs a capable model that follows tool-calling instructions reliably.
-
-**Documentation Helper** - Powers the [Help Assistant](../usage/help-assistant.md) (`Ctrl+H`). Falls back to the Orchestrator model when unset.
-
-**Orchestrator** - Powers the conversational Orchestrator agent. This is the "brain" that orchestrates what the agent should do. Pick something capable. A companion **Max Tokens** setting caps how long its responses can run.
+**Orchestrator** - Powers the free-form Orchestrator chat. This is the "brain" that orchestrates what the agent should do — needs a capable model that follows tool-calling instructions reliably. A companion **Max Tokens** setting caps how long its responses can run.
 
 **Semantic Operations** - Used when executing operations through agents. Pick something capable.
 
@@ -52,7 +48,7 @@ Once you've added models, assign them to features under **Feature Selection**:
 
 **Traffic Parser** - Summarizes intercepted traffic. Again, speed is valuable; you don't need the most powerful model.
 
-**Documentation Helper** - Powers the in-app Help Assistant (`Ctrl+H`), which answers questions about using Praxis from the bundled documentation. A fast, capable model works well.
+**Documentation Helper** - Powers the [Help Assistant](../usage/help-assistant.md) (`Ctrl+H`), which answers questions about using Praxis from the bundled documentation. Falls back to the Orchestrator model when unset.
 
 ### Speed vs. Capability
 

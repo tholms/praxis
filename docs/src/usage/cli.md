@@ -104,8 +104,8 @@ table.
 
 When opened, the TUI first checks the service cache for existing recon
 data. If none is cached, it sends an ACP `_praxis/recon` request to the
-node and polls `request_recon` every second for up to 60 seconds. Cached
-recon data appears instantly on re-open.
+node and polls `request_recon` roughly every 1.5 seconds for up to ~90
+seconds. Cached recon data appears instantly on re-open.
 
 Press `Ctrl+E` on a Config leaf to open the selected file in
 `$VISUAL`/`$EDITOR`; on a clean exit with changes, the new contents are
