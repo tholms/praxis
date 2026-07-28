@@ -242,9 +242,10 @@ This enables branching workflows with error handling paths.
 ### Per-Block Configuration
 
 Operation, Transform, and GenericPrompt elements support per-block configuration overrides:
+
 - **Max Runtime** - Timeout in seconds for this specific element
 - **YOLO Mode** - Enable auto-approve for this element's session
-- **Working Directory** - Override the working directory
+- **Working Directory** - Override the chain or session-group working directory. If the override differs from an active shared session's directory, the block runs in an isolated temporary session and the shared session resumes afterward.
 - **Require All Inputs** - When disabled, a merge-point element runs as soon as any upstream input arrives (instead of waiting for all branches). Useful in conditional chains where not all paths execute.
 
 ### Building a Chain

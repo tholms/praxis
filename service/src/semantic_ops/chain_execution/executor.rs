@@ -18,7 +18,7 @@ use crate::acp_node_proxy::AcpNodeProxy;
 use crate::config::ServiceConfig;
 use crate::database::Database;
 use crate::database::{
-    ChainDefinition, ChainElement, ChainExecutionRecord, OperationRecord, SessionGroup,
+    ChainDefinition, ChainElement, ChainExecutionRecord, OperationRecord,
 };
 use crate::semantic_ops::{close_session, create_session, execute_one_shot};
 use crate::tools::ToolkitManager;
@@ -26,6 +26,29 @@ use crate::tools::ToolkitManager;
 use super::graph::ExecutionGraph;
 use super::implicit::is_implicit_chain;
 use super::state::{ChainExecutionRegistry, ChainExecutionState};
+
+#[derive(Debug, PartialEq, Eq)]
+struct BlockExecutionSettings {
+    max_runtime: Option<u64>,
+    working_dir: Option<String>,
+    isolates_shared_session: bool,
+}
+
+fn block_execution_settings(
+    element: &ChainElement,
+    inherited_working_dir: Option<String>,
+) -> BlockExecutionSettings {
+    let block_config = element.block_config();
+    let working_dir_override = block_config.and_then(|config| config.working_dir.clone());
+    let isolates_shared_session = working_dir_override.is_some()
+        && working_dir_override.as_ref() != inherited_working_dir.as_ref();
+
+    BlockExecutionSettings {
+        max_runtime: block_config.and_then(|config| config.max_runtime),
+        working_dir: working_dir_override.or(inherited_working_dir),
+        isolates_shared_session,
+    }
+}
 
 struct CancelHandle {
     cancel_token: CancellationToken,
@@ -627,15 +650,31 @@ impl ChainExecutor {
                 input
             };
 
+            let inherited_working_dir = graph
+                .get_session_group(&element_id)
+                .and_then(|group| group.working_dir.clone())
+                .or_else(|| working_dir.clone());
+            let block_settings = block_execution_settings(&node.element, inherited_working_dir);
             let block_yolo = node.element.block_config().and_then(|bc| bc.yolo_mode);
             let yolo_mode = block_yolo.unwrap_or(current_session_yolo_mode);
+            let element_session =
+                if active_session.is_some() && block_settings.isolates_shared_session {
+                    common::log_info!(
+                        "Chain element {} uses an isolated session for working directory {:?}",
+                        common::short_id(&element_id),
+                        block_settings.working_dir
+                    );
+                    None
+                } else {
+                    active_session.clone()
+                };
 
             let (elem_config, elem_context) = match &node.element {
                 ChainElement::Trigger { .. } => (
                     ElementConfig::Trigger,
                     ElementContext {
                         input: String::new(),
-                        session_id: active_session.clone(),
+                        session_id: element_session.clone(),
                         yolo_mode,
                         is_first_in_session,
                     },
@@ -651,7 +690,7 @@ impl ChainExecutor {
                     },
                     ElementContext {
                         input: merged_input.clone(),
-                        session_id: active_session.clone(),
+                        session_id: element_session.clone(),
                         yolo_mode,
                         is_first_in_session,
                     },
@@ -665,7 +704,7 @@ impl ChainExecutor {
                     },
                     ElementContext {
                         input: merged_input.clone(),
-                        session_id: active_session.clone(),
+                        session_id: element_session.clone(),
                         yolo_mode,
                         is_first_in_session,
                     },
@@ -676,7 +715,7 @@ impl ChainExecutor {
                     },
                     ElementContext {
                         input: merged_input.clone(),
-                        session_id: active_session.clone(),
+                        session_id: element_session.clone(),
                         yolo_mode,
                         is_first_in_session,
                     },
@@ -815,8 +854,9 @@ impl ChainExecutor {
                             &merged_input,
                             is_first_in_session,
                             yolo_mode,
-                            &active_session,
-                            &working_dir,
+                            &element_session,
+                            &block_settings.working_dir,
+                            block_settings.max_runtime,
                             &node_id,
                             &agent_short_name,
                             &config,
@@ -843,28 +883,25 @@ impl ChainExecutor {
                             model_ref,
                             &merged_input,
                             &config,
+                            block_settings.max_runtime,
                         ) => {
                             (result, None, None)
                         }
                     }
                 }
-                ChainElement::GenericPrompt {
-                    prompt,
-                    session_group,
-                    ..
-                } => {
+                ChainElement::GenericPrompt { prompt, .. } => {
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             (Err(anyhow::anyhow!("Chain execution cancelled")), None, None)
                         }
                         result = Self::execute_generic_prompt(
                             prompt,
-                            session_group,
                             &merged_input,
                             is_first_in_session,
-                            &active_session,
+                            &element_session,
                             yolo_mode,
-                            &working_dir,
+                            &block_settings.working_dir,
+                            block_settings.max_runtime,
                             &node_id,
                             &agent_short_name,
                             &rabbitmq_channel,
@@ -1058,6 +1095,7 @@ impl ChainExecutor {
         yolo_mode_override: bool,
         active_session: &Option<String>,
         working_dir: &Option<String>,
+        max_runtime: Option<u64>,
         node_id: &str,
         agent_short_name: &str,
         config: &Arc<TokioRwLock<ServiceConfig>>,
@@ -1089,7 +1127,7 @@ impl ChainExecutor {
             name: op_def.name.clone(),
             description: op_def.description.clone(),
             agent_info: op_def.agent_info.clone(),
-            timeout: op_def.timeout,
+            timeout: max_runtime.unwrap_or(op_def.timeout),
             operation_prompt: full_prompt,
             mode: op_def.mode.clone(),
             agent_iterations: op_def.agent_iterations,
@@ -1124,7 +1162,8 @@ impl ChainExecutor {
 
         let (_op_cancel_tx, op_cancel_rx) = oneshot::channel::<()>();
 
-        let prompt_timeout_secs = Some(config.read().await.get_prompt_timeout_secs());
+        let prompt_timeout_secs =
+            Some(max_runtime.unwrap_or(config.read().await.get_prompt_timeout_secs()));
         let (op_result, semantic_success): (Result<(String, String)>, Option<bool>) =
             match crate::semantic_ops::execute_by_mode(
                 &op_id,
@@ -1188,53 +1227,63 @@ impl ChainExecutor {
         model_ref: &Option<String>,
         merged_input: &str,
         config: &Arc<TokioRwLock<ServiceConfig>>,
+        max_runtime: Option<u64>,
     ) -> Result<String> {
-        let config_guard = config.read().await;
-        let model_def = if let Some(mref) = model_ref {
-            config_guard.find_model_definition(mref).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Model '{}' not found. Configure in Settings > LLM Providers.",
-                    mref
-                )
-            })?
-        } else {
-            config_guard.get_semantic_ops_model_def().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No LLM configured for transform. Configure in Settings > LLM Providers."
-                )
-            })?
+        let execute = async {
+            let config_guard = config.read().await;
+            let model_def = if let Some(mref) = model_ref {
+                config_guard.find_model_definition(mref).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Model '{}' not found. Configure in Settings > LLM Providers.",
+                        mref
+                    )
+                })?
+            } else {
+                config_guard.get_semantic_ops_model_def().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No LLM configured for transform. Configure in Settings > LLM Providers."
+                    )
+                })?
+            };
+            let (provider_str, model_name, api_key, base_url) = (
+                model_def.provider,
+                model_def.model,
+                model_def.api_key,
+                model_def.base_url,
+            );
+            drop(config_guard);
+
+            let provider = Provider::from_str(&provider_str)
+                .ok_or_else(|| anyhow::anyhow!("Unknown provider: {}", provider_str))?;
+            let client = create_ai_client(provider, api_key, base_url.as_deref())?;
+
+            let user_content = if merged_input.is_empty() {
+                prompt.to_string()
+            } else {
+                format!("{}\n\n{}", merged_input, prompt)
+            };
+            let messages = vec![Message::user(user_content)];
+
+            execute_chat_completion(&client, model_name, messages, Some(8192)).await
         };
-        let (provider_str, model_name, api_key, base_url) = (
-            model_def.provider,
-            model_def.model,
-            model_def.api_key,
-            model_def.base_url,
-        );
-        drop(config_guard);
 
-        let provider = Provider::from_str(&provider_str)
-            .ok_or_else(|| anyhow::anyhow!("Unknown provider: {}", provider_str))?;
-        let client = create_ai_client(provider, api_key, base_url.as_deref())?;
-
-        let user_content = if merged_input.is_empty() {
-            prompt.to_string()
-        } else {
-            format!("{}\n\n{}", merged_input, prompt)
-        };
-        let messages = vec![Message::user(user_content)];
-
-        execute_chat_completion(&client, model_name, messages, Some(8192)).await
+        match max_runtime {
+            Some(seconds) => tokio::time::timeout(std::time::Duration::from_secs(seconds), execute)
+                .await
+                .map_err(|_| anyhow::anyhow!("Transform timed out after {} seconds", seconds))?,
+            None => execute.await,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn execute_generic_prompt(
         prompt: &str,
-        session_group: &Option<SessionGroup>,
         merged_input: &str,
         is_first_in_session: bool,
         active_session: &Option<String>,
         yolo_mode: bool,
         working_dir: &Option<String>,
+        max_runtime: Option<u64>,
         node_id: &str,
         agent_short_name: &str,
         rabbitmq_channel: &Channel,
@@ -1262,20 +1311,18 @@ impl ChainExecutor {
             name: "Generic Prompt".to_string(),
             description: "Send prompt to agent".to_string(),
             agent_info: String::new(),
-            timeout: 120,
+            timeout: max_runtime.unwrap_or(120),
             operation_prompt: prompt_to_send,
             mode: "one-shot".to_string(),
             agent_iterations: 1,
-            yolo_mode: session_group
-                .as_ref()
-                .map(|sg| sg.yolo_mode)
-                .unwrap_or(yolo_mode),
+            yolo_mode,
             model_ref: None,
         };
 
         let op_id = Uuid::new_v4().to_string();
         let (_op_cancel_tx, op_cancel_rx) = oneshot::channel::<()>();
-        let prompt_timeout_secs = Some(config.read().await.get_prompt_timeout_secs());
+        let prompt_timeout_secs =
+            Some(max_runtime.unwrap_or(config.read().await.get_prompt_timeout_secs()));
 
         //
         // If there's no active session, the executor will create a
@@ -1367,4 +1414,72 @@ fn has_any_fired_input(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::BlockConfig;
+
+    fn operation(block_config: Option<BlockConfig>) -> ChainElement {
+        ChainElement::Operation {
+            id: "test-operation".to_string(),
+            operation_name: "test".to_string(),
+            model_ref: None,
+            session_group: None,
+            block_config,
+        }
+    }
+
+    #[test]
+    fn block_execution_settings_inherit_chain_working_directory() {
+        let settings =
+            block_execution_settings(&operation(None), Some("/workspace/chain".to_string()));
+
+        assert_eq!(
+            settings,
+            BlockExecutionSettings {
+                max_runtime: None,
+                working_dir: Some("/workspace/chain".to_string()),
+                isolates_shared_session: false,
+            }
+        );
+    }
+
+    #[test]
+    fn block_execution_settings_apply_runtime_and_working_directory_overrides() {
+        let settings = block_execution_settings(
+            &operation(Some(BlockConfig {
+                max_runtime: Some(30),
+                yolo_mode: None,
+                working_dir: Some("/workspace/block".to_string()),
+                require_all_inputs: None,
+            })),
+            Some("/workspace/chain".to_string()),
+        );
+
+        assert_eq!(
+            settings,
+            BlockExecutionSettings {
+                max_runtime: Some(30),
+                working_dir: Some("/workspace/block".to_string()),
+                isolates_shared_session: true,
+            }
+        );
+    }
+
+    #[test]
+    fn matching_working_directory_keeps_shared_session() {
+        let settings = block_execution_settings(
+            &operation(Some(BlockConfig {
+                max_runtime: None,
+                yolo_mode: None,
+                working_dir: Some("/workspace/shared".to_string()),
+                require_all_inputs: None,
+            })),
+            Some("/workspace/shared".to_string()),
+        );
+
+        assert!(!settings.isolates_shared_session);
+    }
 }
