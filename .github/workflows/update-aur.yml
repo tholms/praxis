@@ -97,19 +97,6 @@ jobs:
           sed -i "s/^pkgrel=.*/pkgrel=${NEW_REL}/" PKGBUILD
           sed -i "s/pkgrel = .*/pkgrel = ${NEW_REL}/" .SRCINFO
 
-      - name: Commit to praxis repo
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          git config user.name "David Kaplan"
-          git config user.email "davkaplan@gmail.com"
-          git add pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Update AUR package to v${VERSION}"
-            git push
-          fi
-
       - name: Push to AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
@@ -218,19 +205,6 @@ jobs:
           sed -i "s/^pkgrel=.*/pkgrel=${NEW_REL}/" PKGBUILD
           sed -i "s/pkgrel = .*/pkgrel = ${NEW_REL}/" .SRCINFO
 
-      - name: Commit bin to praxis repo
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          git config user.name "David Kaplan"
-          git config user.email "davkaplan@gmail.com"
-          git add pkg/aur/praxis-bin/PKGBUILD pkg/aur/praxis-bin/.SRCINFO
-          if git diff --cached --quiet; then
-            echo "No bin changes to commit"
-          else
-            git commit -m "Update AUR praxis-bin package to v${VERSION}"
-            git push
-          fi
-
       - name: Push bin to AUR
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
@@ -268,3 +242,20 @@ jobs:
             sleep $((i * 15))
           done
           exit 1
+
+      # Commit only after both AUR repositories have accepted their updates.
+      # If AUR is in maintenance, main remains unchanged and a retry can
+      # publish both packages without leaving a partial GitHub update.
+      - name: Commit AUR files to praxis repo
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          git config user.name "David Kaplan"
+          git config user.email "davkaplan@gmail.com"
+          git add pkg/aur/praxis/PKGBUILD pkg/aur/praxis/.SRCINFO
+          git add pkg/aur/praxis-bin/PKGBUILD pkg/aur/praxis-bin/.SRCINFO
+          if git diff --cached --quiet; then
+            echo "No AUR changes to commit"
+          else
+            git commit -m "Update AUR packages to v${VERSION}"
+            git push
+          fi
