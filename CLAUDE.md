@@ -96,6 +96,57 @@
 4. **Create PR**: Create a PR from `prerelease` into `main` with a clear, well-written description summarizing all changes since the last release.
 5. **Squash merge**: Squash-merge the PR into `main`.
 6. **GitHub release**: Create a GitHub release on `main` with an excellent changelog covering all notable changes, new features, fixes, and breaking changes.
+
+   Use this structure for the release body, matching the v1.0.0 release-note
+   format:
+
+   ```markdown
+   # Praxis vX.Y.Z
+
+   Short, accurate release summary.
+
+   ## Highlights
+
+   - Most important user-facing change
+   - Most important fix or operational change
+
+   ## New features
+
+   ### Feature area
+
+   - Explain what was added and how it is used.
+
+   ## Fixes
+
+   - Explain the corrected behavior and its user impact.
+
+   ## Platform
+
+   - Packaging, Docker, installer, or platform-specific changes.
+
+   ## Documentation
+
+   - New or substantially revised documentation.
+
+   ## Breaking / behavioural notes
+
+   - Any compatibility or behavior changes; omit this section when none exist.
+
+   ## Validation
+
+   - Test and build results, including platform coverage.
+
+   ## Upgrade
+
+   1. Required deployment or configuration steps.
+
+   **Full PR:** https://github.com/originsec/praxis/pull/NNN
+   ```
+
+   Derive every bullet from the complete diff between the previous release tag
+   and the release tag. Do not describe a documentation page as a new product
+   feature unless the corresponding implementation changed; connector pages,
+   examples, and reference tables may document existing behavior.
 7. **Tag and push**: Create a version tag matching the version number set on the `prerelease` branch (e.g., `v0.10.0`), push the tag, and push the release.
 8. **AUR package**: Handled automatically — a GitHub Action updates the `originsec/praxis-aur` repo on each release.
 9. **Back-merge into `prerelease`**: After the release completes (and once the automated AUR commits have landed on `main`), merge `main` back into `prerelease`. The squash-merge from step 5 and the AUR auto-commits land only on `main`, so without this step `prerelease` drifts behind `main`. That drift makes the next release PR show a misleading merge-base diff and risks silently reverting `main`-only changes (e.g. hotfixes merged directly to `main`) when squash-merged.
